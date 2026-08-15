@@ -115,7 +115,9 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
-import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane, type PaneRead } from './keys-card.ts'
+import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
+  PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
+  type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
@@ -14517,20 +14519,84 @@ async function readPaneForKeys(pane: string | null): Promise<PaneRead> {
   }
 }
 
-async function keysCardFor(sid: string, last?: { key: string; name: string; pane: string; at: string; ok: boolean }):
+// `withPreview` decides between the two renders of one card: with the terminal screenshot (what a
+// tap or a /keys produces) and without it (what the 30s revert leaves behind). Same reader
+// `/terminal` uses, so the screen shown here and the screen that command dumps cannot drift.
+async function keysCardFor(sid: string, last?: KeysReceipt, withPreview = false):
   Promise<{ text: string; buttons: Array<Array<{ text: string; data: string }>> }> {
   const targets = await keysTargets()
   const me = targets.find(t => t.sid === sid)
   const pane = me?.pane ?? (await paneForSession(sid).catch(() => null))
   const name = me?.name ?? nameForEndpoint(sid, busEndpoints())
+  const state = describePane(await readPaneForKeys(pane))
+  const preview = withPreview ? (pane ? await captureTerminalTail(pane, PREVIEW_LINES) : null) : undefined
   return {
-    text: keysCardText({ name, pane, state: describePane(await readPaneForKeys(pane)), last }),
+    text: keysCardText({ name, pane, state, last, ...(withPreview ? { preview } : {}) }),
     buttons: keysKeyboard(sid, { pickable: targets.length > 1 }),
   }
 }
 
 const kbMarkup = (rows: Array<Array<{ text: string; data: string }>>) =>
   ({ inline_keyboard: rows.map(r => r.map(b => ({ text: b.text, callback_data: b.data }))) })
+
+// ---- the preview's 30-second window --------------------------------------------------------------
+//
+// Armed per CARD (chat + message id), never per session: two cards can be open on two sessions and
+// each owns its own window. Re-arming is what a tap and a Refresh both do — one live window per
+// card, always the latest, so a tap inside the window cannot leave a second timer behind to revert a
+// card the owner is still using.
+//
+// PERSISTED, for the one failure an in-process timer cannot cover: a restart inside the window kills
+// the timer but not the screenshot, which would then sit in the chat forever. Same shape and the same
+// reasoning as the paste-in-flight record, and the receipt rides along so the revert does not throw
+// away the line that says which key landed where.
+const KEYS_PREVIEW_FILE = join(STATE_DIR, 'keys-preview.json')
+const keysPreviewTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function loadArmedPreviews(): PreviewStore {
+  const raw = readJsonFile<unknown>(KEYS_PREVIEW_FILE, {})
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as PreviewStore : {}
+}
+const saveArmedPreviews = (v: PreviewStore): void => { try { writeJsonFile(KEYS_PREVIEW_FILE, v) } catch {} }
+
+// The timer and the record are dropped together, always — a record with no timer is a preview nobody
+// will ever revert, and a timer with no record is an edit that would fire against nothing.
+function disarmKeysPreview(key: string): void {
+  const t = keysPreviewTimers.get(key)
+  if (t) clearTimeout(t)
+  keysPreviewTimers.delete(key)
+  saveArmedPreviews(disarmPreview(loadArmedPreviews(), key))
+}
+
+function armKeysPreview(rec: Omit<PreviewRecord, 'at'>): void {
+  const key = previewKey(rec.chat, rec.msgId)
+  disarmKeysPreview(key)   // one live window per card: re-arming replaces, it never races
+  saveArmedPreviews(armPreview(loadArmedPreviews(), rec, Date.now()))
+  const t = setTimeout(() => void revertKeysPreview(key).catch(() => {}), PREVIEW_TTL_MS)
+  t.unref?.()
+  keysPreviewTimers.set(key, t)
+}
+
+// Buttons-only. RE-RENDERED rather than string-surgered out of the old text, so what it leaves behind
+// is a current state line rather than a thirty-second-old one — and every button survives, because the
+// buttons are the part of this card worth keeping.
+async function revertKeysPreview(key: string): Promise<void> {
+  const rec = loadArmedPreviews()[key]
+  disarmKeysPreview(key)
+  if (!rec) return
+  const card = await keysCardFor(rec.sid, rec.last)
+  await channel.editText(
+    { chatId: rec.chat, messageId: String(rec.msgId), ...(rec.thread ? { threadId: String(rec.thread) } : {}) },
+    card.text, { buttons: card.buttons },
+  ).catch(() => {})   // the card may have been deleted; the record is gone either way
+}
+
+// Startup: whatever was armed when we went down. A message that no longer exists just fails the edit.
+async function revertStrandedKeysPreviews(): Promise<void> {
+  const keys = strandedPreviews(loadArmedPreviews())
+  if (keys.length) process.stderr.write(`daemon: reverting ${keys.length} /keys preview(s) stranded by a restart\n`)
+  for (const k of keys) await revertKeysPreview(k).catch(() => {})
+}
 
 bot.command('keys', sendKeysCard)
 bot.command('unstick', sendKeysCard)   // the job, not the mechanism — a typed alias, kept out of the menu
@@ -14548,10 +14614,11 @@ async function sendKeysCard(ctx: Context): Promise<void> {
     }).catch(() => {})
     return
   }
-  const card = await keysCardFor(sid)
-  await ctx.reply(card.text, {
+  const card = await keysCardFor(sid, undefined, true)
+  const sent = await ctx.reply(card.text, {
     parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: kbMarkup(card.buttons),
-  }).catch(() => {})
+  }).catch(() => null)
+  if (sent) armKeysPreview({ chat: String(sent.chat.id), msgId: sent.message_id, sid, ...(thread ? { thread } : {}) })
 }
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
@@ -16866,13 +16933,25 @@ bot.on('callback_query:data', async ctx => {
   const keysAction = parseKeysCallback(data)
   if (keysAction) {
     if (!(await cbAuth(ctx))) return
-    const redraw = async (sid: string, last?: { key: string; name: string; pane: string; at: string; ok: boolean }) => {
-      const card = await keysCardFor(sid, last)
+    // The card this tap came from, which is what a preview window belongs to.
+    const cardChat = String(ctx.chat?.id ?? '')
+    const cardMsg = ctx.callbackQuery.message?.message_id
+    const cardThread = ctx.callbackQuery.message?.message_thread_id
+    const cardKey = cardMsg != null ? previewKey(cardChat, cardMsg) : null
+    // Every redraw shows the screen again and RE-ARMS: looking after a tap is the whole point, and a
+    // fresh window replaces the old one rather than racing it.
+    const redraw = async (sid: string, last?: KeysReceipt) => {
+      const card = await keysCardFor(sid, last, true)
       await ctx.editMessageText(card.text, { parse_mode: 'HTML', reply_markup: kbMarkup(card.buttons) }).catch(() => {})
+      if (cardKey && cardMsg != null)
+        armKeysPreview({ chat: cardChat, msgId: cardMsg, sid, ...(cardThread ? { thread: cardThread } : {}), ...(last ? { last } : {}) })
     }
     if (keysAction.kind === 'pick') {
       const targets = await keysTargets()
       await ctx.answerCallbackQuery().catch(() => {})
+      // The card stops being a keys card, so its window must stop too — a timer left running here
+      // would edit the session picker back into a keys card half a minute later.
+      if (cardKey) disarmKeysPreview(cardKey)
       await ctx.editMessageText(pickerCardText(targets.length), {
         parse_mode: 'HTML', ...(targets.length ? { reply_markup: kbMarkup(pickerKeyboard(targets)) } : {}),
       }).catch(() => {})
@@ -20403,6 +20482,9 @@ setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // The recorded-strand half. On the sweep because a pane that was mid-turn when the daemon died is
 // only recoverable once it goes idle — and ONCE AT STARTUP, a few seconds in, which is the case this
 // whole feature exists for: the message pasted moments before the process was killed.
+// A /keys preview armed when we went down: its 30s timer died with the process, so the screenshot
+// would sit in the chat forever. One sweep at startup is the whole recovery — see armKeysPreview.
+setTimeout(() => void revertStrandedKeysPreviews().catch(() => {}), 4_000).unref()
 setInterval(() => void recoverStrandedPastes().catch(() => {}), 25_000).unref()
 setTimeout(() => void recoverStrandedPastes().catch(() => {}), 6_000).unref()
 setInterval(() => { if (loginHeldPanes.size) void sweepLoginHolds() }, 5_000).unref()   // no-op unless a login episode is open

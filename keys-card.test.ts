@@ -2,7 +2,8 @@
 // a keystroke can be requested by tap, so it must not widen past `tg keys`) and the state line (a tap
 // the owner cannot predict is worse than no button at all).
 import { test, expect } from 'bun:test'
-import { parseKeysCallback, keysKeyboard, pickerKeyboard, describePane, keysCardText, KEY_ROWS } from './keys-card.ts'
+import { parseKeysCallback, keysKeyboard, pickerKeyboard, describePane, keysCardText, previewBlock,
+  KEY_ROWS, PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews } from './keys-card.ts'
 import { KEY_NAMES, normalizeKeys } from './keys-plan.ts'
 
 test('every button on the card is a key the bus verb would also accept', () => {
@@ -73,6 +74,82 @@ test('the state line escapes what the input box holds', () => {
   // A pane's box can hold anything; the card is HTML.
   expect(describePane({ alive: true, working: false, queued: false, atPrompt: true, box: '<b>x</b> & y' }))
     .toContain('&lt;b&gt;x&lt;/b&gt; &amp; y')
+})
+
+test('the preview is escaped, and a card without one carries no block at all', () => {
+  const withPre = keysCardText({ name: 'chat', pane: '%72', state: 's', preview: 'a <b>&</b> b' })
+  expect(withPre).toContain('<pre>a &lt;b&gt;&amp;&lt;/b&gt; b</pre>')
+  // `undefined` is the 30s revert's render: no block, and the header/state/receipt survive intact.
+  const reverted = keysCardText({
+    name: 'chat', pane: '%72', state: 'STATE',
+    last: { key: 'Enter', name: 'chat', pane: '%72', at: '08:44:12Z', ok: true },
+  })
+  expect(reverted).not.toContain('<pre>')
+  expect(reverted).toContain('STATE')
+  expect(reverted).toContain('Enter')
+})
+
+test('a failed capture and a quiet pane are different facts', () => {
+  expect(previewBlock(null)).toContain('couldn’t read')
+  expect(previewBlock('')).toBe('')
+  expect(previewBlock('\n  \n')).toBe('')       // whitespace is not a screen worth showing
+})
+
+test('the preview never overflows a Telegram message, and drops from the TOP when it must', () => {
+  // A 200-column, 30-line pane is 6000 raw chars — over the 4096 ceiling, where an overflowing card
+  // is NOT a clipped card, it is no card. Width is truncated so the line COUNT survives; whole lines
+  // go only when width alone is not enough, and always the oldest.
+  const wide = Array.from({ length: PREVIEW_LINES }, (_, i) => `line${i} ` + 'x'.repeat(200)).join('\n')
+  const block = previewBlock(wide)
+  expect(block.length).toBeLessThan(4096 - 400)
+  expect(block).toContain(`line${PREVIEW_LINES - 1}`)          // the newest line always survives
+  expect(block).not.toContain('line0 ')                        // the oldest is what went
+  expect(block).toContain('trimmed to fit')                    // and the card says so
+  // A pane whose lines fit keeps all thirty and says nothing about trimming.
+  const narrow = Array.from({ length: PREVIEW_LINES }, (_, i) => `line${i}`).join('\n')
+  const ok = previewBlock(narrow)
+  expect(ok).toContain('line0')
+  expect(ok).not.toContain('trimmed to fit')
+  // Ampersands quadruple under escaping — the budget is counted on the escaped text or this passes
+  // in the test and overflows in the chat.
+  expect(previewBlock(Array.from({ length: PREVIEW_LINES }, () => '&'.repeat(200)).join('\n')).length)
+    .toBeLessThan(4096 - 400)
+})
+
+test('one live preview window per CARD — arming replaces, it never races', () => {
+  // The failure this exists to stop: a tap inside a live window leaving two timers, so the card the
+  // owner is still using gets reverted by the older one.
+  const rec = { chat: '837047563', msgId: 900, sid: '74e5aedb' }
+  let s = armPreview({}, rec, 1_000)
+  s = armPreview(s, { ...rec, last: { key: 'Enter', name: 'chat', pane: '%72', at: 'x', ok: true } }, 2_000)
+  expect(Object.keys(s)).toEqual([previewKey('837047563', 900)])
+  expect(s[previewKey('837047563', 900)]!.at).toBe(2_000)        // the LATEST window is the live one
+  expect(s[previewKey('837047563', 900)]!.last?.key).toBe('Enter')  // …and the receipt rides along
+  // A different card in the same chat is a different window.
+  s = armPreview(s, { chat: '837047563', msgId: 901, sid: 'f1610de2' }, 3_000)
+  expect(Object.keys(s).length).toBe(2)
+  // The same message id in a different chat, too — the key is the pair, not either half.
+  s = armPreview(s, { chat: '999', msgId: 900, sid: '74e5aedb' }, 4_000)
+  expect(Object.keys(s).length).toBe(3)
+})
+
+test('disarming drops exactly one card, and is a no-op on one that was never armed', () => {
+  const s = armPreview(armPreview({}, { chat: 'c', msgId: 1, sid: 'a' }, 1), { chat: 'c', msgId: 2, sid: 'b' }, 2)
+  expect(Object.keys(disarmPreview(s, previewKey('c', 1)))).toEqual([previewKey('c', 2)])
+  expect(disarmPreview(s, previewKey('c', 99))).toBe(s)   // unchanged, same object
+})
+
+test('a restart strands every armed window, however old', () => {
+  // Age is deliberately not a filter: the OLDEST record is the one most in need of reverting, since
+  // its screenshot has been sitting in the chat the longest.
+  const s = armPreview(armPreview({}, { chat: 'c', msgId: 1, sid: 'a' }, 1), { chat: 'c', msgId: 2, sid: 'b' }, Date.now())
+  expect(strandedPreviews(s).sort()).toEqual([previewKey('c', 1), previewKey('c', 2)].sort())
+  expect(strandedPreviews({})).toEqual([])
+})
+
+test('the preview window is the 30 seconds the owner asked for', () => {
+  expect(PREVIEW_TTL_MS).toBe(30_000)
+  expect(PREVIEW_LINES).toBe(30)
 })
 
 test('the receipt names the key, the session AND the pane', () => {
