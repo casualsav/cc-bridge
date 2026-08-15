@@ -4850,10 +4850,25 @@ async function sweepBus(): Promise<void> {
 // frozen PIPELINE may be the lane itself, and the class this exists for is the one he found by waking
 // up. So: his DM, both alarms, never the lane. Nothing here re-issues, re-pastes or re-sends —
 // alarming and stopping is the design (owner ruling, ratified 2026-08-15).
-async function sendAlarmCard(html: string): Promise<void> {
+async function sendAlarmCard(kind: string, html: string): Promise<void> {
   // Not `silent` — every other bus card is, and that is exactly the difference between a status line
   // and an alarm. If it does not light up a phone it does not do its job.
-  for (const chat of listDmChatSessions().map(l => l.chatId)) await channel.sendText(chat, html).catch(() => {})
+  //
+  // The OUTCOME is logged, per chat, with the message id — an alarm whose delivery cannot be checked
+  // afterwards is an alarm nobody can trust, and this is the one send in the bus that has no reader
+  // downstream to notice its absence. No retry and no fallback on failure: a page the owner did not
+  // get is a fault to be seen, not smoothed over (CLAUDE.md's outbound rule — an unknown outcome is
+  // abandoned loudly), and the condition is re-evaluated on the next sweep anyway.
+  const chats = listDmChatSessions().map(l => l.chatId)
+  if (!chats.length) { process.stderr.write(`daemon: BUS ALARM ${kind} — NOT SENT: no DM chat lane to reach the owner\n`); return }
+  for (const chat of chats) {
+    try {
+      const ref = await channel.sendText(chat, html)
+      process.stderr.write(`daemon: BUS ALARM ${kind} delivered to ${chat} → message id ${ref.messageId}\n`)
+    } catch (e) {
+      process.stderr.write(`daemon: BUS ALARM ${kind} FAILED to ${chat} — ${e instanceof Error ? e.message : String(e)}\n`)
+    }
+  }
 }
 
 async function sweepBusAlarms(room: string): Promise<void> {
@@ -4889,8 +4904,8 @@ async function sweepBusAlarms(room: string): Promise<void> {
     })
   }
   if (stuck.length) {
-    await sendAlarmCard(stuckAlarmCard(stuck)).catch(() => {})
-    process.stderr.write(`daemon: BUS ALARM — ${stuck.length} stuck ask(s): ${stuck.map(s => `${s.id}/${s.kind}`).join(', ')}\n`)
+    process.stderr.write(`daemon: BUS ALARM stuck — ${stuck.length} stuck ask(s): ${stuck.map(s => `${s.id}/${s.kind}`).join(', ')}\n`)
+    await sendAlarmCard('stuck', stuckAlarmCard(stuck))
   }
   // B, and it reads the ledger rather than anything the bus believes about itself: the freeze this
   // catches may be one in which our own state stopped being updated.
@@ -4899,7 +4914,8 @@ async function sweepBusAlarms(room: string): Promise<void> {
   if (!planHeartbeat({ openAsks: open.length, lastEventAt, now, pagedFor: heartbeatPagedFor() })) return
   markHeartbeatPaged(lastEventAt)
   const oldest = open.slice().sort((a, b) => a.createdAt - b.createdAt)[0]
-  await sendAlarmCard(heartbeatCard({
+  process.stderr.write(`daemon: BUS ALARM heartbeat — no bus event for ${Math.round((now - lastEventAt) / 60_000)}m with ${open.length} ask(s) open\n`)
+  await sendAlarmCard('heartbeat', heartbeatCard({
     silentForMs: now - lastEventAt,
     openAsks: open.length,
     ...(oldest ? { oldest: {
@@ -4908,8 +4924,7 @@ async function sweepBusAlarms(room: string): Promise<void> {
       ageMs: now - oldest.createdAt,
       observed: (await isRunnable(oldest.toSid)) ? 'at a prompt, no turn running' : 'not at a prompt',
     } } : {}),
-  })).catch(() => {})
-  process.stderr.write(`daemon: BUS ALARM — heartbeat: no bus event for ${Math.round((now - lastEventAt) / 60_000)}m with ${open.length} ask(s) open\n`)
+  }))
 }
 
 // Deliver an answer to the ORIGINAL asker's pane. Shared by tg `answer` (a Claude endpoint answering)
