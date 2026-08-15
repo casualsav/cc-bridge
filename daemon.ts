@@ -115,6 +115,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
+import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane, type PaneRead } from './keys-card.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
@@ -14476,6 +14477,83 @@ bot.command('back', async ctx => {
   await ctx.reply(ok ? '✅ Back at the Claude prompt.' : '⚠️ Couldn’t return it to the prompt — check the session.').catch(() => {})
 })
 
+// ---- `/keys` — the owner's own `tg keys` (keys-card.ts) ------------------------------------------
+//
+// The bus verb refuses a chat lane ("the owner's own surface — owner-only"), which on 2026-08-15 left
+// exactly one lever for a wedged chat pane: a human at the terminal. This is that lever, on his
+// phone. Taps only, so there is no text parser here to confuse with a message; the vocabulary is the
+// bus verb's, checked at the parser.
+//
+// IMMUNE TO THE WEDGE IT FIXES, and that is a property of the path, not an aspiration: a tap arrives
+// as a callback_query and reaches the pane through `paneKeys` → `tmux send-keys`. It takes no turn in
+// `inboundInjectChain`, holds no delivery lock, and pastes nothing — so a delivery stuck mid-paste
+// cannot queue it behind itself. Verified live against a staged wedge (see HANDOFF/the commit).
+
+// Live Claude sessions that can be keyed, chat lanes INCLUDED — the exclusion in the bus verb is
+// about who is asking, not about which panes are keyable.
+async function keysTargets(): Promise<Array<{ sid: string; name: string; pane: string }>> {
+  const eps = busEndpoints().filter(e => e.kind === 'claude' && !e.closed)
+  const out: Array<{ sid: string; name: string; pane: string }> = []
+  for (const e of eps) {
+    const pane = await paneForSession(e.id).catch(() => null)
+    if (pane && (await paneAlive(pane).catch(() => false))) out.push({ sid: e.id, name: nameForEndpoint(e.id, eps), pane })
+  }
+  return out
+}
+
+// One read of the pane, shared by the card and the receipt. GHOST-AWARE on the box (inputBoxOccupant),
+// or the CLI's own faint suggestion would be reported to the owner as his stranded message.
+async function readPaneForKeys(pane: string | null): Promise<PaneRead> {
+  if (!pane || !(await paneAlive(pane).catch(() => false)))
+    return { alive: false, working: false, queued: false, atPrompt: false, box: null }
+  const cap = await capturePane(pane).catch(() => '')
+  const styled = await capturePaneStyled(pane).catch(() => '')
+  return {
+    alive: true,
+    working: !!cap && detectWorking(cap),
+    queued: !!cap && hasQueuedMessages(cap),
+    atPrompt: !!cap && onNormalPrompt(cap),
+    box: inputBoxOccupant(styled) || null,
+  }
+}
+
+async function keysCardFor(sid: string, last?: { key: string; name: string; pane: string; at: string; ok: boolean }):
+  Promise<{ text: string; buttons: Array<Array<{ text: string; data: string }>> }> {
+  const targets = await keysTargets()
+  const me = targets.find(t => t.sid === sid)
+  const pane = me?.pane ?? (await paneForSession(sid).catch(() => null))
+  const name = me?.name ?? nameForEndpoint(sid, busEndpoints())
+  return {
+    text: keysCardText({ name, pane, state: describePane(await readPaneForKeys(pane)), last }),
+    buttons: keysKeyboard(sid, { pickable: targets.length > 1 }),
+  }
+}
+
+const kbMarkup = (rows: Array<Array<{ text: string; data: string }>>) =>
+  ({ inline_keyboard: rows.map(r => r.map(b => ({ text: b.text, callback_data: b.data }))) })
+
+bot.command('keys', sendKeysCard)
+bot.command('unstick', sendKeysCard)   // the job, not the mechanism — a typed alias, kept out of the menu
+async function sendKeysCard(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  const { paneId, thread } = await targetPaneOf(ctx)
+  const sid = paneId ? await sessionForPane(paneId).catch(() => null) : null
+  if (!sid) {
+    // No session here is not a dead end: the picker is the whole point of the command in a General
+    // tab or an unbound DM.
+    const targets = await keysTargets()
+    await ctx.reply(pickerCardText(targets.length), {
+      parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}),
+      ...(targets.length ? { reply_markup: kbMarkup(pickerKeyboard(targets)) } : {}),
+    }).catch(() => {})
+    return
+  }
+  const card = await keysCardFor(sid)
+  await ctx.reply(card.text, {
+    parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: kbMarkup(card.buttons),
+  }).catch(() => {})
+}
+
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 // A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session via a two-button
 // card: 📁 <focused cwd>/<topic name> (one tap — name a tab "money" while the main session runs
@@ -16779,6 +16857,59 @@ bot.on('callback_query:data', async ctx => {
       pruneStuckCards(pane)
       resetPromptDedup(pane)
     }
+    return
+  }
+
+  // `/keys` card taps (keys-card.ts). Gated exactly like every other card — `cbAuth`, the same
+  // allowlist the typed commands use — and an agent cannot originate a callback query at all, so this
+  // adds no reachable path around the bus verb's refusals.
+  const keysAction = parseKeysCallback(data)
+  if (keysAction) {
+    if (!(await cbAuth(ctx))) return
+    const redraw = async (sid: string, last?: { key: string; name: string; pane: string; at: string; ok: boolean }) => {
+      const card = await keysCardFor(sid, last)
+      await ctx.editMessageText(card.text, { parse_mode: 'HTML', reply_markup: kbMarkup(card.buttons) }).catch(() => {})
+    }
+    if (keysAction.kind === 'pick') {
+      const targets = await keysTargets()
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(pickerCardText(targets.length), {
+        parse_mode: 'HTML', ...(targets.length ? { reply_markup: kbMarkup(pickerKeyboard(targets)) } : {}),
+      }).catch(() => {})
+      return
+    }
+    const name = nameForEndpoint(keysAction.sid, busEndpoints())
+    // Resolved at TAP time, never carried in the callback data — see keys-card.ts on why the target
+    // is a session id.
+    const pane = await paneForSession(keysAction.sid).catch(() => null)
+    if (!pane || !(await paneAlive(pane).catch(() => false))) {
+      await ctx.answerCallbackQuery({ text: `@${name} has no live pane.` }).catch(() => {})
+      await redraw(keysAction.sid)
+      return
+    }
+    if (keysAction.kind !== 'key') {   // 'refresh' and 'target' both just re-read the screen
+      await ctx.answerCallbackQuery().catch(() => {})
+      await redraw(keysAction.sid)
+      return
+    }
+    // The bus verb's rate limit, shared history map and all: a stuck finger cannot send fifty. Its
+    // MID-TURN gate is deliberately NOT applied here — that gate exists because an agent cannot look
+    // at the screen, and refusing on `detectWorking` would brick this card on exactly the wedge it
+    // exists for (a wedged pane can still be painting "esc to interrupt"). The card shows the state
+    // instead, so the tap is informed rather than blocked.
+    const rate = planKeyRate(keySendHistory.get(pane) ?? [], 1, Date.now())
+    if (!rate.ok) { await ctx.answerCallbackQuery({ text: rate.reason, show_alert: true }).catch(() => {}); return }
+    keySendHistory.set(pane, rate.next)
+    process.stderr.write(`daemon: /keys ${keysAction.key} → @${name} (${pane}) tapped by ${ctx.from?.id}\n`)
+    const ok = await paneKeys(pane, [keysAction.key], [300, 5000]).catch(() => false)
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'keys', from: 'owner', to: name, text: keysAction.key })
+    await ctx.answerCallbackQuery({ text: ok ? `${keysAction.key} → @${name} ${pane}` : `tmux refused ${keysAction.key}` }).catch(() => {})
+    await redraw(keysAction.sid, { key: keysAction.key, name, pane, at: new Date().toISOString().slice(11, 19) + 'Z', ok })
+    // Echo on the TARGET's own surface, as the bus verb does, so a keystroke that turns out to be a
+    // mistake is traceable from inside the session. Skipped for a chat lane: its surface IS the DM the
+    // owner just tapped in, and the card above already said it.
+    if (!isChatLaneSession(keysAction.sid))
+      await notifyBusText(keysAction.sid, `⌨️ ${keysAction.key} → this session's pane, sent by the owner`).catch(() => {})
     return
   }
 
@@ -22391,6 +22522,7 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
               { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
+              { command: 'keys', description: 'Buttons that send Enter / Esc / arrows to a stuck session’s pane' },
               { command: 'pin', description: 'Bring the status card down to the bottom (on · off · refresh)' },
               { command: 'sessions', description: 'Live sessions dashboard — model, context, state' },
               { command: 'settings', description: 'Channel settings — accounts, models, voice, stream, pin, GitHub' },
