@@ -116,6 +116,7 @@ import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } 
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
+import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, type StuckRow } from './bus-alarm.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
   type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
@@ -170,7 +171,7 @@ import { formatChannelBlock, appBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, stillQueued, markRunnable, markStuckPaged, heartbeatPagedFor, markHeartbeatPaged, lastLedgerEventAt, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
@@ -4837,6 +4838,78 @@ async function sweepBus(): Promise<void> {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
   }
   await evaluateWatches().catch(() => {})   // `tg watch` rides this tick; nothing new polls
+  // LAST in the sweep, deliberately: every alarm below asks "is this still stuck?", and asking it
+  // before the delivery loop above would page about rows this same tick was on its way to hand over.
+  await sweepBusAlarms(room).catch(() => {})
+}
+
+// ---- the stall alarms (ask 544) --------------------------------------------------------------
+//
+// The whole point is that these reach the HUMAN. A wedged worker gets escalated to the orchestrator
+// lane (wakeOrchestrator, and that stays right — unblocking a worker is what he delegates), but a
+// frozen PIPELINE may be the lane itself, and the class this exists for is the one he found by waking
+// up. So: his DM, both alarms, never the lane. Nothing here re-issues, re-pastes or re-sends —
+// alarming and stopping is the design (owner ruling, ratified 2026-08-15).
+async function sendAlarmCard(html: string): Promise<void> {
+  // Not `silent` — every other bus card is, and that is exactly the difference between a status line
+  // and an alarm. If it does not light up a phone it does not do its job.
+  for (const chat of listDmChatSessions().map(l => l.chatId)) await channel.sendText(chat, html).catch(() => {})
+}
+
+async function sweepBusAlarms(room: string): Promise<void> {
+  const now = Date.now()
+  const open = listPending().filter(p => !p.noReply || stillQueued(p))
+  // One capture per TARGET, not per row: an orchestrator fanning five asks at one worker would
+  // otherwise read the same screen five times every 15 seconds.
+  const runnableBySid = new Map<string, boolean>()
+  const isRunnable = async (sid: string): Promise<boolean> => {
+    const memo = runnableBySid.get(sid)
+    if (memo !== undefined) return memo
+    const pane = await paneForSession(sid).catch(() => null)
+    const cap = pane ? await capturePane(pane).catch(() => '') : ''
+    // No pane and no capture is NOT runnable — "we could not look" must never read as "it is sitting
+    // there ignoring us", which is the inconclusive-scan rule this repo already applies to reaping.
+    const r = cap ? planAskGate({ atPrompt: onNormalPrompt(cap), working: detectWorking(cap), queued: hasQueuedMessages(cap), bashArmed: bashModeArmed(cap) }) === 'deliver' : false
+    runnableBySid.set(sid, r)
+    return r
+  }
+  const stuck: StuckRow[] = []
+  for (const p of open) {
+    const runnable = await isRunnable(p.toSid)
+    if (stillQueued(p)) markRunnable(p.id, runnable ? (p.runnableSince ?? now) : null)
+    const kind = planStuckAlarm(getPending(p.id) ?? p, { runnable, now })
+    if (!kind) continue
+    markStuckPaged(p.id, now)
+    const blocked = boxBlockedFor(p)
+    stuck.push({
+      id: p.id, fromName: p.fromName, toName: p.toName, kind, ageMs: now - p.createdAt,
+      observed: blocked != null
+        ? `at a prompt, but its input box holds typed text (${JSON.stringify(blocked.slice(0, 40))}) so every paste is refused`
+        : runnable ? 'at a prompt, no turn running' : 'not at a prompt',
+    })
+  }
+  if (stuck.length) {
+    await sendAlarmCard(stuckAlarmCard(stuck)).catch(() => {})
+    process.stderr.write(`daemon: BUS ALARM — ${stuck.length} stuck ask(s): ${stuck.map(s => `${s.id}/${s.kind}`).join(', ')}\n`)
+  }
+  // B, and it reads the ledger rather than anything the bus believes about itself: the freeze this
+  // catches may be one in which our own state stopped being updated.
+  const lastEventAt = lastLedgerEventAt(room)
+  if (!lastEventAt) return   // no ledger to read = we cannot tell, and "cannot tell" never pages
+  if (!planHeartbeat({ openAsks: open.length, lastEventAt, now, pagedFor: heartbeatPagedFor() })) return
+  markHeartbeatPaged(lastEventAt)
+  const oldest = open.slice().sort((a, b) => a.createdAt - b.createdAt)[0]
+  await sendAlarmCard(heartbeatCard({
+    silentForMs: now - lastEventAt,
+    openAsks: open.length,
+    ...(oldest ? { oldest: {
+      id: oldest.id, fromName: oldest.fromName, toName: oldest.toName,
+      kind: stillQueued(oldest) ? 'undelivered' as const : 'unanswered' as const,
+      ageMs: now - oldest.createdAt,
+      observed: (await isRunnable(oldest.toSid)) ? 'at a prompt, no turn running' : 'not at a prompt',
+    } } : {}),
+  })).catch(() => {})
+  process.stderr.write(`daemon: BUS ALARM — heartbeat: no bus event for ${Math.round((now - lastEventAt) / 60_000)}m with ${open.length} ask(s) open\n`)
 }
 
 // Deliver an answer to the ORIGINAL asker's pane. Shared by tg `answer` (a Claude endpoint answering)

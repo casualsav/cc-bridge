@@ -9,7 +9,7 @@
 // monotonic ask id and hold a sessionId (never a pane id — panes churn on respawn/adopt, so the
 // daemon re-resolves the live pane at delivery time).
 import { isAbsolute, join, resolve, sep } from 'node:path'
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
 import { assigneeSpokeAboutAsk } from './ask-parity.ts'
@@ -169,6 +169,12 @@ export type BusPending = {
   // so — once. Not `expiredAt`: a held row is healthy and still deliverable, and stamping the field
   // that bars delivery would be the defect this exists to name. See heldTooLong.
   heldNoticeAt?: number
+  // Alarm A (ask 544). `runnableSince` = when this held row's target first became RUNNABLE with the
+  // row still un-injected, cleared the moment either stops being true; `stuckPagedAt` = the owner has
+  // been paged about this row, once. Both persisted for the reason heldNoticeAt is: this box deploys
+  // several times an hour, and an in-memory mark would re-page every open row on each restart.
+  runnableSince?: number
+  stuckPagedAt?: number
   askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
                              // (the TTL notice was withheld because the target had already answered it
                              // since). Persisted so the decision outlives the 200-row ledger window and a
@@ -237,6 +243,11 @@ export type BusState = {
   // ---- unreported work ----
   // Both are OPTIONAL in the type: agent-bus.json exists in production and was written by builds
   // that had never heard of them, so every read must tolerate the key being absent.
+  // Alarm B's dedup (ask 544): the `lastEventAt` we last paged the owner about. Keyed on the value,
+  // not on a boolean or a time, so the next bus row of any kind re-arms it for free — see
+  // planHeartbeat. Optional for the same reason the two maps below are: agent-bus.json on disk was
+  // written by builds that never heard of it.
+  heartbeatPagedFor?: number
   reportedAt?: Record<string, number>   // sid → when it last sent anything outbound on the bus
   briefedBy?: Record<string, { fromSid: string; fromName: string; at: number }>   // sid → who last briefed it
   // ---- id rotation ----
@@ -290,6 +301,8 @@ export function loadBus(): BusState {
         // "Told once" has to mean once across restarts too — this box ships several times an hour, and
         // an in-memory flag would re-notify every asker holding a long-held row on each deploy.
         ...(typeof p.heldNoticeAt === 'number' ? { heldNoticeAt: p.heldNoticeAt } : {}),
+        ...(typeof p.runnableSince === 'number' ? { runnableSince: p.runnableSince } : {}),
+        ...(typeof p.stuckPagedAt === 'number' ? { stuckPagedAt: p.stuckPagedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
         // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
@@ -341,6 +354,7 @@ export function loadBus(): BusState {
       pending,
       seen,
       depth,
+      ...(typeof raw.heartbeatPagedFor === 'number' ? { heartbeatPagedFor: raw.heartbeatPagedFor } : {}),
       reportedAt,
       briefedBy,
       used,
@@ -654,6 +668,40 @@ export function markHeldNotified(id: number, now: number): void {
   const p = store.pending[String(id)]
   if (!p || p.heldNoticeAt != null) return
   p.heldNoticeAt = now
+  save()
+}
+
+/**
+ * Alarm A(i)'s clock: this held row's target either IS runnable now (pass `now` — the first such
+ * sweep wins and later ones leave the original) or is not (pass null, which forgets). Only writes
+ * when the answer changes, because this is called for every open row on every 15s sweep and an
+ * unconditional save() would rewrite agent-bus.json four times a minute forever.
+ */
+export function markRunnable(id: number, now: number | null): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return
+  if (now == null) { if (p.runnableSince == null) return; delete p.runnableSince; save(); return }
+  if (p.runnableSince != null) return
+  p.runnableSince = now
+  save()
+}
+
+/** Record that the owner has been paged about this stuck row. Idempotent; fires once per row. */
+export function markStuckPaged(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.stuckPagedAt != null) return
+  p.stuckPagedAt = now
+  save()
+}
+
+/** Alarm B's dedup memo — the `lastEventAt` the owner was last paged about. */
+export const heartbeatPagedFor = (): number | undefined => { ensureLoaded(); return store.heartbeatPagedFor }
+export function markHeartbeatPaged(lastEventAt: number): void {
+  ensureLoaded()
+  if (store.heartbeatPagedFor === lastEventAt) return
+  store.heartbeatPagedFor = lastEventAt
   save()
 }
 
@@ -1149,6 +1197,15 @@ export function appendLedger(room: string, entry: LedgerEntry): void {
 }
 
 // The last `n` ledger entries, oldest first (for `tg history`). Silent [] when the room has none.
+// When the bus last moved, for alarm B — the ledger is append-only, so its mtime IS the timestamp of
+// the newest row of any kind. Deliberately NOT `tailLedger(room, 1)`: that reads and JSON-parses the
+// whole file (7MB and growing on this box), and this runs on every 15s sweep forever. 0 means "no
+// ledger yet", and planHeartbeat's caller must read that as "cannot tell", never as "silent since the
+// epoch" — the same inconclusive-scan rule the reaper follows.
+export function lastLedgerEventAt(room: string): number {
+  try { return statSync(ledgerFile(room)).mtimeMs } catch { return 0 }
+}
+
 export function tailLedger(room: string, n: number): LedgerEntry[] {
   let lines: string[]
   try { lines = readFileSync(ledgerFile(room), 'utf8').split('\n') } catch { return [] }

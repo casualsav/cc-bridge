@@ -14,7 +14,8 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createPending, loadBus, setBusStateDir, getPending } from './agent-bus.ts'
+import { createPending, loadBus, setBusStateDir, getPending, markRunnable, markStuckPaged, markHeartbeatPaged, heartbeatPagedFor } from './agent-bus.ts'
+import { planStuckAlarm, planHeartbeat, HEARTBEAT_SILENCE_MS } from './bus-alarm.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -40,4 +41,23 @@ test('an owner-direct ask survives a reload — the flag AND the message id', ()
   const reloaded = loadBus().pending[String(p.id)]
   expect(reloaded?.ownerDirect).toBe(true)
   expect(reloaded?.ownerMsgId).toBe(10224)
+})
+
+test('both stall-alarm dedup memos survive a restart — a deploy must never re-page (ask 544)', () => {
+  // This box ships several times an hour. An in-memory "already paged" mark would page the owner
+  // again for every open row on every deploy, which is how an alarm teaches its reader to ignore it.
+  // heartbeatPagedFor is a STORE-level field, so the BusPending enumeration above cannot see it —
+  // this round trip is its only guard.
+  setBusStateDir(mkdtempSync(join(tmpdir(), 'bus-alarm-persist-')))
+  const p = createPending({ fromSid: 'sid-lane', toSid: 'sid-worker', fromName: 'chat', toName: 'worker', text: 'queued unit', refs: [] }, 1_000)
+  markRunnable(p.id, 1_000)
+  markStuckPaged(p.id, 61_000)
+  markHeartbeatPaged(1_000)
+  const state = loadBus()
+  expect(state.pending[String(p.id)]?.stuckPagedAt).toBe(61_000)
+  expect(state.pending[String(p.id)]?.runnableSince).toBe(1_000)
+  expect(state.heartbeatPagedFor).toBe(1_000)
+  // The assertion that matters: the planners agree after the reload, so neither alarm re-fires.
+  expect(planStuckAlarm(state.pending[String(p.id)]!, { runnable: true, now: 60 * 60_000 })).toBeNull()
+  expect(planHeartbeat({ openAsks: 1, lastEventAt: 1_000, now: 1_000 + HEARTBEAT_SILENCE_MS, pagedFor: heartbeatPagedFor() })).toBe(false)
 })
