@@ -31,14 +31,16 @@ export type Snapshot = {
 
 /** `ps -A -o pid=,ppid=,args=` → the bridge-shaped rows. `keep(pid)` scopes them to one instance (a
  *  telegram-test daemon runs from the same cache dir; only its TELEGRAM_STATE_DIR differs). */
-export function parseBridgeProcs(ps: string, keep: (pid: number, kind: BridgeProc['kind']) => boolean): BridgeProc[] {
+export function parseBridgeProcs(ps: string, keep: (pid: number, kind: BridgeProc['kind']) => boolean, cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')): BridgeProc[] {
   const out: BridgeProc[] = []
   for (const line of ps.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
     if (!m) continue
     const args = m[3]!
+    // Rooted at OUR plugin cache: the deploy's own `bun test` runs daemon.ts from a sandbox `…/telegram/9.9.9/`
+    // (a fake HOME) for half a second and read as a DUPLICATE PAIR on the first watched deploy (20:40:11Z 2026-08-16).
     const sm = /\/telegram\/(\d+\.\d+\.\d+|\.cloning-\d+)\/(daemon|watchdog|ensure-daemon)\.ts(?:\s|$)/.exec(args)
-    if (!sm || /\s--selftest\b/.test(args) || /\bbun\s+(build|test)\b/.test(args)) continue
+    if (!sm || !args.includes(cacheRoot + '/') || /\s--selftest\b/.test(args) || /\bbun\s+(build|test)\b/.test(args)) continue
     const pid = Number(m[1]), kind = sm[2] as BridgeProc['kind']
     if (!keep(pid, kind)) continue
     out.push({ pid, ppid: Number(m[2]), kind, ver: sm[1]! })

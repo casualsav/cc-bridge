@@ -13,13 +13,16 @@ const PS = [
   '3000 1 bun build /home/u/.claude/plugins/cache/cc-bridge/telegram/0.5.145/daemon.ts --target=bun',   // tooling
   '3001 1 bun /home/u/.claude/plugins/cache/cc-bridge/telegram/.cloning-77/daemon.ts --selftest',       // the gate
   '3002 1 bun test /home/u/projects/cc-bridge/watchdog.ts',
+  '3003 1 /home/u/.bun/bin/bun /tmp/bct-run-x/home/.claude/plugins/cache/cc-bridge/telegram/9.9.9/daemon.ts',   // a test sandbox — not OUR cache? it IS a cache path under a fake HOME
+  '3004 1 bun /tmp/sandbox/telegram/9.9.9/daemon.ts',   // no cache root at all — the deploy's self-test shape
 ].join('\n')
 
 test('parseBridgeProcs: bridge rows only, scoped by keep(), tooling and --selftest excluded', () => {
-  const all = parseBridgeProcs(PS, () => true)
+  const ROOT = '/home/u/.claude/plugins/cache'
+  const all = parseBridgeProcs(PS, () => true, ROOT)
   expect(all.map(p => `${p.kind}:${p.pid}`)).toEqual(['ensure-daemon:2000', 'watchdog:1044092', 'daemon:1044116', 'watchdog:1058685', 'daemon:1058698'])
   expect(all.find(p => p.pid === 2000)?.ver).toBe('0.5.145')
-  const prod = parseBridgeProcs(PS, (pid, kind) => kind === 'ensure-daemon' || pid < 1058000)
+  const prod = parseBridgeProcs(PS, (pid, kind) => kind === 'ensure-daemon' || pid < 1058000, ROOT)
   expect(prod.map(p => p.pid)).toEqual([2000, 1044092, 1044116])
 })
 
