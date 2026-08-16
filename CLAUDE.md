@@ -341,8 +341,8 @@ nobody, and the ask envelope says so at the collision point.
 
 **THE BUS OWNS ITS QUEUE, and a HELD row is healthy — never let one age, never let one go quiet.**
 An ask to a mid-turn target is `'busy'` and waits in the bus's queue for the 15s sweep
-(`planAskGate`, never a bare `onNormalPrompt` — that is TRUE on a working pane, which is how ten
-blocks went into @weather's CLI queue on 2026-08-15 and none became a turn). Three things follow, and
+(`paneFreedom` then `planAskGate`, never a bare `onNormalPrompt` — that is TRUE on a working pane,
+which is how ten blocks went into @weather's CLI queue on 2026-08-15 and none became a turn). Three things follow, and
 each was a separate live loss: `injected` is stamped only on transcript proof, never on the paste;
 `expiredAt` — the field `tryDeliverAsk` bails on and `dropExpired` GCs on — is stamped only on a row
 that was DELIVERED, because a held row that expires becomes permanently undeliverable while its asker
@@ -353,6 +353,21 @@ standard recovery, so silencing its never-delivered rows discards the queued uni
 the one session that could re-issue them. Proof: `ask-parity.test.ts` (source-bound),
 `bus-held-ttl.test.ts` (simulated clock, watched failing against a pre-fix build),
 `bus-reap.test.ts`.
+
+**"Is this session free" is answered from the CLI's own session record, and the screen is the
+FALLBACK — never the other way round** (v0.5.132). Claude Code writes `<config dir>/sessions/<pid>.json`
+per live session: `status` (`busy|shell|idle|waiting`), its tmux pane, and `procStart`
+(= `/proc/<pid>/stat` field 22, so a recycled pid cannot answer for a stranger). `paneFreedom`
+(`session-freedom.ts`) vetoes before `tryDeliverAsk` captures anything; the screen keeps only what the
+record cannot see — typed text in the box, a picker, a wedge. Two things are load-bearing and both
+read as tidy-ups to remove: **`'unknown'` falls through to the screen** (no record, dead pid, a CLI
+that stopped writing them) — making it refuse would wedge the bus shut the day the format moves, and
+making it free would restore the six-week loss this replaced; and the veto runs **before** the
+capture, so a failed capture can never gate it. The socket behind `ListAgents` was rejected on
+evidence: it is an INJECTION inbox, and its listing is scoped to one config dir, so it cannot see
+@chat at all. Proof: `session-freedom.test.ts` (source-bound control, watched failing against
+`git archive HEAD`) and `scripts/session-freedom-probe.ts`, which runs both readings over every live
+pane and is how the disagreement was observed rather than argued.
 
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
