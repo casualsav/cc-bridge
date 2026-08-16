@@ -11,8 +11,15 @@
 // the reply hangs off — and the marker is read from the very block that was pasted. A turn he did not
 // start cannot match, however long his message waits in the CLI's queue.
 //
-// One-shot: the matching consumes it. A route nothing ever matches (the session was killed mid-turn,
-// the pane was cleared) ages out rather than sitting armed forever and firing on a stranger.
+// NOT one-shot any more (owner ruling 2026-08-16, "Go"): a session that parks on a background task
+// answers in TWO turns — the one his message anchored ends on "waiting on the gate", the harness's
+// task-notification wakes a continuation, and the real answer hangs off THAT. The continuation inherits
+// his anchor (transcript.ts `isTurnAnchor`), so a route must survive its first match: it is retired
+// only when the session moves on — a concluded turn anchored by something else, i.e. one he did not
+// start (a matched route only; an UNMATCHED one keeps waiting, because his message may still be queued
+// behind that stranger's turn) — or when it ages out. Both card, `📨 @name` each; per-uuid dedup is
+// the caller's claimRelayDelivery. A route nothing ever matches (the session was killed mid-turn, the
+// pane was cleared) ages out rather than sitting armed forever and firing on a stranger.
 //
 // Pure except for an injected `save` — the daemon hands in a debounced atomic write, tests hand in
 // nothing and assert on `snapshot()`. Persisted for the same reason relay cursors are: a deploy lands
@@ -24,6 +31,7 @@ export type OwnerReplyRoute = {
   name: string     // the session's endpoint name, which the card is headed with (several reply into one DM)
   marker: string   // what identifies his message in the anchoring transcript entry (ownerReplyMarker)
   at: number
+  matchedAt?: number   // set on the first reply it carried; only a matched route retires on a foreign turn
 }
 
 export const OWNER_REPLY_TTL_MS = 24 * 60 * 60 * 1000
@@ -42,10 +50,11 @@ export function ownerReplyMarker(block: string): string {
 
 export type OwnerReplyRoutes = {
   arm(route: Omit<OwnerReplyRoute, 'at'>): void
-  // Every route this reply's turn answers, removed as they are returned. Plural because the CLI may
-  // fold two queued messages into one turn: both markers then sit in that turn's anchor, and he is
-  // owed the answer to both — sending the same reply twice to one chat is what the caller's
-  // claimRelayDelivery is for.
+  // Every route this reply's turn answers, marked matched and KEPT (a continuation turn may answer
+  // again). Plural because the CLI may fold two queued messages into one turn: both markers then sit
+  // in that turn's anchor, and he is owed the answer to both — sending the same reply twice to one
+  // chat is what the caller's claimRelayDelivery is for. A reply whose anchor matches nothing retires
+  // this session's already-matched routes: the session has moved on to a turn he did not start.
   consume(sid: string, anchorText: string): OwnerReplyRoute[]
   snapshot(): OwnerReplyRoute[]
   size(): number
@@ -79,10 +88,17 @@ export function createOwnerReplyRoutes(
       prune()
       if (!sid || !anchorText) return []
       const hit = rows.filter(r => r.sid === sid && anchorText.includes(r.marker))
-      if (!hit.length) return []
-      rows = rows.filter(r => !hit.includes(r))
+      if (!hit.length) {
+        // A concluded turn of his session that none of his messages anchored: the chain his matched
+        // routes were riding is over. Unmatched routes stay — his message may be queued behind it.
+        const stale = rows.filter(r => r.sid === sid && r.matchedAt != null)
+        if (stale.length) { rows = rows.filter(r => !stale.includes(r)); opts.save?.([...rows]) }
+        return []
+      }
+      const t = now()
+      for (const r of hit) if (r.matchedAt == null) r.matchedAt = t
       opts.save?.([...rows])
-      return hit
+      return hit.map(r => ({ ...r }))
     },
     snapshot() { return [...rows] },
     size() { return rows.length },

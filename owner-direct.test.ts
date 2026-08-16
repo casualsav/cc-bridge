@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { answerRouteFor, isOwnerAddress } from './agent-bus.ts'
 import { createOwnerReplyRoutes, ownerReplyMarker } from './owner-reply.ts'
-import { finalRepliesAfter } from './transcript.ts'
+import { finalRepliesAfter, turnAnchorIsBus } from './transcript.ts'
 
 // ---- The route: which reply is HIS ---------------------------------------------------------------
 
@@ -42,7 +42,43 @@ test('a route fires on the turn his message anchored — and on no other turn', 
   // Another session concluding a turn his message is quoted in cannot take it either.
   expect(r.consume('sid-other', '<tg 7 from=dm>are you up?</tg>')).toEqual([])
   expect(r.consume('sid-worker', '<tg 7 from=dm>are you up?</tg>').map(x => x.chat)).toEqual(['111'])
-  expect(r.size()).toBe(0)   // one-shot: the next reply of the same turn is not his to receive twice
+  // NOT one-shot (2026-08-16): the route survives its match, because a background-task continuation
+  // turn inherits his anchor and answers again. It retires when the session concludes a turn he did
+  // not start — and only then; an UNMATCHED route waits through a stranger's turn (his message may
+  // be queued behind it), a MATCHED one is over.
+  expect(r.size()).toBe(1)
+  expect(r.consume('sid-worker', '<tg 7 from=dm>are you up?</tg>').map(x => x.chat)).toEqual(['111'])   // the continuation's reply
+  r.arm({ sid: 'sid-worker', chat: '111', name: 'weather', marker: '<tg 8 from=dm>' })                    // his next message, queued
+  expect(r.consume('sid-worker', '<tg @chat ask=32>next unit</tg>')).toEqual([])                          // a stranger's turn concludes
+  expect(r.snapshot().map(x => x.marker)).toEqual(['<tg 8 from=dm>'])                                       // matched 7 retired, unmatched 8 kept
+  expect(r.consume('sid-worker', '<tg 8 from=dm>and now?</tg>').length).toBe(1)
+})
+
+test('the weather shape, 2026-08-16 19:49–19:53Z: a background-task wake continues his turn — both replies are his', () => {
+  // The session ended a turn on "waiting on the gate" (a real turn end — system rows follow), the
+  // harness woke it with a <task-notification>, and the real answer hung off that wake. Before this
+  // fix the second reply's anchor was the notification: no route match, no card, classed HUMAN.
+  const wake = '<task-notification>\n<task-id>a1ec4d36a731a05c0</task-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>'
+  const f = fixture([
+    user('<tg 13519 from=dm>for the data lines underneath the solar chart…</tg>', 'u1'), asst('Healthy. Waiting on the gate result.', 'a1'),
+    user(wake, 'u2'), asst('Done and live — reload /h/<station>.', 'a2'),
+    user('<tg @chat ask=40>unrelated unit</tg>', 'u3'), asst('on it', 'a3'),
+  ])
+  const replies = finalRepliesAfter(f, '')
+  expect(replies.map(r => r.anchorText)).toEqual([
+    '<tg 13519 from=dm>for the data lines underneath the solar chart…</tg>',
+    '<tg 13519 from=dm>for the data lines underneath the solar chart…</tg>',   // inherited, not the wake
+    '<tg @chat ask=40>unrelated unit</tg>',
+  ])
+  expect(replies.map(r => r.busAnchored)).toEqual([false, false, true])
+  const r = createOwnerReplyRoutes()
+  r.arm({ sid: 's', chat: '111', name: 'weather', marker: '<tg 13519 from=dm>' })
+  expect(replies.filter(x => r.consume('s', x.anchorText).length).map(x => x.text))
+    .toEqual(['Healthy. Waiting on the gate result.', 'Done and live — reload /h/<station>.'])
+  expect(r.size()).toBe(0)   // the @chat turn retired it
+  // and the Stop-hook reader agrees a bus turn continued by a wake is still bus-anchored
+  const g = fixture([user('<tg @chat ask=41>go</tg>', 'u1'), asst('waiting on CI', 'a1'), user(wake, 'u2')])
+  expect(turnAnchorIsBus(g)).toBe(true)
 })
 
 test('two messages folded into one turn are both answered', () => {

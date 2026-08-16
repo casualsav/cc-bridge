@@ -439,9 +439,14 @@ thing most likely to be "fixed" back:
 2026-08-11: of the two artifacts per exchange, the one he could read was the wrong one). `@name
 <message>` in his DM and a native reply to a session's card go through `ownerDirectDispatch` as
 the ordinary inbound envelope — no ask id, no `tg answer` owed. The answer rides `owner-reply.ts`:
-a one-shot route armed on the landed paste, matched at relay time against **the turn's own
-anchor** (`anchorText` from `finalRepliesAfter`), never "the next reply" (on a busy session that
-is somebody else's answer). The card (`sendOwnerAnswerCard`, header `📨 @name`) keeps three
+a route armed on the landed paste, matched at relay time against **the turn's own anchor**
+(`anchorText` from `finalRepliesAfter`), never "the next reply" (on a busy session that is
+somebody else's answer). **A `<task-notification>` wake is a CONTINUATION, not a new author** — the
+turn it starts inherits the anchor before it (`isTurnAnchor`, `transcript.ts`), and the route is NOT
+one-shot: it carries every turn-final of that chain and retires when the session concludes a turn he
+did not start (a matched route only — an unmatched one may still be queued behind that stranger's
+turn). Making it one-shot again carded him "Waiting on the gate result." and dropped "Done and
+live" (2026-08-16, @weather); fixture in `owner-direct.test.ts`. The card (`sendOwnerAnswerCard`, header `📨 @name`) keeps three
 things: it is the **fifth delivery of one uuid** and claims through `claimRelayDelivery`; it is
 consumed BEFORE the session's own surface is written (what makes that copy silent); delivery
 confirms as a REACTION on his message, never a card. No ask row means nothing chases a silent

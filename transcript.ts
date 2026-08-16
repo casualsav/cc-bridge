@@ -84,6 +84,21 @@ function isRealUserText(e: Entry): boolean {
   return e.type === 'user' && !e.isSidechain && !e.isMeta && textOf(e.message?.content).trim() !== ''
 }
 
+// A CONTINUATION WAKE: the harness re-invoking the model when a background task it started finishes.
+// It is a real user entry (not isMeta) and does start a new turn — but nobody sent it, so for WHO
+// STARTED THIS (the reply class, the owner-reply anchor) the turn INHERITS the anchor before it.
+// Observed 2026-08-16 19:49–19:53Z: @weather ended a turn on "Healthy. Waiting on the gate result."
+// (carded to the owner, route consumed), the gate's task-notification woke a second turn, and the
+// real answer ("Done and live …") hung off `<task-notification>` — no route match, no card, and it
+// classed HUMAN where the first half was his. The block is harness-written; model prose can never
+// be one (see the feed reader below, which relies on the same fact).
+const CONTINUATION_WAKE = /^\s*<task-notification>/
+function isContinuationWake(e: Entry): boolean {
+  return isRealUserText(e) && CONTINUATION_WAKE.test(textOf(e.message?.content))
+}
+// The entry whose author a turn is attributed to: a real prompt that is not a continuation wake.
+function isTurnAnchor(e: Entry): boolean { return isRealUserText(e) && !isContinuationWake(e) }
+
 // The CLI's re-prompt for a turn that produced no text. It reaches this file in two shapes — a
 // persisted user meta entry (old CLI) and the model's own echo of it (new CLI) — so the pattern is
 // defined once here and both readers below use it.
@@ -572,7 +587,12 @@ function scanFinalReplies(entries: Entry[], at: number, opts: { includeSuppresse
   let nudged = false
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); anchorText = textOf(e.message?.content); nudged = false; continue }  // turn boundary (real prompts only — not injected skill/meta entries)
+    if (isRealUserText(e)) {   // turn boundary (real prompts only — not injected skill/meta entries)
+      flush(); nudged = false
+      // a continuation wake starts a turn but keeps the anchor: its reply is still the answer to what came before
+      if (isTurnAnchor(e)) { anchorIsBus = isBusAnchored(e.message?.content); anchorText = textOf(e.message?.content) }
+      continue
+    }
     if (isThinkingOnlyNudge(e)) { nudged = true; continue }
     if (isMainAssistantText(e)) {
       const text = lastTextOf(e.message?.content).trim()
@@ -603,13 +623,13 @@ function scanFinalReplies(entries: Entry[], at: number, opts: { includeSuppresse
 
 // The most recent real user entry's kind, for the two paths that need an anchor without a scan.
 function latestBusAnchored(entries: Entry[]): boolean {
-  for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) return isBusAnchored(entries[i].message?.content)
+  for (let i = entries.length - 1; i >= 0; i--) if (isTurnAnchor(entries[i])) return isBusAnchored(entries[i].message?.content)
   return false
 }
 // The same entry's TEXT — seeded for the same reason: a reply relayed from a cursor that sits inside
 // its own turn must still name what started it, or a restart would leave the owner's route unmatched.
 function latestAnchorText(entries: Entry[]): string {
-  for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) return textOf(entries[i].message?.content)
+  for (let i = entries.length - 1; i >= 0; i--) if (isTurnAnchor(entries[i])) return textOf(entries[i].message?.content)
   return ''
 }
 
@@ -1023,7 +1043,7 @@ export function conversationItemFullText(file: string, uuid: string): string | n
 export function turnAnchorIsBus(file: string): boolean {
   const entries = readEntries(file)
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (isRealUserText(entries[i]!)) return isBusAnchored(textOf(entries[i]!.message?.content))
+    if (isTurnAnchor(entries[i]!)) return isBusAnchored(textOf(entries[i]!.message?.content))   // a continuation wake inherits
   }
   return false
 }
