@@ -56,8 +56,15 @@ test('a held row is never GC\'d out from under its target', () => {
 
 // ---- the 60-minute notice: one, and it tells the truth ----
 
-test('the held row earns exactly one 60-minute notice, and only after the hour', () => {
-  const p = ask()
+// UNIT 1 (2026-08-16) re-scoped this notice to ACKS, and the scoping is the first thing to assert:
+// an ASK no longer waits at all (it refuses at the call site and mints nothing), so a held ask is not
+// a state that can exist any more. An ack does still wait — @chat's call, fire-and-forget with no
+// retry story — which is why the machinery was re-scoped rather than deleted as the spec listed.
+const heldAck = (at = T0) =>
+  createPending({ fromSid: 'chatsid', toSid: 'wsid', fromName: 'chat', toName: 'weather', text: 'FYI', refs: [], noReply: true }, at)
+
+test('the held ACK earns exactly one 60-minute notice, and only after the hour', () => {
+  const p = heldAck()
   expect(heldTooLong(T0 + ASK_TTL_MS - 1)).toEqual([])          // control: not yet due
   expect(heldTooLong(T0 + ASK_TTL_MS).map(q => q.id)).toEqual([p.id])
   markHeldNotified(p.id, T0 + ASK_TTL_MS)
@@ -65,8 +72,21 @@ test('the held row earns exactly one 60-minute notice, and only after the hour',
   expect(getPending(p.id)?.heldNoticeAt).toBe(T0 + ASK_TTL_MS)
 })
 
-test('a row that DELIVERS before the hour never earns a held notice', () => {
-  const p = ask()
+test('an ASK never earns a held notice — it cannot be held at all any more', () => {
+  // The control that would have caught the re-scope going the wrong way: before Unit 1 this row WAS
+  // the held notice's whole population, so an assertion that only checked acks would pass on a filter
+  // that had never been applied.
+  ask()
+  expect(heldTooLong(T0 + 5 * HOUR)).toEqual([])
+})
+
+test('a SYSTEM ack earns no held notice either — its asker has no pane to be told on', () => {
+  createPending({ fromSid: '@system', toSid: 'wsid', fromName: 'system', toName: 'weather', text: 'spawn news', refs: [], noReply: true }, T0)
+  expect(heldTooLong(T0 + 5 * HOUR)).toEqual([])
+})
+
+test('an ack that DELIVERS before the hour never earns a held notice', () => {
+  const p = heldAck()
   markInjected(p.id, T0 + 30 * 60_000)
   expect(heldTooLong(T0 + 5 * HOUR)).toEqual([])
 })

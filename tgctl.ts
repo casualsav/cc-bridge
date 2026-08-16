@@ -155,11 +155,18 @@ const HELP: Record<string, string> = {
   providers:'tg providers   configured provider account ids, active/inactive state, role defaults, and models for tg spawn --account/--model',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
+  queue:   'tg queue                       your own queue of work, oldest first (· not sent, ▶ sent)\n' +
+           'tg queue add [--for @name] -   append an item (body on stdin)\n' +
+           'tg queue start <id>            mark it dispatched · tg queue done <id>   drop it\n' +
+           '  The bus does not hold queued work — an ask to a busy target refuses and mints nothing, so\n' +
+           '  sequencing is yours. This is where it survives a /clear: plain JSON in the shared dir\n' +
+           '  (chat-queue.json), readable directly if you ever come back cold. Nothing here SENDS\n' +
+           '  anything; it is a list, not a scheduler.',
   doctor:  'tg doctor   host-side install diagnostic (works with the daemon down)',
 }
 // Every verb that takes free text gets the stdin steer in its help — the shell mangles Markdown
 // bodies (see `body` above), so `-` is the documented default, not the fallback.
-const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'btw', 'answer', 'post', 'spawn'])
+const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'btw', 'answer', 'post', 'spawn', 'queue'])
 const STDIN_NOTE =
   "\nBodies: pass them on stdin — printf '%s' \"$BODY\" | tg <verb> <args> -\n" +
   'A double-quoted body is parsed by the SHELL first: `backticks` run as commands (splicing their\n' +
@@ -194,14 +201,17 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'status', 'mcp', 'hooks', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'status', 'mcp', 'hooks', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo', 'queue'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|account|model|effort|stale|why)$/.exec(rest[i]!)
+    // The allow-list IS the parser: a flag missing from it is not "unknown", it silently becomes a
+    // POSITIONAL — `tg queue add --for weather -` stored the literal "--for" as the item's text and
+    // dropped both the target and the body (caught live, 2026-08-16). Add value-taking flags here.
+    const f = /^--(dir|account|model|effort|stale|why|for)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
@@ -249,6 +259,16 @@ if (BUS.has(cmd)) {
     case 'providers': name = 'providers'; args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
+    // `tg queue [add|start|done] …` — the sub-verb lands in pos[0]; `add` takes its body on stdin like
+    // every other free-text verb here, the other two take an item number.
+    case 'queue': {
+      const sub = pos[0] === 'add' || pos[0] === 'done' || pos[0] === 'start' ? pos[0] : 'list'
+      name = 'queue'
+      args = { pane, sub,
+        ...(sub === 'add' ? { text: body(pos[1], 'queue add') ?? '', ...(flags.for ? { for: String(flags.for) } : {}) } : {}),
+        ...(sub === 'done' || sub === 'start' ? { itemId: pos[1] } : {}) }
+      break
+    }
   }
 } else {
   switch (cmd) {
