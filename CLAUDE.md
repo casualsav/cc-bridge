@@ -359,7 +359,11 @@ FALLBACK — never the other way round** (v0.5.132). Claude Code writes `<config
 per live session: `status` (`busy|shell|idle|waiting`), its tmux pane, and `procStart`
 (= `/proc/<pid>/stat` field 22, so a recycled pid cannot answer for a stranger). `paneFreedom`
 (`session-freedom.ts`) vetoes before `tryDeliverAsk` captures anything; the screen keeps only what the
-record cannot see — typed text in the box, a picker, a wedge. Two things are load-bearing and both
+record cannot see — typed text in the box, a picker, a wedge. **Only `busy` vetoes** — `shell` is
+what the record shows with a BACKGROUND shell alive at a prompt, and treating it as held stopped every
+ask and ack to such a session for as long as the task lived (49 minutes on 2026-08-16, rows 586/593/594;
+fixed v0.5.139); `waiting` delivers because a blocked session is the one most in need of a message and
+a real dialog is still caught by `planAskGate` after the veto. Two more things are load-bearing and all
 read as tidy-ups to remove: **`'unknown'` falls through to the screen** (no record, dead pid, a CLI
 that stopped writing them) — making it refuse would wedge the bus shut the day the format moves, and
 making it free would restore the six-week loss this replaced; and the veto runs **before** the

@@ -34,10 +34,15 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-// The CLI's own enum, copied verbatim from the 2.1.233 binary. `idle` is the only free one: `busy` is
-// a turn, `shell` is a shell command, and `waiting` is a human being waited on — all three mean typed
-// text does not become work now, which is the only distinction the gate needs. The raw value is kept
-// on the reading so a log line and a `tg ask` result can still name which it was.
+// The CLI's own enum, copied verbatim from the 2.1.233 binary. ONLY `busy` vetoes: it is the one
+// value that means "a turn is running". `shell` is NOT a turn — it is what the record shows while
+// the session has a shell child alive, including a BACKGROUND one at a prompt, and reading it as
+// held stopped every ask and ack to such a session for as long as the task lived (rows 586/593/594
+// sat 49 minutes on 2026-08-16 behind exactly that; killing the background shells released them
+// within one sweep — HANDOFF, "LIVE DEFECT in Unit 0"). `waiting` is a session blocked on human input
+// — the one most in need of a message, and a real dialog on screen is still caught by `planAskGate`
+// (`!atPrompt ⇒ wedged`), which runs after this veto. `idle` is free. The raw value is kept on the
+// reading so a log line and a `tg ask` result can still name which it was.
 export const SESSION_STATUSES = ['busy', 'shell', 'idle', 'waiting'] as const
 export type SessionStatus = (typeof SESSION_STATUSES)[number]
 
@@ -68,8 +73,8 @@ export function planSessionFreedom(row: RegistryRow | null, alive: boolean): Fre
   if (!row) return { freedom: 'unknown', status: null, why: 'no session record for this pane' }
   if (!alive) return { freedom: 'unknown', status: null, why: `session record is stale — pid ${row.pid} is gone or recycled` }
   if (!row.status) return { freedom: 'unknown', status: null, why: `session record for pid ${row.pid} carries no status` }
-  if (row.status === 'idle') return { freedom: 'free', status: 'idle', why: 'idle' }
-  return { freedom: 'busy', status: row.status, why: row.status }
+  if (row.status === 'busy') return { freedom: 'busy', status: 'busy', why: 'busy' }
+  return { freedom: 'free', status: row.status, why: row.status }
 }
 
 // `"cc-hermes-mimo:@143.%143"` → `"%143"`. The bridge keys everything on the pane id, so this is the

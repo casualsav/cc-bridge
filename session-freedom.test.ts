@@ -20,13 +20,27 @@ const row = (over: Partial<RegistryRow> = {}): RegistryRow =>
 
 // ---- the decision table -------------------------------------------------------------------------
 
-test('only idle is free; busy, shell and waiting all hold', () => {
-  expect(planSessionFreedom(row({ status: 'idle' }), true).freedom).toBe('free')
-  for (const s of ['busy', 'shell', 'waiting'] as const) {
+test('only busy holds; idle, shell and waiting are all free', () => {
+  const busy = planSessionFreedom(row({ status: 'busy' }), true)
+  expect(busy.freedom).toBe('busy')
+  expect(busy.status).toBe('busy')
+  for (const s of ['idle', 'shell', 'waiting'] as const) {
     const r = planSessionFreedom(row({ status: s }), true)
-    expect(r.freedom).toBe('busy')
+    expect(r.freedom).toBe('free')
     expect(r.status).toBe(s)   // the raw status survives, so a log line can name which it was
   }
+})
+
+test('SEEN FAILING: a session at a prompt with a background shell is free to read', () => {
+  // The record row 586 sat behind for 49 minutes on 2026-08-16 (03:41→04:30Z): status `shell`
+  // (a background poller alive), pane at a prompt, box empty, screen gate saying deliver — and the
+  // v0.5.132–0.5.138 veto folded `shell` in with `busy`, so nothing was ever pasted until the shells
+  // were killed (HANDOFF "LIVE DEFECT in Unit 0"; selfwatch capture in the shared dir's
+  // delivery-audit-evidence/). This assertion FAILS against that build (`git archive 850ecc2`) and
+  // passes here. `waiting` rides along by ruling (2026-08-16): a blocked session is the one most in
+  // need of a message, and a real dialog is still held by `planAskGate` after this veto.
+  expect(planSessionFreedom(row({ pid: 3135046, status: 'shell', tmux: 'cc-hermes-mimo:@141.%141' }), true).freedom).toBe('free')
+  expect(planSessionFreedom(row({ status: 'waiting' }), true).freedom).toBe('free')
 })
 
 test('the enum is the CLI\'s own, verbatim', () => {
