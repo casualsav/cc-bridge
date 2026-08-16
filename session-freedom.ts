@@ -73,8 +73,10 @@ export function planSessionFreedom(row: RegistryRow | null, alive: boolean): Fre
   if (!row) return { freedom: 'unknown', status: null, why: 'no session record for this pane' }
   if (!alive) return { freedom: 'unknown', status: null, why: `session record is stale — pid ${row.pid} is gone or recycled` }
   if (!row.status) return { freedom: 'unknown', status: null, why: `session record for pid ${row.pid} carries no status` }
-  if (row.status === 'busy') return { freedom: 'busy', status: 'busy', why: 'busy' }
-  return { freedom: 'free', status: row.status, why: row.status }
+  // The reading names its instrument (unit 2a's log format asks for it): a bare `busy` in a HELD line
+  // said nothing about WHICH record vetoed, and a stale-pid story starts with the pid.
+  if (row.status === 'busy') return { freedom: 'busy', status: 'busy', why: `record status=busy pid=${row.pid}` }
+  return { freedom: 'free', status: row.status, why: `record status=${row.status} pid=${row.pid}` }
 }
 
 // `"cc-hermes-mimo:@143.%143"` → `"%143"`. The bridge keys everything on the pane id, so this is the
