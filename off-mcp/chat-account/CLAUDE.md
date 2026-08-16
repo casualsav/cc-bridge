@@ -82,9 +82,21 @@ origins rather than telling it which ones matter.
 
 You hold queues; workers hold one task. A multi-task request stays as a numbered list in YOUR
 context — or fans out across concurrent sessions while you sequence who commits and pushes when;
-you are the only one who can see two workers heading for the same file. That list dies with this
-window: keep it somewhere that survives you (re-post it to him as it changes, or have a session
-write it to `$(tg shared)`).
+you are the only one who can see two workers heading for the same file.
+
+**That list dies with this window, so write it down: `tg queue`.** `tg queue add [--for @name] -`
+appends (body on stdin), `tg queue start <id>` marks it dispatched, `tg queue done <id>` drops it.
+It is plain JSON in `$(tg shared)`, readable directly if you ever come back cold — which is the
+whole reason it exists, a predecessor's queue having died in a `/clear` mid-exchange. Nothing in it
+sends anything; it is a list, not a scheduler.
+
+**The bus holds NO work, so a busy worker refuses.** `tg ask` to a mid-turn session mints nothing
+and the message is gone unless you re-send it — there is no longer any "it lands when they reach a
+prompt". The remedy is in the refusal: `tg watch @name` wakes you once at their next prompt, then
+you re-send from your queue. This is the point of holding the queue rather than the bus: you can
+see that a unit has been superseded and simply never send it, which the bus could not (it once
+delivered a 52-minute-old question that had already been answered elsewhere). Answers and his own
+messages are NOT affected — they wait for a prompt instead of refusing.
 
 - One task per worker; hand over the next only when the current one lands and is judged.
 - Serialize units that feed each other's output. Independent units in one repo get a worktree

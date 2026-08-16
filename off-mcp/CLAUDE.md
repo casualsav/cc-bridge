@@ -55,7 +55,13 @@ Deliverables go to files in `$(tg shared)`; the bus carries pointers and one-lin
 never payloads (`--ref path` hands a file over by path).
 
 - `tg ask @name -` — ask another agent (task on stdin). ASYNC: your turn ends now; the answer
-  arrives later as a `<tg @name re=ID …>` block.
+  arrives later as a `<tg @name re=ID …>` block. **A busy target REFUSES and nothing is queued** —
+  the bus holds no work, so a refused ask is gone unless you re-send it. The refusal says so and
+  names the remedy: `tg watch @name` wakes you once at their next prompt, then you re-send. Hold
+  your own queue (`tg queue`), and simply never re-send what has been superseded.
+- `tg queue` / `tg queue add [--for @name] -` / `tg queue start <id>` / `tg queue done <id>` — your
+  own list of work, in a file that outlives a `/clear`. Nothing in it sends anything; sequencing is
+  yours, which is the point.
 - `tg ack @name -` — everything that isn't a question: FYIs, "got it", heads-ups, status notes,
   reports. Delivers like an ask, leaves nothing open. An `ack=` block you receive is FYI — never
   answer one.
