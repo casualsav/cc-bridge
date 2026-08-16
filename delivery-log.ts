@@ -23,8 +23,13 @@ export const REMINDER_MS = 5 * 60_000
 /** A subject not re-decided for this long is forgotten (its row is gone, or it delivered). */
 export const FORGET_AFTER_MS = 30 * 60_000
 
-type Entry = { sig: string; since: number; count: number; lastLoggedAt: number; touchedAt: number }
+export type DecisionEntry = { sig: string; since: number; count: number; lastLoggedAt: number; touchedAt: number }
+type Entry = DecisionEntry
 const seen = new Map<string, Entry>()
+/** For a guard that must outlive THIS process (ensure-daemon is a fresh process per tick — see
+ *  ensure-attribution.ts): lift an entry out to persist it, and seed one back before gating. */
+export const exportDecision = (key: string): DecisionEntry | null => { const e = seen.get(key); return e ? { ...e } : null }
+export function importDecision(key: string, e: DecisionEntry): void { seen.set(key, { ...e }) }
 
 /** The reading with its volatile parts removed — the pid, the sweep count, the box text — so a
  *  changed number is a repeat and a changed instrument is a transition. */

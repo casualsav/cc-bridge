@@ -14,6 +14,7 @@ import { readdirSync, openSync, writeSync, existsSync, readFileSync, readlinkSyn
 import { homedir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
 import { pickVersion } from './upgrade-core.ts'
+import { inferTrigger, readProcDefault, readingText, gateNoop } from './ensure-attribution.ts'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 // Whose plugin cache is ours. Used by the foreign-process reap to tell "a bridge run from a source
@@ -91,6 +92,11 @@ if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in p
 const daemonDir = dirname(daemonPath)
 const watchdogPath = join(daemonDir, 'watchdog.ts')
 const CURRENT_VER = basename(daemonDir)   // the newest cache version — what THIS ensure-daemon runs
+// Unit 5 fix D: every line this run writes names its TRIGGER — which of the keepalive loop, a SessionStart
+// hook, a deploy or /update ran it — read off the parent chain (ensure-attribution.ts), so a bounce in
+// daemon.log names its author on line one. Nothing else about the run changes.
+const TRIGGER = inferTrigger(process.pid, readProcDefault)
+const TAG = `ensure-daemon[${TRIGGER.trigger}]`
 
 // ---- Foreign-process reap ----
 // The plugin cache is the ONLY sanctioned home for a running bridge. A daemon/watchdog launched by
@@ -160,12 +166,12 @@ function reapForeignBridges(log: number): void {
       // already refused those same pids by name — the relaunch let them back in through this door.
       // A checkout-run bridge sits under no cache root at all and is still reaped, so nothing is lost.
       if (dir.includes(CACHE_SEGMENT) && !dir.startsWith(MY_CACHE_ROOT)) {
-        note(log, `ensure-daemon: left another install's ${kind} alone (pid ${p.pid}, ${p.script}) — not under ${MY_CACHE_ROOT}`)
+        note(log, `${TAG}: left another install's ${kind} alone (pid ${p.pid}, ${p.script}) — not under ${MY_CACHE_ROOT}`)
         continue
       }
       try {
         process.kill(p.pid, 'SIGKILL')
-        note(log, `ensure-daemon: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
+        note(log, `${TAG}: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
       } catch {}
     }
   }
@@ -213,12 +219,12 @@ function ensureDeps(log: number): void {
       type: 'module',
       dependencies: { grammy: '1.41.1', '@modelcontextprotocol/sdk': '^1.0.0', zod: '~4.3.6' },
     }, null, 2) + '\n', { mode: 0o644 })
-    note(log, `ensure-daemon: wrote pinned package.json to ${daemonDir}`)
+    note(log, `${TAG}: wrote pinned package.json to ${daemonDir}`)
   }
   if (!existsSync(join(daemonDir, 'node_modules', 'grammy'))) {
-    note(log, `ensure-daemon: installing daemon deps in ${daemonDir}`)
+    note(log, `${TAG}: installing daemon deps in ${daemonDir}`)
     const r = spawnSync('bun', ['install', '--no-summary'], { cwd: daemonDir, stdio: ['ignore', log, log] })
-    if (r.status !== 0) note(log, `ensure-daemon: bun install exited ${r.status}`)
+    if (r.status !== 0) note(log, `${TAG}: bun install exited ${r.status}`)
   }
 }
 
@@ -244,6 +250,13 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
       if (wdPid > 1) process.kill(wdPid, 0)
       else wdPid = 0
     } catch { wdPid = 0 }
+    // What this run READ, quoted on every line it writes — the pid FILES (as found, before any liveness
+    // test) and the socket. A deploy that unlinks the files under a live pair makes every reading here
+    // `daemon.pid=- watchdog.pid=-` while `sock=live`, and that shape is the double-bounce's signature.
+    let daemonPidRead: number | null = null, watchdogPidRead: number | null = null
+    try { daemonPidRead = parseInt(readFileSync(join(stateDir, 'daemon.pid'), 'utf8'), 10) || null } catch {}
+    try { watchdogPidRead = parseInt(readFileSync(pidFile, 'utf8'), 10) || null } catch {}
+    const read = readingText({ daemonPid: daemonPidRead, watchdogPid: watchdogPidRead, sockLive: !daemonDown })
     // Upgrade guard: a live watchdog from an OLDER cache version keeps respawning the OLD daemon
     // forever — the SIGUSR1 nudge below (and the "daemon up → do nothing" path) both leave whatever
     // version the watchdog itself runs in place, so a marketplace upgrade would never take effect
@@ -253,6 +266,7 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
     if (wdPid) {
       const liveVer = watchdogVersion(wdPid)
       if (liveVer && liveVer !== CURRENT_VER) {
+        const wdKilled = wdPid
         try { process.kill(wdPid, 'SIGKILL') } catch {}
         let dp = 0
         try { dp = parseInt(readFileSync(join(stateDir, 'daemon.pid'), 'utf8'), 10) } catch {}
@@ -272,14 +286,14 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
           await new Promise(r => setTimeout(r, 50))
         }
         wdPid = 0
-        note(log, `ensure-daemon: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir}`)
+        note(log, `${TAG}: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir} — SIGKILLed watchdog ${wdKilled}${dp > 1 ? ` + daemon ${dp}` : ''}; ${read}`)
       }
     }
     if (wdPid && daemonDown && !canUsr1) {
       try { process.kill(wdPid, 'SIGTERM') } catch {}
       await new Promise(r => setTimeout(r, 300))   // let it unlink its pid file so the new one boots
       wdPid = 0
-      note(log, `ensure-daemon: replaced pre-usr1 watchdog for ${stateDir}`)
+      note(log, `${TAG}: replaced pre-usr1 watchdog for ${stateDir} (SIGTERMed ${wdPid}); ${read}`)
     }
     if (!wdPid) {
       // `cwd` explicit on every supervision launch — a watchdog must never inherit a session's cwd
@@ -287,23 +301,31 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
       // reports an unresolvable interpreter ASYNCHRONOUSLY, and with no listener that is an uncaught
       // exception that kills this hook silently.
       const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env, cwd: STABLE_CWD })
-      child.on('error', e => note(log, `ensure-daemon: launching the watchdog for ${stateDir} FAILED (${e}) — nothing is supervising this instance`))
+      child.on('error', e => note(log, `${TAG}: launching the watchdog for ${stateDir} FAILED (${e}) — nothing is supervising this instance`))
       child.unref()
       if (child.pid == null) return   // spawn already failed; the listener above names it
-      note(log, `ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon`)
+      note(log, `${TAG}: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon; ${read}`)
     } else if (daemonDown) {
       try { process.kill(wdPid, 'SIGUSR1') } catch {}
-      note(log, `ensure-daemon: daemon down for ${stateDir} — nudged watchdog ${wdPid} to respawn it`)
+      note(log, `${TAG}: daemon down for ${stateDir} — nudged watchdog ${wdPid} to respawn it; ${read}`)
+    } else {
+      // Did nothing — the reading every healthy tick takes, and the one this file never wrote. Guarded
+      // once-per-transition (unit 2's guard, persisted across runs — ensure-attribution.ts): the pids and
+      // the version ARE the signature, so a pair that changed under nobody's log line shows up here as a
+      // transition at the next tick, and a stable pair costs one reminder per 5 minutes.
+      const liveVer = watchdogVersion(wdPid) ?? '?'
+      const v = gateNoop({ stateFile: join(stateDir, 'ensure-guard.json'), key: `ensure:${stateDir}`, sig: `noop watchdog=${wdPid} daemon=${daemonPidRead ?? '-'} v=${liveVer}`, now: Date.now() })
+      if (v) note(log, `${TAG}: ${stateDir} did nothing — daemon up, watchdog ${wdPid} v${liveVer} (${v}); ${read}`)
     }
     return
   }
   // No watchdog in this cache (very old build) — spawn the daemon directly, as before.
   if (daemonDown) {
     const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env, cwd: STABLE_CWD })
-    child.on('error', e => note(log, `ensure-daemon: launching daemon ${daemonPath} for ${stateDir} FAILED (${e})`))
+    child.on('error', e => note(log, `${TAG}: launching daemon ${daemonPath} for ${stateDir} FAILED (${e})`))
     child.unref()
     if (child.pid == null) return
-    note(log, `ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})`)
+    note(log, `${TAG}: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})`)
   }
 }
 

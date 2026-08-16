@@ -156,14 +156,14 @@ test("ensure-daemon's upgrade sweep no longer deletes the claim or a live socket
 
 test('the watchdog serialises tick(), so one nudge cannot become two spawns', () => {
   const src = readFileSync(new URL('./watchdog.ts', import.meta.url), 'utf8')
-  const fn = src.slice(src.indexOf('async function tick(): Promise<void> {'))
+  const fn = src.slice(src.indexOf('async function tick(why: string): Promise<void> {'))   // `why` = unit 5 D attribution
   const body = fn.slice(0, fn.indexOf('\n}\n'))
   expect(body).toContain('if (ticking) return')
   expect(body).toContain('finally')
-  expect(body).toContain('tickOnce()')
+  expect(body).toContain('tickOnce(why)')
   // The nudge and the interval must both go through the guarded entry point, not the raw body.
-  expect(src).toContain("process.on('SIGUSR1', () => void tick())")
-  expect(src).toContain('setInterval(() => void tick(), CHECK_MS)')
+  expect(src).toContain("process.on('SIGUSR1', () => void tick('SIGUSR1 nudge'))")
+  expect(src).toContain("setInterval(() => void tick('tick'), CHECK_MS)")
 })
 
 test('the state dir survives a claim attempt that loses (no half-made state)', async () => {

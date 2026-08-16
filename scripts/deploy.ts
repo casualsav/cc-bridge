@@ -618,7 +618,7 @@ function rollbackAndDie(why: string, detail: string, failedCheck: string): never
   }
   step(`relaunching ${plan.target} (${plan.targetBasis})`)
   const ed = join(CACHE_BASE, plan.target, 'ensure-daemon.ts')
-  if (existsSync(ed)) sh('bun', [ed], join(CACHE_BASE, plan.target))
+  if (existsSync(ed)) sh('bun', [ed], join(CACHE_BASE, plan.target), { ENSURE_TRIGGER: 'deploy' })   // unit 5 D: the relaunch names its author in daemon.log
   // The record. Written where the failure happened, in the words the checks themselves produced.
   const record = [
     `deploy of ${next} FAILED and was rolled back`,
@@ -650,7 +650,7 @@ if (!cfg.restartTelegram) {
   const ed = join(newCache, 'ensure-daemon.ts')
   if (!existsSync(ed)) die(`no ensure-daemon.ts in cache/${next} — cannot restart`)
   step('respawning via ensure-daemon')
-  sh('bun', [ed], newCache)
+  sh('bun', [ed], newCache, { ENSURE_TRIGGER: 'deploy' })   // unit 5 D: the relaunch names its author in daemon.log
   step('health-check (functional AND identity)')
   const health = await healthCheck({
     socketPath: SOCKET, logFile: DAEMON_LOG, logOffset, pidFile: DAEMON_PID, expectVersion: next,

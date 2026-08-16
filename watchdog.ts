@@ -125,7 +125,7 @@ function rotateLog(): void {
 // cure; `cwd: stableCwd()` below keeps the daemon out of a dead dir even if we were launched into one;
 // the survival machinery here stays, because a launch can still fail for reasons we don't know.
 // `process.execPath` rather than a bare 'bun' remains right on its own terms — one less variable.
-function spawnDaemon(): void {
+function spawnDaemon(why: string): void {
   const daemonPath = findDaemon()
   if (!daemonPath) { process.stderr.write('watchdog: daemon.ts not found in plugin cache\n'); return }
   let child: ReturnType<typeof spawn>
@@ -145,20 +145,20 @@ function spawnDaemon(): void {
   // A pid-less child means the spawn already failed; the listener above reports it. Claiming
   // "launched … (pid undefined)" here is how the original failure read as a success in the log.
   if (child.pid == null) return
-  process.stderr.write(`watchdog: daemon down — launched ${daemonPath} (pid ${child.pid})\n`)
+  process.stderr.write(`watchdog: daemon down — launched ${daemonPath} (pid ${child.pid}) [${why}, watchdog pid ${process.pid}]\n`)
 }
 
 // The 20s interval and ensure-daemon's SIGUSR1 nudge both call this, and two nudges 128ms apart is
 // what spawned two daemons on 2026-07-30 — `socketAlive()` is awaited, so both passes saw "down" and
 // both spawned. One at a time: a skipped tick costs nothing because the interval comes round again.
 let ticking = false
-async function tick(): Promise<void> {
+async function tick(why: string): Promise<void> {
   if (ticking) return
   ticking = true
-  try { await tickOnce() } finally { ticking = false }
+  try { await tickOnce(why) } finally { ticking = false }
 }
 
-async function tickOnce(): Promise<void> {
+async function tickOnce(why: string): Promise<void> {
   rotateLog()
   if (await socketAlive()) return
   // Daemon is down. Before spawning, make sure another live daemon (different state dir / HOME, same
@@ -173,10 +173,13 @@ async function tickOnce(): Promise<void> {
     }
     warnedBusy = false
   }
-  spawnDaemon()
+  spawnDaemon(why)
 }
 
 process.on('SIGTERM', () => {
+  // Unit 5 fix D: an exit this process performs is written down — the silent kills in a deploy bounce
+  // are the ones nobody could attribute (a SIGKILL leaves no line; this is the one signal that can).
+  process.stderr.write(`watchdog: SIGTERM — exiting (pid ${process.pid})\n`)
   try { if (parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8'), 10) === process.pid) unlinkSync(WATCHDOG_PID_FILE) } catch {}
   process.exit(0)
 })
@@ -193,10 +196,10 @@ process.on('uncaughtException', e => {
   process.stderr.write(`watchdog: uncaught exception (${e}) — staying up; the next tick retries\n`)
 })
 
-process.on('SIGUSR1', () => void tick())   // ensure-daemon's nudge: the daemon is down — respawn it NOW
+process.on('SIGUSR1', () => void tick('SIGUSR1 nudge'))   // ensure-daemon's nudge: the daemon is down — respawn it NOW
 process.stderr.write(`watchdog: up (pid ${process.pid}), checking every ${CHECK_MS / 1000}s\n`)
 reapZombies()                                   // sweep any orphans already adopted at startup
 setInterval(reapZombies, REAP_MS).unref?.()     // and keep reaping re-parented orphans
 try { process.on('SIGCHLD', reapZombies) } catch {}   // reap the instant an adopted orphan exits (sweep backstops)
-await tick()
-setInterval(() => void tick(), CHECK_MS)
+await tick('boot')
+setInterval(() => void tick('tick'), CHECK_MS)
