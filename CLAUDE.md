@@ -373,6 +373,18 @@ evidence: it is an INJECTION inbox, and its listing is scoped to one config dir,
 `git archive HEAD`) and `scripts/session-freedom-probe.ts`, which runs both readings over every live
 pane and is how the disagreement was observed rather than argued.
 
+**A delivery that is refused, held, buffered or dropped says so in daemon.log at the point of decision,
+in one format, through `logDecision` (`delivery-log.ts`)** — a bus row sat 49 minutes behind a veto with
+ZERO log lines (2026-08-16), and ~70 such branches were silent. `grep "daemon: delivery "` is the whole
+picture. The guard is once-per-transition per subject plus a 5-minute reminder, and **it also governs the
+old per-sweep `was NOT pasted` and `registry SILENT` lines (a deliberate cadence change, ruling 2026-08-16:
+379 lines for two rows in 50 minutes) — a quieter log there is the guard working, not a stopped sweep**;
+a change of reading logs unthrottled, so a flapping gate is loud by design. Branches deliberately silent
+are enumerated in `$(tg shared)/unit2-design-note.md` §3; a refusing branch added silent is a defect
+against that list. Controls: `delivery-log.test.ts` (fake clock), `delivery-log-sites.test.ts` (source
+enumeration), `bun scripts/logging-only-diff.ts` (a diff of the delivery files strips log calls and must
+leave no residual). Alarms (`BUS ALARM`) reach @chat as quiet bus acks since v0.5.140, never his DM.
+
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
 instead: `checkConcludedTurnObligations` nudges THE SESSION once per ask, after a grace; nothing

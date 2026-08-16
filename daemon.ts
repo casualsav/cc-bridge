@@ -118,6 +118,7 @@ import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { paneFreedom } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
+import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
   type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
@@ -3747,21 +3748,22 @@ async function relaySlashToSession(
     // this session. A park's evaluation pass asked for nothing: it polls, and losing a round is its
     // normal operation, so closing somebody's topic row from inside it is a mutation by a verb that
     // did nothing. `paneGone` carries the same condition that used to sit here, unchanged.
+    logDecision({ key: `slash:${toSid}:${command}`, family: 'ctl', what: `slash ${command}`, target: nameForEndpoint(toSid, endpoints), pane: targetPane, decision: 'REFUSED', predicate: 'no live pane' })
     return { ok: false, why: 'target session has no live pane', retry: true, paneGone: !(targetPane && isPaneRestarting(targetPane)) }
   }
   const cap = await capturePane(targetPane).catch(() => '')
   // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
   // bare prompt read passes on a busy pane and the CLI then queues the command instead of running
   // it — reported as submitted, and (for a changesPaneContext command) as complete moments later.
-  if (!cap || !paneRunsTypedInput(cap)) return { ok: false, why: MID_TURN_REFUSAL, retry: true }
-  if (bashModeArmed(cap)) return { ok: false, why: 'target has an unsubmitted ! bash command in its input box', retry: true }
+  if (!cap || !paneRunsTypedInput(cap)) { logDecision({ key: `slash:${toSid}:${command}`, family: 'ctl', what: `slash ${command}`, target: nameForEndpoint(toSid, endpoints), pane: targetPane, decision: 'REFUSED', predicate: 'paneRunsTypedInput=false' }); return { ok: false, why: MID_TURN_REFUSAL, retry: true } }
+  if (bashModeArmed(cap)) { logDecision({ key: `slash:${toSid}:${command}`, family: 'ctl', what: `slash ${command}`, target: nameForEndpoint(toSid, endpoints), pane: targetPane, decision: 'REFUSED', predicate: 'bashModeArmed=true' }); return { ok: false, why: 'target has an unsubmitted ! bash command in its input box', retry: true } }
   // A box that already holds something is refused rather than typed over. Two relays stacking in
   // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
   // sitting there is somebody's text, so clearing it here is not ours to do. Its OWN styled read:
   // `cap` above is colourless, and the faint attribute is the only thing separating a real draft
   // from the CLI's suggestion ghost — this refusal fired for hours against a ghost on 2026-08-03.
   const boxNow = inputBoxOccupant(await capturePaneStyled(targetPane).catch(() => ''))
-  if (boxNow) return { ok: false, why: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent`, retry: true }
+  if (boxNow) { logDecision({ key: `slash:${toSid}:${command}`, family: 'ctl', what: `slash ${command}`, target: nameForEndpoint(toSid, endpoints), pane: targetPane, decision: 'REFUSED', predicate: `box occupied ${JSON.stringify(boxNow.slice(0, 40))}` }); return { ok: false, why: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent`, retry: true } }
   const toName = nameForEndpoint(toSid, endpoints)
   // Every exit from here on is explicit. This case used to set `text = '!…'` for a refusal and break
   // to a shared `ok: true` write, so a refused relay reached the caller as `ok:` with exit 0 — a
@@ -4197,7 +4199,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // recorded-but-unflushed at the moment the defer branch was removed. agent-bus.ts carries the
     // full history at the predicates' old site; do not reintroduce a defer to save wake cost.
     const pane = await paneForSession(cur.toSid).catch(() => null)
-    if (!pane) return 'no-session'
+    if (!pane) { logDecision({ key: `ask:${cur.id}`, family: 'bus', what: `${cur.noReply ? 'ack' : 'ask'} ${cur.id}`, target: cur.toName, pane: null, decision: 'HELD', predicate: 'no pane (paneForSession)' }); return 'no-session' }
     // UNIT 0 (2026-08-16) — THE FREEDOM CHECK COMES OFF THE SCREEN. Claude Code writes its own
     // per-session state to `<config dir>/sessions/<pid>.json`, status included; `session-freedom.ts`
     // reads it. This runs BEFORE the capture because it is both cheaper and more trustworthy: a
@@ -4211,12 +4213,15 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // alone, which is exactly the shipped v0.5.128 behaviour and so can never be a regression — but it
     // is LOGGED, because a check that silently stops checking is this repo's most expensive class.
     const freedom = paneFreedom(pane, listAccounts().map(a => a.configDir))
-    if (freedom.freedom === 'busy') return 'busy'
+    const what = `${cur.noReply ? 'ack' : 'ask'} ${cur.id}`
+    if (freedom.freedom === 'busy') { logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: `paneFreedom=busy (${freedom.why})` }); return 'busy' }
     if (freedom.freedom === 'unknown') {
-      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} — session registry SILENT for ${pane} (${freedom.why}); falling back to the screen gate\n`)
+      // Under the unit-2 guard since v0.5.141: per sweep per row before, so a silent registry wrote
+      // this line four times a minute per held row. First reading + transitions + a 5-minute reminder now.
+      logDecision({ key: `registry:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: `session registry SILENT (${freedom.why})`, hint: 'falling back to the screen gate' })
     }
     const cap = await capturePane(pane).catch(() => '')
-    if (!cap) return 'no-session'
+    if (!cap) { logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: 'capture empty' }); return 'no-session' }
     // R-1 (2026-08-15) — THE RESTORATION. v0.3.35 promised "deliver iff the target is at a normal
     // prompt (never mid-turn) … an ask to a busy agent waits politely instead of clobbering its
     // turn", and `onNormalPrompt` did not keep it: the queued-messages bar is a ❯ row between two
@@ -4230,7 +4235,13 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       atPrompt: onNormalPrompt(cap), working: detectWorking(cap),
       queued: hasQueuedMessages(cap), bashArmed: bashModeArmed(cap),
     })
-    if (gate !== 'deliver') return gate
+    if (gate !== 'deliver') {
+      // The gate folds working/queued/bashArmed into one 'busy'; the line does not — the sub-predicate
+      // is what tells a queued-messages bar from a spinner from an armed `!` box.
+      logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD',
+        predicate: `planAskGate=${gate} (atPrompt=${+onNormalPrompt(cap)} working=${+detectWorking(cap)} queued=${+hasQueuedMessages(cap)} bashArmed=${+bashModeArmed(cap)})` })
+      return gate
+    }
     const room = busLedgerRoom()
     // Digest (agent-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
     // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
@@ -4284,10 +4295,16 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
         : blocking != null
           ? `was NOT pasted into ${pane} — it already holds typed text (${JSON.stringify(blocking)}); the ask stays open and will retry`
           : `could not be pasted into ${pane} — nothing landed; the retry will paste afresh`
-      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${why}\n`)
+      // Under the unit-2 guard since v0.5.141 (a deliberate CADENCE change, ruling 2026-08-16): the
+      // occupied case fired every 15s per row — 379 lines for two rows in 50 minutes — and now writes
+      // the same text once, on each change of reading, and as a 5-minute reminder. A quieter log here
+      // is the guard working, not a stopped sweep. unsubmitted / not-landed are single-shot as before.
+      if (blocking != null) logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: `box occupied ${JSON.stringify(blocking.slice(0, 40))}`, hint: 'the ask stays open and will retry' })
+      else process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${why}\n`)
     }
     const ok = outcome === 'landed'
     if (ok) {
+      forgetDecision(`ask:${cur.id}`); forgetDecision(`registry:${cur.id}`)   // a later hold of this row is a new story
       markBoxBlocked(cur.id, null)   // it delivered, so whatever was in the way is gone
       markPasted(cur.id, null)   // the box is ours no longer — a later retry must paste, not Enter
       // R-4 (2026-08-15): THE PASTE LANDED. THE DELIVERY IS NOT PROVED. Everything that assumes the
@@ -4423,17 +4440,18 @@ async function confirmInjections(): Promise<void> {
 type AsideDelivery = 'delivered' | 'not-landed' | 'occupied' | 'blocked' | 'wedged' | 'no-session'
 async function deliverAside(toSid: string, fromName: string, text: string, refs: string[]): Promise<AsideDelivery> {
   const pane = await paneForSession(toSid).catch(() => null)
-  if (!pane) return 'no-session'
+  const refused = (predicate: string): void => { logDecision({ family: 'bus', what: `btw from @${fromName}`, target: nameForEndpoint(toSid, busEndpoints()), pane, decision: 'REFUSED', predicate, hint: 'nothing queued' }) }
+  if (!pane) { refused('no pane (paneForSession)'); return 'no-session' }
   const cap = await capturePane(pane).catch(() => '')
-  if (!cap) return 'no-session'
-  if (!paneAcceptsText(cap)) return 'blocked'
-  if (!onNormalPrompt(cap) && !detectWorking(cap)) return 'wedged'
+  if (!cap) { refused('capture empty'); return 'no-session' }
+  if (!paneAcceptsText(cap)) { refused('paneAcceptsText=false'); return 'blocked' }
+  if (!onNormalPrompt(cap) && !detectWorking(cap)) { refused('!onNormalPrompt && !detectWorking (wedged)'); return 'wedged' }
   // The outcome form, not the boolean: an aside is the one prose delivery whose sender is still inside
   // the turn that sent it, so "their box already holds typed text" is a fact it can act on — wait,
   // escalate, or tell a human — and collapsing it into 'not-landed' would send them to resend forever.
   const outcome = await busDeliverOutcome(pane, formatAsideBlock(fromName, text, refs))
-  if (outcome === 'occupied') return 'occupied'
-  if (outcome !== 'landed') return 'not-landed'
+  if (outcome === 'occupied') { refused('box occupied'); return 'occupied' }
+  if (outcome !== 'landed') { refused(`busDeliverOutcome=${outcome}`); return 'not-landed' }
   // NO markSeen — and this is the line most likely to be "fixed" back in by someone copying
   // tryDeliverAsk. The watermark means "this endpoint has been caught up to HERE", and it is only
   // sound because a delivery that advances it also SHOWS the digest. An aside shows none (a digest is
@@ -4856,6 +4874,7 @@ async function sweepBus(): Promise<void> {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
   }
   await evaluateWatches().catch(() => {})   // `tg watch` rides this tick; nothing new polls
+  gcDecisions(Date.now())   // unit-2 guard entries whose subject went quiet (delivered, reaped, expired)
   // LAST in the sweep, deliberately: every alarm below asks "is this still stuck?", and asking it
   // before the delivery loop above would page about rows this same tick was on its way to hand over.
   await sweepBusAlarms(room).catch(() => {})
@@ -4964,7 +4983,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const body = stripAnsi(rawBody)
   const room = busLedgerRoom()
   const cur = getPending(pending.id)
-  if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
+  if (!cur) { logDecision({ family: 'bus', what: `answer ${pending.id} by @${answerer}`, target: pending.fromName, pane: null, decision: 'REFUSED', predicate: 'row already closed (getPending miss)' }); return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)` }
   removePending(cur.id)
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
@@ -5006,7 +5025,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
     return `answered the owner directly (ask ${cur.id})`
   }
   const askerPane = await paneForSession(cur.fromSid).catch(() => null)
-  if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
+  if (!askerPane) { logDecision({ family: 'bus', what: `answer ${cur.id} by @${answerer}`, target: cur.fromName, pane: null, decision: 'REFUSED', predicate: 'no pane (paneForSession)', hint: 'row restored' }); putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
   // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
   // asker knows why it arrives after a "timed out" note. Prepend to the delivered body + the room card.
   const late = cur.expiredAt != null
@@ -5035,6 +5054,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // box that never held it. Third surface with the same conflation (after the TTL notice and
   // askResultText); hit live while reporting the other two, when @chat's own box was occupied.
   if (!ok) {
+    logDecision({ family: 'bus', what: `answer ${cur.id} by @${answerer}`, target: cur.fromName, pane: askerPane, decision: 'REFUSED', predicate: outcome === 'occupied' ? 'box occupied' : `busDeliverOutcome=${outcome}`, hint: 'row restored, answer body not stored' })
     putPending(cur)
     return outcome === 'occupied'
       ? `!couldn't deliver to @${cur.fromName} — their input box already holds typed text of their own, so nothing was pasted on top of it. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` once that box clears (the ask is kept open)`
@@ -7468,27 +7488,27 @@ async function handleCall(
         // being expanded, notifying and routable. An ASIDE is refused: it lands mid-turn in a pane,
         // and he has none.
         if (isOwnerAddress(String(args.to ?? ''))) {
-          if (aside) { write({ t: 'result', id, ok: false, text: 'an aside lands mid-turn in a session\'s pane, and @owner has none — use `tg ack @owner -` (it reaches him as a card he can reply to)' }); return }
+          if (aside) { logDecision({ family: 'bus', what: verb, target: 'owner', pane: null, decision: 'REFUSED', predicate: 'isOwnerAddress=true; @owner has no pane' }); write({ t: 'result', id, ok: false, text: 'an aside lands mid-turn in a session\'s pane, and @owner has none — use `tg ack @owner -` (it reaches him as a card he can reply to)' }); return }
           await handleCall('post', { pane: args.pane, text: args.text }, write, id)
           return
         }
         const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
-        if (!fromSid) { write({ t: 'result', id, ok: false, text: `\`tg ${verb}\` must run inside a bridged session` }); return }
+        if (!fromSid) { logDecision({ family: 'bus', what: verb, target: String(args.to ?? ''), pane: null, decision: 'REFUSED', predicate: 'caller pane not bridged' }); write({ t: 'result', id, ok: false, text: `\`tg ${verb}\` must run inside a bridged session` }); return }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
-        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        if (res.kind === 'claude' && res.id === fromSid) { write({ t: 'result', id, ok: false, text: `can't ${verb} yourself` }); return }
+        if ('error' in res) { logDecision({ family: 'bus', what: verb, target: String(args.to ?? ''), pane: null, decision: 'REFUSED', predicate: 'unknown target' }); write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind === 'claude' && res.id === fromSid) { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'self-target' }); write({ t: 'result', id, ok: false, text: `can't ${verb} yourself` }); return }
         // A hermes endpoint is a one-shot subprocess whose only output IS its answer. Acking one would
         // spawn a run whose result nothing is waiting for — the cost with none of the point.
-        if (noReply && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it only runs asks, so there is nothing to ack` }); return }
+        if (noReply && res.kind !== 'claude') { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'hermes cannot take ack' }); write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it only runs asks, so there is nothing to ack` }); return }
         // Same reasoning for an aside, one step further: a hermes one-shot has no pane to interrupt and
         // no turn to steer, so there is nothing an aside could even land in.
-        if (aside && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it has no live pane, so there is nothing an aside can reach` }); return }
+        if (aside && res.kind !== 'claude') { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'hermes has no pane for an aside' }); write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it has no live pane, so there is nothing an aside can reach` }); return }
         const askText = String(args.text ?? '').trim()
-        if (!askText) { write({ t: 'result', id, ok: false, text: `empty ${verb}` }); return }
+        if (!askText) { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'empty text' }); write({ t: 'result', id, ok: false, text: `empty ${verb}` }); return }
         // The chat lane cannot dispatch its first repo ask from an unexamined context. Existing workers,
         // acks and mid-turn asides bypass this gate; only the owner's orchestration ask is stopped once.
         if (name === 'ask' && res.kind === 'claude') {
@@ -7496,7 +7516,7 @@ async function handleCall(
           const repoRoot = targetCwd ? await repoBriefRoot(targetCwd) : null
           if (repoRoot) {
             const preflight = await repoDispatchPreflight(fromSid, repoRoot)
-            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
+            if (preflight) { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'repoDispatchPreflight' }); write({ t: 'result', id, ok: false, text: preflight }); return }
           }
         }
         const fromName = nameForEndpoint(fromSid, endpoints)
@@ -7505,13 +7525,14 @@ async function handleCall(
         const refs: string[] = []
         for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
           const c = confineRef(r, sharedDir(room))
-          if ('error' in c) { write({ t: 'result', id, ok: false, text: c.error }); return }
-          if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r} — write deliverables into \`tg shared\`` }); return }
+          if ('error' in c) { logDecision({ family: 'bus', what: verb, target: toName, pane: null, decision: 'REFUSED', predicate: 'ref outside shared dir' }); write({ t: 'result', id, ok: false, text: c.error }); return }
+          if (!existsSync(c.path)) { logDecision({ family: 'bus', what: verb, target: toName, pane: null, decision: 'REFUSED', predicate: 'ref missing' }); write({ t: 'result', id, ok: false, text: `ref not found: ${r} — write deliverables into \`tg shared\`` }); return }
           refs.push(c.path)
         }
         // Hermes endpoints have no busy-pane to clobber; a fork-bomb cap gates them. Check it BEFORE the
         // hop guard so a cap-rejected ask doesn't burn a hop (the asker retries after "retry shortly").
         if (res.kind === 'hermes' && hermesInFlight.size >= HERMES_MAX_CONCURRENT) {
+          logDecision({ family: 'bus', what: verb, target: toName, pane: null, decision: 'REFUSED', predicate: `hermes cap ${HERMES_MAX_CONCURRENT} reached` })
           write({ t: 'result', id, ok: false, text: `too many Hermes tasks running (${hermesInFlight.size}) — retry shortly` }); return
         }
         // Loop-breaker: chain DEPTH, not volume. Only claude→claude can loop (a `hermes -z` one-shot
@@ -7529,6 +7550,7 @@ async function handleCall(
           askDepth = nextAskDepth(fromSid)
           if (depthExceeded(askDepth)) {
             void notifyChainPaused(fromName, toName, askDepth)
+            logDecision({ family: 'bus', what: verb, target: toName, pane: null, decision: 'REFUSED', predicate: `depth ${askDepth} > limit ${depthLimit()}` })
             write({ t: 'result', id, ok: false, text: `paused: this ask is ${askDepth} agent hops deep with no human or threshold in the chain (limit ${depthLimit()}) — @chat has been woken to unstick it; a human reply also resumes the room` }); return
           }
         }
@@ -7577,7 +7599,7 @@ async function handleCall(
         // it is the one that gets to say so instead of throwing into the log.
         let p: BusPending
         try { p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now()) }
-        catch (e) { write({ t: 'result', id, ok: false, text: `${e instanceof Error ? e.message : e} — nothing was sent; answer or close some open asks and retry` }); return }
+        catch (e) { logDecision({ family: 'bus', what: verb, target: toName, pane: null, decision: 'REFUSED', predicate: `createPending threw: ${e instanceof Error ? e.message : e}` }); write({ t: 'result', id, ok: false, text: `${e instanceof Error ? e.message : e} — nothing was sent; answer or close some open asks and retry` }); return }
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         // The sender's own copy for its mini-app feed — the words left through a command argument, so
         // its transcript holds no trace of them (outbound-feed.ts).
@@ -8108,22 +8130,23 @@ async function handleCall(
       case 'keys': {
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
-        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg keys` must run inside a bridged session' }); return }
+        if (!fromSid) { logDecision({ family: 'ctl', what: `keys ${(Array.isArray(args.keys) ? args.keys as string[] : []).join(' ')}`, target: String(args.to ?? ''), pane: null, decision: 'REFUSED', predicate: 'caller pane not bridged' }); write({ t: 'result', id, ok: false, text: '`tg keys` must run inside a bridged session' }); return }
         const norm = normalizeKeys(Array.isArray(args.keys) ? args.keys as string[] : [])
-        if ('error' in norm) { write({ t: 'result', id, ok: false, text: norm.error }); return }
+        if ('error' in norm) { logDecision({ family: 'ctl', what: `keys ${(Array.isArray(args.keys) ? args.keys as string[] : []).join(' ')}`, target: String(args.to ?? ''), pane: null, decision: 'REFUSED', predicate: `normalizeKeys: ${norm.error}` }); write({ t: 'result', id, ok: false, text: norm.error }); return }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
-        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'keys needs a live session target (a hermes endpoint has no pane)' }); return }
+        if ('error' in res) { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: String(args.to ?? ''), pane: null, decision: 'REFUSED', predicate: 'unknown target' }); write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind !== 'claude') { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'hermes endpoint has no pane' }); write({ t: 'result', id, ok: false, text: 'keys needs a live session target (a hermes endpoint has no pane)' }); return }
         const toName = nameForEndpoint(res.id, endpoints)
         // Same target restrictions as kill: never yourself (you'd be typing into your own pane
         // mid-turn), never a chat lane (the owner's own surface, not a worker).
-        if (res.id === fromSid) { write({ t: 'result', id, ok: false, text: `that's the session running this command — send keys to another session` }); return }
-        if (isChatLaneSession(res.id)) { write({ t: 'result', id, ok: false, text: `@${toName} is a chat lane, the owner's own surface — owner-only` }); return }
+        if (res.id === fromSid) { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: toName, pane: null, decision: 'REFUSED', predicate: 'self-target' }); write({ t: 'result', id, ok: false, text: `that's the session running this command — send keys to another session` }); return }
+        if (isChatLaneSession(res.id)) { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: toName, pane: null, decision: 'REFUSED', predicate: 'chat lane target' }); write({ t: 'result', id, ok: false, text: `@${toName} is a chat lane, the owner's own surface — owner-only` }); return }
         const targetPane = await paneForSession(res.id).catch(() => null)
         if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
           if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
+          logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: toName, pane: targetPane, decision: 'REFUSED', predicate: 'no live pane' })
           write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
         }
         const cap = await capturePane(targetPane).catch(() => '')
@@ -8133,9 +8156,9 @@ async function handleCall(
           force: !!args.force,
           keys: norm.keys,
         })
-        if (!gate.ok) { write({ t: 'result', id, ok: false, text: gate.reason }); return }
+        if (!gate.ok) { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: toName, pane: targetPane, decision: 'REFUSED', predicate: `planKeyInjection: ${gate.reason}` }); write({ t: 'result', id, ok: false, text: gate.reason }); return }
         const rate = planKeyRate(keySendHistory.get(targetPane) ?? [], norm.keys.length, Date.now())
-        if (!rate.ok) { write({ t: 'result', id, ok: false, text: rate.reason }); return }
+        if (!rate.ok) { logDecision({ family: 'ctl', what: `keys ${norm.keys.join(' ')}`, target: toName, pane: targetPane, decision: 'REFUSED', predicate: 'key rate limit' }); write({ t: 'result', id, ok: false, text: rate.reason }); return }
         keySendHistory.set(targetPane, rate.next)
         const sent = norm.keys.join(' ')
         const fromName = nameForEndpoint(fromSid, endpoints)
@@ -9460,17 +9483,22 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       : ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)
     void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
      try {
+      let promptSeen = false
       for (let i = 0; i < 45; i++) {
         await sleep(1000)
         const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
-        if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
+        if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) { promptSeen = true; break }
       }
+      // Logging only (unit 2): the paste below goes ahead exactly as it always did — this names the
+      // case where it goes ahead against a REPL that never showed a prompt in 45s.
+      if (!promptSeen) process.stderr.write(`daemon: founding ${p ? `ask ${p.id}` : 'message'} → @${topicName} (${newPane}): no prompt within 45s of spawn — pasting anyway\n`)
       // busDeliver serializes on the same inject chain as human inbound, so the block can't
       // interleave with a message the owner types into the new topic mid-boot.
       // On the ask path, `from=owner` for the same reason the flag exists: the founding message is the
       // owner's own words, and the new session has to write its answer for a person rather than for an
       // orchestrator. On the human path the envelope says it by being the one his DM already wears.
       if (!(await busDeliver(newPane, block).catch(() => false))) {
+        logDecision({ family: 'bus', what: `founding ${p ? `ask ${p.id}` : 'message'}`, target: topicName, pane: newPane, decision: 'DROPPED', predicate: 'busDeliver=false (paste did not land)', hint: p ? 'row removed, spawner told' : 'spawner told' })
         if (p) removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
         if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
         else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
@@ -22275,6 +22303,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     // Closing from inside the drill-in is the same verb the card's ✕ is, so it goes through the same
     // function — an openclaw agent has no pane and killHermesPane would report it as not running.
     if (action === 'close') return isOpenclaw(agent) ? await webappAgentAct(userId, agent.name, 'close') : (await killHermesPane(agent.name)) ? null : `@${agent.name} isn't running.`
+    logDecision({ family: 'ctl', what: `webapp ${action}`, target: agent.name, pane: null, decision: 'REFUSED', predicate: `agent endpoint has no ${action} control` })
     return `@${agent.name} is a Hermes agent — ${action} is a Claude Code control and it has none.`
   }
   const pane = await paneForSession(sid).catch(() => null)
@@ -22310,7 +22339,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     if (topic && topic.threadId == null) updateTopic(sid, { closed: true, killedAt: Date.now() })
     return null                                             // a dead topic session is reaped by the reconcile sweep
   }
-  if (!pane || !(await paneAlive(pane).catch(() => false))) return 'no live pane for this session'
+  if (!pane || !(await paneAlive(pane).catch(() => false))) { logDecision({ family: 'ctl', what: `webapp ${action}`, target: getTopicBySession(sid)?.name || sid, pane, decision: 'REFUSED', predicate: 'no live pane' }); return 'no live pane for this session' }
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   if (action === 'stop') {
     const keys = agentInterruptKeys(await paneAgentKind(pane))
@@ -22344,7 +22373,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       return r.ok ? null : r.reason
     }
     const cap = await capturePane(pane).catch(() => '')
-    if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return 'the session is mid-turn — try again when it goes idle'
+    if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) { logDecision({ family: 'ctl', what: `webapp ${action}`, target: getTopicBySession(sid)?.name || sid, pane, decision: 'REFUSED', predicate: 'not mid-turn check failed' }); return 'the session is mid-turn — try again when it goes idle' }
     if (action === 'model') {
       const cwd = await paneCwd(pane).catch(() => null)
       const file = await transcriptForPane(pane, cwd)
@@ -22364,7 +22393,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       // Discovery can take a few seconds. Refuse if work started while it was in flight rather than
       // typing /exit into a turn the user began after tapping the menu.
       const current = await capturePane(pane).catch(() => '')
-      if (!current || !onNormalPrompt(current) || detectWorking(current)) return 'the session is mid-turn — try again when it goes idle'
+      if (!current || !onNormalPrompt(current) || detectWorking(current)) { logDecision({ family: 'ctl', what: `webapp ${action}`, target: getTopicBySession(sid)?.name || sid, pane, decision: 'REFUSED', predicate: 'not mid-turn check failed after discovery' }); return 'the session is mid-turn — try again when it goes idle' }
       const conversationId = agentSessionId(file)
       if (!conversationId) return 'could not resolve this conversation id — nothing was changed'
       const account = await paneAccount(pane)
@@ -22388,7 +22417,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   // command because it started with a slash. slash-policy.ts is that view; the refusals surface as
   // the composer's error toast, which also hands the draft back so it can be edited.
   const plan = planSlash(msg)
-  if (plan.kind === 'refuse') return plan.reason
+  if (plan.kind === 'refuse') { logDecision({ family: 'ctl', what: `webapp ${action}`, target: getTopicBySession(sid)?.name || sid, pane, decision: 'REFUSED', predicate: 'planSlash=refuse' }); return plan.reason }
   // A bridge command the app can SHOW opens that screen instead of being refused with prose about
   // it — and, crucially, instead of reaching the CLI. `/files` was in neither table before this and
   // fell through to the pane, where the slash palette fuzzy-matched it. Nothing is typed here, so
