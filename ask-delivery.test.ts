@@ -22,19 +22,11 @@ test('a landed delivery says so, unambiguously', () => {
   expect(t).not.toMatch(/QUEUED|NOT DELIVERED/)
 })
 
-test('UNIT 1: a mid-turn target is REFUSED — nothing queued, and the sender is told to re-send', () => {
+test('11b: a mid-turn target is reported as queued, never as done', () => {
   const t = askResultText('busy', 'ccbridge', 95)
+  expect(t).toContain('QUEUED')
   expect(t).toMatch(/mid-turn|busy/i)
   expect(t).not.toBe(legacy('ccbridge', 95))
-  // The contract inverted here on 2026-08-16 (owner ruling): the bus mints nothing on a delivery that
-  // did not happen, so this line must NOT promise a later landing — that promise is what let a
-  // 52-minute-old ask arrive into a question somebody else had already answered.
-  expect(t).toContain('nothing queued')
-  expect(t).toMatch(/re-send/i)
-  expect(t).not.toMatch(/QUEUED,/)             // the old "⏳ QUEUED, not yet delivered" promise
-  expect(t).not.toMatch(/it lands when/i)
-  // And it names the remedy, because a refusal without one is just a loss the sender has to notice.
-  expect(t).toContain('tg watch ccbridge')
 })
 
 // The distinction the owner asked for: "mid-turn" is normal and self-clearing; "not at a prompt with
@@ -43,13 +35,13 @@ test('11b: a wedged target is distinguishable from a merely busy one', () => {
   const wedged = askResultText('wedged', 'ccbridge', 95)
   const busy = askResultText('busy', 'ccbridge', 95)
   expect(wedged).not.toBe(busy)
-  expect(wedged).toContain('NOT delivered')
+  expect(wedged).toContain('NOT DELIVERED')
   expect(wedged).toMatch(/wedged|not at a prompt/i)
 })
 
 test('11b: a target with no live session is reported as such', () => {
   const t = askResultText('no-session', 'ccbridge', 95)
-  expect(t).toContain('NOT delivered')
+  expect(t).toContain('NOT DELIVERED')
   expect(t).toMatch(/not running|no live/i)
 })
 
@@ -60,15 +52,10 @@ test("an occupied box is never described as OUR message sitting unsubmitted", ()
   // for our message in a box that had never held it — verified live on 2026-08-03 against a real
   // staged draft, which reported the 'not-landed' sentence before this split.
   const t = askResultText('occupied', 'ccbridge', 95)
-  expect(t).toContain('NOT delivered')
+  expect(t).toContain('NOT DELIVERED')
   expect(t).toMatch(/their|OWN/i)                       // whose text it is, is the whole point
-  expect(t).not.toMatch(/sitting unsubmitted/i)         // that claim belongs to the STRANDED line alone
-  // Control: "sitting unsubmitted" is now the stranded line's claim, not an outcome's — it is the one
-  // case where a row IS kept, so it is also the one line that must not ask for a re-send.
-  const stranded = askResultText('not-landed', 'ccbridge', 95, 0, true)
-  expect(stranded).toMatch(/sitting unsubmitted/i)
-  expect(stranded).toMatch(/do NOT re-send/i)
-  expect(stranded).not.toContain('nothing queued')
+  expect(t).not.toMatch(/sitting unsubmitted/i)         // that claim belongs to 'not-landed' alone
+  expect(askResultText('not-landed', 'ccbridge', 95)).toMatch(/sitting unsubmitted/i)   // control
 })
 
 // ---- queue depth: the number that stops a fan-out building a bottleneck --------------------------
@@ -77,23 +64,14 @@ test("an occupied box is never described as OUR message sitting unsubmitted", ()
 // orchestrator stacked five without seeing it and learned only from what never came back (owner's
 // box, 2026-08-09). The count rides the reply to the command doing the stacking.
 
-test('a refused outcome names how many the target already holds unanswered', () => {
+test('a queued outcome names how many the target already holds unanswered', () => {
   const t = askResultText('busy', 'ccbridge', 95, 4)
   expect(t).toContain('4 unanswered ahead of it')
-  // Inside a parenthesis, not trailing the line: a sender has stopped reading by the time an
-  // instruction to re-send is over. A REFUSAL's parenthesis does not name an ask id, and that is the
-  // point of Unit 1 rather than an omission — id 95 was removed from the pending store, so quoting it
-  // would send the reader to `tg answer 95` on a row that no longer exists.
-  expect(t).toMatch(/\(nothing was minted, 4 unanswered ahead of it\)/)
-  expect(t).not.toMatch(/ask 95/)
+  // Inside the `(ask N …)` parenthesis, not trailing the line: a sender has stopped reading by the
+  // time the "they answer with" instruction is over.
+  expect(t).toMatch(/\(ask 95, 4 unanswered ahead of it\)/)
   // And it is the ONLY difference — the rest of the outcome's line is untouched.
   expect(t.replace(', 4 unanswered ahead of it', '')).toBe(askResultText('busy', 'ccbridge', 95))
-})
-
-test('a DELIVERED ask still names its id — that row exists and is answerable', () => {
-  const t = askResultText('delivered', 'ccbridge', 95, 4)
-  expect(t).toMatch(/\(ask 95, 4 unanswered ahead of it\)/)
-  expect(t).toContain('tg answer 95')
 })
 
 // THE ONE THIS UNIT EXISTS FOR, and the half a first draft got backwards. A mid-turn target still
@@ -153,12 +131,7 @@ test('TRIPWIRE: every delivery outcome has its own honest line', () => {
     seen.set(t, s)
     if (s !== 'delivered') {
       expect(t, `outcome "${s}" did not land, so its line must not claim delivery`).not.toMatch(/^delivered\b/)
-      // UNIT 1: the flag is "NOT delivered, and nothing is holding it for you". The old contract said
-      // QUEUED here, and that promise is exactly what a refusing bus must never make — a sender who
-      // reads "queued" does not re-send, and nothing else will.
-      expect(t, `outcome "${s}" must be flagged as not delivered`).toMatch(/NOT delivered/)
-      expect(t, `outcome "${s}" must not promise a queue the bus no longer keeps`).toContain('nothing queued')
-      expect(t, `outcome "${s}" must tell the sender to re-send — it is the only thing that will`).toMatch(/re-send/i)
+      expect(t, `outcome "${s}" must be flagged as not-yet-delivered`).toMatch(/QUEUED/)
     }
   }
 })

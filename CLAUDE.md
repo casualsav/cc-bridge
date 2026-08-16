@@ -339,26 +339,11 @@ pane stamps), after snapshotting first. Fails open. Override: `CC_BRIDGE_ALLOW_T
 **A bus ask is answered with `tg answer`; a final text block is not an answer** — it reaches
 nobody, and the ask envelope says so at the collision point.
 
-**THE BUS DELIVERS OR REFUSES; THE ORCHESTRATOR HOLDS THE QUEUE** (v0.5.135, owner ruling — "I never
-wanted queue'd work to sit in the bus"). A CLI `tg ask` to a busy target refuses and **mints nothing**:
-no row to expire, nothing to arrive 52 minutes late into a settled question. The refusal lives at the
-ONE call site with a live sender, **never inside `tryDeliverAsk`** — nine of its eleven callers mint
-from `SYSTEM_SID` and have nobody who could read a refusal and re-send, so building it in deletes the
-fleet's own notifications. Acks keep auto-land (no retry story), and so does a spawn's founding ask;
-the one row kept on a non-delivery is a block already sitting in the target's box, because telling the
-sender to re-send while `recoverStrandedPastes` is about to Enter the first copy is the 2026-08-02
-duplicate. `tg queue` is where sequencing now lives, as a readable file that outlives a `/clear`.
-**Answers and the owner's own messages WAIT for a prompt rather than feeding the CLI queue** — they
-never refuse on busy, and each wait is bounded by its TRANSPORT: `ANSWER_WAIT_MS` must stay inside
-`tgctl`'s 30s socket timeout (at 90s three probes read `tgctl: timed out`, an unknown outcome), and the
-owner's is short because it is awaited inside the inbound handler. Proof: `unit1-refusal.test.ts`
-(source-bound, watched failing against `git archive HEAD`), `chat-queue.test.ts`.
-
-**A HELD row is still healthy — never let one age, never let one go quiet.** It is now an ACK, a system
-mint or a founding ask rather than an ask, and `heldTooLong` was re-scoped to them rather than deleted:
-its notice routes to the asker's pane, `SYSTEM_SID` has none, so it only ever served rows with somebody
-to tell. Three things follow, and each was a separate live loss: `injected` is stamped only on
-transcript proof, never on the paste;
+**THE BUS OWNS ITS QUEUE, and a HELD row is healthy — never let one age, never let one go quiet.**
+An ask to a mid-turn target is `'busy'` and waits in the bus's queue for the 15s sweep
+(`paneFreedom` then `planAskGate`, never a bare `onNormalPrompt` — that is TRUE on a working pane,
+which is how ten blocks went into @weather's CLI queue on 2026-08-15 and none became a turn). Three things follow, and
+each was a separate live loss: `injected` is stamped only on transcript proof, never on the paste;
 `expiredAt` — the field `tryDeliverAsk` bails on and `dropExpired` GCs on — is stamped only on a row
 that was DELIVERED, because a held row that expires becomes permanently undeliverable while its asker
 is told a late answer will still arrive (caught mid-flight on ask 523, owner ruling 2026-08-15: the

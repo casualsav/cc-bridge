@@ -241,10 +241,7 @@ test('his message confirms by REACTION on the message he typed — no card echoi
   // The card showed him what he had just sent, one message under it (his ruling, 2026-08-09). The
   // reaction says the same thing on the message itself. It fires on DELIVERY and nowhere earlier:
   // this path has no queue behind it, so "delivered" and "landed" are the same instant.
-  // 5500, not 4000: Unit 1's wait-for-a-prompt gate grew the function past the old window, and a slice
-  // that stops short reads exactly like the reaction having been deleted. The number is the slice size,
-  // never the contract — widen it when the function grows.
-  const dispatch = body('async function ownerDirectDispatch(', 5500)
+  const dispatch = body('async function ownerDirectDispatch(', 4000)
   expect(dispatch).toContain('REACTIONS.delivered')
   expect(dispatch.indexOf('REACTIONS.delivered')).toBeGreaterThan(dispatch.indexOf("if (outcome !== 'landed')"))
 })

@@ -117,7 +117,6 @@ import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { paneFreedom } from './session-freedom.ts'
-import { loadQueue, saveQueue, addItem, startItem, doneItem, renderQueue } from './chat-queue.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, type StuckRow } from './bus-alarm.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
@@ -3952,58 +3951,6 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
   return busDeliverOutcome(pane, block).then(o => o === 'landed')
 }
 
-// UNIT 1 — WAIT FOR A PROMPT INSTEAD OF FEEDING THE CLI'S QUEUE.
-//
-// `busDeliverOutcome` has no freedom gate of any kind: it pastes into whatever pane it is handed. That
-// is fine for the ask path, which gates in `tryDeliverAsk` — and it is how ANSWERS and the OWNER's own
-// messages have always gone straight into a busy session's CLI message queue, the same queue that
-// swallowed asks 472 and 474. Neither path has a bus queue behind it, so neither can be made to
-// "refuse and be re-sent" without losing something: an answer discharges an obligation that already
-// exists, and he is not to be bounced. So they WAIT here instead, in memory, for the length of one
-// call — no row, no persisted state, no stored body.
-//
-// EACH BOUND IS SET BY ITS TRANSPORT, and both were measured rather than chosen — a first cut used 90s
-// for both and live testing showed exactly why that is wrong:
-//
-//   ANSWER_WAIT_MS must fit inside tgctl's own 30s socket timeout. At 90s the CLI gave up first and the
-//   answering agent read `tgctl: timed out` — an UNKNOWN OUTCOME, which this repo forbids by rule: the
-//   agent cannot tell a delivered answer from a lost one, and re-running is then a coin flip between a
-//   duplicate and a loss. Observed live on three probes, 2026-08-16 03:21Z. 20s leaves ~10s for the
-//   paste and the round trip, so the caller ALWAYS gets a definite result.
-//
-//   OWNER_WAIT_MS is not socket-bound but is awaited inside the inbound handler chain, so every second
-//   here is a second the next Telegram update may be waiting. Short on purpose.
-//
-// 'unknown' from the registry is NOT a wait — it means the record cannot speak for this pane, and
-// waiting on a question nothing will ever answer is a hang. That falls straight through to the caller's
-// own screen gate, which is the pre-Unit-1 behaviour and so cannot regress.
-//
-// HONEST SCOPE, because "an answer waits for a prompt" is only true inside these bounds: past them it
-// is a REFUSAL, not a queue. Making it literally true for a session busy ten minutes means holding the
-// body somewhere, which is a queue — the thing Unit 1 removes — and that is a ruling nobody has made.
-const ANSWER_WAIT_MS = 20_000
-const OWNER_WAIT_MS = 12_000
-const PROMPT_POLL_MS = 1_000
-
-async function awaitPaneFree(pane: string, label: string, ms: number): Promise<'free' | 'timeout' | 'unknown'> {
-  const deadline = Date.now() + ms
-  let waited = false
-  for (;;) {
-    const f = paneFreedom(pane, listAccounts().map(a => a.configDir))
-    if (f.freedom === 'unknown') return 'unknown'
-    if (f.freedom === 'free') {
-      if (waited) process.stderr.write(`daemon: ${label} — ${pane} reached a prompt after ${Math.round((ms - (deadline - Date.now())) / 1000)}s; delivering now\n`)
-      return 'free'
-    }
-    if (Date.now() >= deadline) {
-      process.stderr.write(`daemon: ${label} — ${pane} still ${f.why} after ${Math.round(ms / 1000)}s; giving up the wait\n`)
-      return 'timeout'
-    }
-    if (!waited) { waited = true; process.stderr.write(`daemon: ${label} — ${pane} is ${f.why}; waiting for a prompt rather than queueing it in the CLI\n`) }
-    await sleep(PROMPT_POLL_MS)
-  }
-}
-
 // The three-outcome form. Only tryDeliverAsk uses it, because only a RETRIED delivery has a decision
 // to make: 'failed' may be pasted again, 'unsubmitted' may only be Enter'd again. Everything else on
 // the bus is fire-and-forget and reads the boolean above.
@@ -4886,12 +4833,12 @@ async function sweepBus(): Promise<void> {
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
     for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []) {
       void channel.sendText(chat,
-        `⏳ Ack ${p.id} is still HELD for <b>${escapeHtml(p.toName)}</b> after ${mins}m — it has NOT been delivered and it is not lost: ${escapeHtml(why)}.`,
+        `⏳ Ask ${p.id} is still HELD for <b>${escapeHtml(p.toName)}</b> after ${mins}m — it has NOT been delivered and it is not lost: ${escapeHtml(why)}.`,
         { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
     if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id,
-      `(ack ${p.id} has been HELD in the bus queue for @${p.toName} for ${mins}m — never delivered, and still queued: ${why}. Nothing is lost and nothing needs re-sending; a delivery still happens on its own.)`))
-    process.stderr.write(`daemon: ack ${p.id} to @${p.toName} still HELD after ${mins}m — ${why}\n`)
+      `(ask ${p.id} has been HELD in the bus queue for @${p.toName} for ${mins}m — never delivered, and still queued: ${why}. Nothing is lost and nothing needs re-sending; a delivery still happens on its own.)`))
+    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} still HELD after ${mins}m — ${why}\n`)
   }
   // BEFORE the delivery loop below, and the order is deliberate: this sweep is what makes a session
   // busy again within a second of reaching a prompt, so a parked command evaluated after the
@@ -5016,6 +4963,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const room = busLedgerRoom()
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
+  removePending(cur.id)
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
@@ -5024,27 +4972,6 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   if (cur.ownerDirect && route !== 'owner-card' && route !== 'system') {
     process.stderr.write(`daemon: ask ${cur.id} is ownerDirect but @${cur.fromName} has no DM chat lane — delivering into the pane instead\n`)
   }
-  // UNIT 1 ruling 1 (@chat ask 572) — AN ANSWER WAITS FOR A PROMPT; it does not go into the CLI's queue.
-  // Until now this path pasted unconditionally, so answering a mid-turn asker fed the same message queue
-  // that swallowed asks 472 and 474 — the last unguarded feed into it after Unit 0 closed the ask side.
-  // The answer is NOT refused on busy and NOT stored: an answer discharges an obligation that already
-  // exists, and a refusal the sender never retries is a lost answer plus a permanently open row, which
-  // is a new species of the very stall this build exists to kill.
-  //
-  // BEFORE `removePending`, and that ordering is the point. The row is removed only once we are
-  // committed to delivering; a wait with the row already gone would mean a daemon restart inside the
-  // window loses the ask AND the answer, with nothing to restore and nobody told. That window used to
-  // be one paste (~1s) and this wait would have widened it twentyfold.
-  let askerPane: string | null = null
-  if (route !== 'system' && route !== 'owner-card') {
-    askerPane = await paneForSession(cur.fromSid).catch(() => null)
-    if (!askerPane) return `!@${cur.fromName}'s session is no longer running — not delivered`
-    const free = await awaitPaneFree(askerPane, `answer to ask ${cur.id} → @${cur.fromName}`, ANSWER_WAIT_MS)
-    if (free === 'timeout') {
-      return `!@${cur.fromName} has been mid-turn for ${Math.round(ANSWER_WAIT_MS / 1000)}s, so nothing was pasted into their CLI queue. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` — the ask is kept open, so re-running is safe and is the ONLY thing that delivers it`
-    }
-  }
-  removePending(cur.id)
   if (route === 'system') {
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
     // The card says WHICH @system ask this answers. It read "handled a context nudge" for every kind
@@ -5076,7 +5003,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
     await sendOwnerAnswerCard(ownerChat!, answerer, shown, cur.toSid)
     return `answered the owner directly (ask ${cur.id})`
   }
-  // Resolved and waited on ABOVE, before the row was removed; non-null on every path that reaches here.
+  const askerPane = await paneForSession(cur.fromSid).catch(() => null)
   if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
   // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
   // asker knows why it arrives after a "timed out" note. Prepend to the delivered body + the room card.
@@ -7669,33 +7596,12 @@ async function handleCall(
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
           // @ccbridge. sweepBus still retries anything not delivered here.
-          const ahead = asksAheadOf(p)   // read BEFORE the row can be removed below
           const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
-          // UNIT 1 (2026-08-16, owner ruling via @chat ask 572) — AN ASK IS MINTED ONLY ON A DELIVERY
-          // THAT HAPPENED. The bus does not hold work: it delivers or it refuses, and the ORCHESTRATOR
-          // owns sequencing ("I never wanted queue'd work to sit in the bus — I wanted it to sit with
-          // the orchestration agent"). A refused ask leaves no row, so there is nothing to expire,
-          // nothing to deliver 52 minutes late into a question somebody else already answered
-          // (@weather, 2026-08-15 23:41), and no cancel verb to invent.
-          //
-          // ACKS ARE NOT TOUCHED and that is @chat's own call: an ack is fire-and-forget with no retry
-          // story, so losing one is worse than landing it late. Nor are the NINE system-minted callers
-          // of tryDeliverAsk (expiry notices, watch fires, spawn-news, ctx-nudge, …) — their sender is
-          // SYSTEM_SID, nobody who could read a refusal and re-send, which is why this lives at the one
-          // call site with a live sender on a socket rather than inside tryDeliverAsk.
-          //
-          // THE ONE ROW THAT SURVIVES A NON-DELIVERY: `pastedPane` set means our block IS sitting in
-          // the target's input box, unsubmitted. Removing that row would tell the sender to re-send
-          // while `recoverStrandedPastes` is still about to press Enter on the first copy — the
-          // duplicate class that put one @system ack into the chat lane twice on 2026-08-02. Nothing of
-          // ours reached the box in every other outcome, so re-sending is safe and the row goes.
-          const inTheirBox = getPending(p.id)?.pastedPane != null
-          if (!noReply && outcome !== 'delivered' && !inTheirBox) removePending(p.id)
           text = noReply
             ? (outcome === 'delivered'
                 ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
                 : `@${toName} is busy — the ack is queued and lands when it goes idle`)
-            : askResultText(outcome, toName, p.id, ahead, inTheirBox)
+            : askResultText(outcome, toName, p.id, asksAheadOf(p))
         }
         break
       }
@@ -8015,35 +7921,6 @@ async function handleCall(
       }
       case 'shared': {
         text = ensureSharedDir(busLedgerRoom())
-        break
-      }
-      // `tg queue` — the orchestrator's OWN queue, written down (Unit 1). Unit 1 takes the queue out of
-      // the bus, which is only an improvement if the agent's own queue outlives a /clear; this is that
-      // file. Nothing here dispatches anything — see chat-queue.ts on why a delivery trigger would
-      // rebuild the bus queue one directory over.
-      case 'queue': {
-        const file = join(ensureSharedDir(busLedgerRoom()), 'chat-queue.json')
-        const sub = args.sub ? String(args.sub) : 'list'
-        const store = loadQueue(file)
-        if (sub === 'add') {
-          const body = String(args.text ?? '').trim()
-          if (!body) { write({ t: 'result', id, ok: false, text: 'nothing to queue — put the item on stdin: `tg queue add -`' }); return }
-          const target = args.for ? String(args.for).replace(/^@/, '') : undefined
-          const { store: next, item } = addItem(store, body, target)
-          saveQueue(file, next)
-          text = `queued ${item.id}${item.target ? ` for @${item.target}` : ''} (${next.items.length} in the queue) — ${file}`
-        } else if (sub === 'done' || sub === 'start') {
-          const n = Number(args.itemId)
-          if (!Number.isFinite(n)) { write({ t: 'result', id, ok: false, text: `\`tg queue ${sub} <id>\` needs the item's number — \`tg queue\` lists them` }); return }
-          const r = sub === 'done' ? doneItem(store, n) : startItem(store, n)
-          if (!r.item) { write({ t: 'result', id, ok: false, text: `no queue item ${n} — \`tg queue\` lists what is there` }); return }
-          saveQueue(file, r.store)
-          text = sub === 'done'
-            ? `done ${n} (${r.store.items.length} left) — ${r.item.text.slice(0, 60)}`
-            : `started ${n} — ${r.item.text.slice(0, 60)}`
-        } else {
-          text = renderQueue(store)
-        }
         break
       }
       // `tg repo <path>` — the routing brief for a work repo. Cached briefs answer instantly; a repo
@@ -17823,23 +17700,13 @@ async function ownerDirectDispatch(
   if (!pane) { await reply(`@${toName} isn't running any more — nothing was delivered.`); return 'no-session' }
   const cap = await capturePane(pane).catch(() => '')
   if (!cap) { await reply(`@${toName}'s session couldn't be read — nothing was delivered.`); return 'no-session' }
-  // A dialog holding the box is a refusal told to him NOW — he is right there and can resend, and a
-  // message silently waiting on a modal is the failure this reports instead.
+  // The permissive gate, exactly as a human message takes: MID-TURN IS FINE (the CLI queues it, which
+  // is the whole point of delivering his words as human text), a dialog holding the box is not. There
+  // is no queue behind this one — a refusal is told to him now, because he is right there and can
+  // resend, and a message silently waiting on a modal is the failure this reports instead.
   if (!paneAcceptsText(cap)) {
     await reply(`@${toName} is showing a dialog it has to answer first — nothing was delivered. Send it again once it's clear.`)
     return 'blocked'
-  }
-  // UNIT 1 ruling 3 (@chat ask 572, the owner having delegated the call) — HIS MESSAGE WAITS FOR A
-  // PROMPT. This gate used to read "MID-TURN IS FINE (the CLI queues it, which is the whole point of
-  // delivering his words as human text)"; that premise died with the message queue, which splices a
-  // mid-turn paste into the running turn as a queued_command — how ~8% of them stopped becoming work.
-  // He is the one sender who must never be silently bounced, so this WAITS rather than refuses.
-  // Deliberate, on the record: a message to a mid-turn session lands at its next prompt instead of at
-  // once. Invisible when the pane is idle, which is nearly always.
-  const free = await awaitPaneFree(pane, `owner → @${toName}`, OWNER_WAIT_MS)
-  if (free === 'timeout') {
-    await reply(`@${toName} has been mid-turn for ${Math.round(OWNER_WAIT_MS / 1000)}s — nothing was delivered, and nothing is queued. Send it again when it's free.`)
-    return 'not-landed'
   }
   const block = ownerInboundBlock(text, chat, msgId, refs)
   // The same serialized paste every bus block and human message takes (one chain per pane), and NOT

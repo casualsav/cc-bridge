@@ -650,29 +650,16 @@ export function expirePending(now: number): BusPending[] {
   return expired
 }
 
-// ACK rows still waiting in the BUS queue when their first TTL elapsed, whose asker has not been told.
+// Rows still waiting in the BUS queue when their first TTL elapsed, whose asker has not been told yet.
 // The daemon sends one honest notice per row ("held — the target is mid-turn — it lands at their next
 // prompt") and stamps heldNoticeAt. Nothing here bars delivery: a held row is healthy, and the sweep
 // keeps offering it every 15s until the target reaches a prompt or its session ends (the reap).
 //
 // Once per row, not per hour: the repeat would be a new wake cost nobody asked for, and the rows that
 // outlive every surface are taken by the wrap purge's createdAt clause (ask-id-rotation.test.ts).
-// UNIT 1 (2026-08-16) — RE-SCOPED TO ACKS, not deleted. The spec's deletion list rested on "it exists
-// only because rows wait", and under the split ruling that premise survives for exactly one kind: an
-// ASK now refuses instead of waiting, but an ack keeps auto-land (@chat's call — fire-and-forget with
-// no retry story, so losing one is worse than landing it late), stays `stillQueued` until
-// `onAskConfirmed` removes it, and has a real asker with a real pane to be told. Deleting this would
-// have left a held ack with no chase at all — the fourth time in this lineage a chase was removed and
-// the loss went quiet.
-//
-// The nine SYSTEM-minted callers were never served by it and still are not: the notice routes to
-// `paneForSession(p.fromSid)` and SYSTEM_SID has no pane, so both its surfaces were always skipped.
-// Filtering on `noReply` states that rather than leaving it to be re-derived.
 export function heldTooLong(now: number): BusPending[] {
   ensureLoaded()
-  return Object.values(store.pending).filter(p =>
-    p.noReply === true && p.fromName !== 'system'
-    && stillQueued(p) && p.heldNoticeAt == null && p.expiresAt <= now)
+  return Object.values(store.pending).filter(p => stillQueued(p) && p.heldNoticeAt == null && p.expiresAt <= now)
 }
 
 /** Record that this held row's asker has been told it is still queued. Idempotent; fires once. */
@@ -878,48 +865,35 @@ export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 // target still TAKES an ask — the CLI queues it in that session's own message queue — so the stacked
 // asks in that incident were every one of them reported `delivered`. A depth that appeared only on the
 // queued outcomes would stay silent in exactly the case it exists for (measured live, same day).
-// UNIT 1: every outcome but 'delivered' is now a REFUSAL, not a queue slip. The bus mints nothing on a
-// delivery that did not happen, so these lines have one job the old ones did not: make the sender act.
-// They lead with the consequence rather than the cause (@chat's wording, and it is the right way round
-// — at 3am the load-bearing fact is "this is gone unless you re-send it", not which screen it hit).
-//
-// `stranded` is the one exception, and it is a different sentence rather than a different outcome: our
-// block IS in the target's box awaiting a re-Enter from recoverStrandedPastes, the row was kept, and
-// telling the sender to re-send there would produce the duplicate this repo already paid for once.
-export function askResultText(status: AskDelivery, toName: string, id: number, ahead = 0, stranded = false): string {
-  // Rides inside a parenthesis rather than trailing the line: read after an instruction to re-send, a
-  // count lands past the point where a sender has stopped reading.
-  const depth = ahead > 0 ? `, ${ahead} unanswered ahead of it` : ''
-  const q = `ask ${id}${depth}`
-  // The refusal's tail. Named once because five outcomes share it, and because the verb to arm is the
-  // whole remedy: `tg watch` is what turns "gone" into "re-sent at the right moment".
-  const resend = (why: string) =>
-    `❌ ${why} — NOT delivered, nothing queued (nothing was minted${depth}): this message is gone unless you re-send it. Arm \`tg watch ${toName}\` (one notice at their next prompt), then re-send.`
-  if (stranded) {
-    // Kept row, so this one still names an id — and it is the only non-delivered line that must NOT
-    // ask for a re-send.
-    return `⏳ HANDED OVER, submit not confirmed — the message is sitting unsubmitted in @${toName}'s input box (${q}); the pane's own recovery presses Enter on it. Do NOT re-send: that is how one message becomes two.`
-  }
+export function askResultText(status: AskDelivery, toName: string, id: number, ahead = 0): string {
+  const answer = `they answer with \`tg answer ${id}\``
+  // Rides inside the `(ask N…)` parenthesis rather than trailing the line: the number is about THIS
+  // message's position, and read after the "they answer with" instruction it would land past the point
+  // where a sender has stopped reading.
+  const q = `ask ${id}${ahead > 0 ? `, ${ahead} unanswered ahead of it` : ''}`
   switch (status) {
     // "delivered" stays honest about what it claims — the pane took it — and the count says where it
-    // landed: at the back of that session's queue, not in front of it. The ONLY line that reads as done.
+    // landed: at the back of that session's queue, not in front of it.
     case 'delivered':
-      return `delivered to @${toName} (${q}) — async; they answer with \`tg answer ${id}\``
+      return `delivered to @${toName} (${q}) — async; ${answer}`
     case 'busy':
-      return resend(`@${toName} is mid-turn`)
+      return `⏳ QUEUED, not yet delivered — @${toName} is mid-turn (${q}); it lands when they reach a prompt, then ${answer}`
     case 'wedged':
-      return resend(`@${toName}'s pane is not at a prompt and no turn is running (it may be wedged)`)
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s pane is not at a prompt and no turn is running (${q}); it may be wedged, and nothing reaches it until it recovers`
     case 'no-session':
-      return resend(`@${toName} has no live session right now`)
-    // Nothing of ours reached the box — the stranded case is the `stranded` branch above, which is why
-    // this one may safely ask for a re-send.
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName} has no live session right now (${q}); the ask stays open in case it comes back`
+    // The paste reached the pane but the submit did not take — the block is sitting in @toName's
+    // input box, unsent. tmux reports that as a success, which is exactly how it used to be recorded
+    // as delivered; it must never read as done.
     case 'not-landed':
-      return resend(`nothing reached @${toName}'s pane`)
-    // THEIR box already held typed text of their own, so no retry and no watch helps until a human
-    // clears it — the one refusal whose remedy is a person, not a verb. Told apart from 'not-landed'
-    // because the merged wording sent readers hunting for our message in a box that never held it.
+      return `⚠️ QUEUED, NOT DELIVERED — the message is sitting unsubmitted in @${toName}'s input box (${q}); the submit did not take, and the sweep will retry`
+    // The OPPOSITE of 'not-landed', and the distinction is the sender's next move. There nothing of
+    // ours reached the box and a retry is ours to make; here THEIR box already held typed text of
+    // their own, nothing of ours was pasted on top of it, and no retry helps until a human clears it.
+    // Told apart because 'not-landed' sent the reader looking for our message in a box that has never
+    // held it — the same wrong-place error the TTL notice made an hour later.
     case 'occupied':
-      return `❌ @${toName}'s input box already holds typed text of their OWN — NOT delivered, nothing queued (nothing was minted${depth}): nothing was pasted on top of it. This message is gone unless you re-send it once a human clears that box.`
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s input box already holds typed text of their OWN (${q}); nothing was pasted on top of it, and the sweep retries until that box clears`
   }
 }
 
