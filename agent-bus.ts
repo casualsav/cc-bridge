@@ -94,11 +94,12 @@ export type SystemAskKind =
   | 'repo-brief'         // ack: a `tg repo` scout finished
   | 'slash-parked'       // ack: a `tg slash --at-next-prompt` ran, was refused, or closed unrun
   | 'bus-alarm'          // ack: a stall alarm (stuck ask / heartbeat) — to the chat lane, never the owner's DM (2026-08-16)
+  | 'ask-notice'         // ack: a chat-origin ask's expiry / held-an-hour notice, into the lane's context, never his DM (unit 4b)
 
 // The same list as a runtime set — loadBus validates against it, so a hand-edited or corrupted
 // agent-bus.json cannot put an unknown string where a kind belongs.
 const SYSTEM_ASK_KINDS = new Set<string>(['ctx-nudge', 'fleet-alert', 'surfaceless-block',
-  'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked', 'bus-alarm'])
+  'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked', 'bus-alarm', 'ask-notice'])
 
 // ---- Every ack DELIVERS — the FYI-defer class is abolished (owner ruling, 2026-08-13) ------------
 //

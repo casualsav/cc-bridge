@@ -185,7 +185,7 @@ import {
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   systemAskLabel,
-  type BusEndpoint, type BusPending, type LedgerEntry,
+  type BusEndpoint, type BusPending, type LedgerEntry, type SystemAskKind,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
 import {
@@ -4816,6 +4816,14 @@ async function sweepBus(): Promise<void> {
     // longer stamps a still-queued row, so "no answer yet" now describes what it says: a target that
     // read the ask and stayed silent. The undelivered halves — box-blocked, mid-turn, wedged — are the
     // held loop below, which says which one and does not bar the row.
+    // A CHAT-LANE asker gets this as quiet bus traffic and nothing on its surface — that surface is
+    // the owner's DM, which he ordered quiet (unit 4b, 2026-08-16); a worker keeps the card in its
+    // topic and the block in its pane, because a worker told its ask expired is correct.
+    if (isChatLaneSession(p.fromSid)) {
+      const r = await mintQuietLaneAck(p.fromSid, `(no answer yet from @${p.toName} to ask ${p.id} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`, 'ask-notice')
+      process.stderr.write(`daemon: ask ${p.id} expiry notice → @${r.toName} as bus ack ${r.id} (${r.outcome})\n`)
+      continue
+    }
     for (const { chat, thread } of targets) {
       void channel.sendText(chat,
         `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
@@ -4848,6 +4856,12 @@ async function sweepBus(): Promise<void> {
       : gate === 'deliver' ? `they are at a prompt now — the next sweep delivers it, within 15s`
       : `they have no live session right now — it stays queued in case one comes back`
     const mins = Math.round(ASK_TTL_MS / 60_000)
+    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} still HELD after ${mins}m — ${why}\n`)
+    if (isChatLaneSession(p.fromSid)) {   // same rule as the expiry notice above: the lane's context, never his DM
+      const r = await mintQuietLaneAck(p.fromSid, `(ask ${p.id} has been HELD in the bus queue for @${p.toName} for ${mins}m — never delivered, and still queued: ${why}. Nothing is lost and nothing needs re-sending; a delivery still happens on its own.)`, 'ask-notice')
+      process.stderr.write(`daemon: ask ${p.id} held notice → @${r.toName} as bus ack ${r.id} (${r.outcome})\n`)
+      continue
+    }
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
     for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []) {
       void channel.sendText(chat,
@@ -4856,7 +4870,6 @@ async function sweepBus(): Promise<void> {
     }
     if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id,
       `(ask ${p.id} has been HELD in the bus queue for @${p.toName} for ${mins}m — never delivered, and still queued: ${why}. Nothing is lost and nothing needs re-sending; a delivery still happens on its own.)`))
-    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} still HELD after ${mins}m — ${why}\n`)
   }
   // BEFORE the delivery loop below, and the order is deliberate: this sweep is what makes a session
   // busy again within a second of reaching a prompt, so a parked command evaluated after the
@@ -4898,21 +4911,29 @@ async function sendAlarmCard(kind: string, html: string): Promise<void> {
   // rule — an unknown outcome is abandoned loudly).
   const lane = listDmChatSessions()[0]?.sessionId
   if (!lane) { process.stderr.write(`daemon: BUS ALARM ${kind} — NOT SENT: no DM chat lane to reach the orchestrator\n`); return }
-  const plain = alarmPlain(html)
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'bus-alarm' }, Date.now())
-  // NO ledger row, unlike every other mint: the heartbeat measures ledger silence, and an alarm that
-  // wrote to the ledger would reset the very clock it fired on — a stuck alarm would then hide a
-  // heartbeat for 20 minutes, and a frozen bus would re-page every 20 minutes instead of once per
-  // silence. The row in agent-bus.json, the lane's context and the log line are its record.
+  const { id, toName, outcome } = await mintQuietLaneAck(lane, alarmPlain(html), 'bus-alarm')
+  process.stderr.write(`daemon: BUS ALARM ${kind} → @${toName} as bus ack ${id} (${outcome})\n`)
+}
+// A daemon notice INTO a lane's context and nowhere else: quiet (no mirror card on the lane's surface —
+// for the chat lane that surface is the owner's DM), noReply (removed on delivery, nothing can ever
+// route an answer to a human), and NO ledger row, unlike every other mint: the heartbeat measures
+// ledger silence, and a notice that wrote to the ledger would reset the very clock it fired on — a
+// stuck alarm would then hide a heartbeat for 20 minutes, and a frozen bus would re-page every 20
+// minutes instead of once per silence. The row in agent-bus.json, the lane's context and the caller's
+// log line are its record. Kinds minted here are excluded from the alarm sweep's own population
+// (QUIET_LANE_KINDS), or a notice held behind a busy lane would alarm about itself a minute later.
+const QUIET_LANE_KINDS = new Set<SystemAskKind>(['bus-alarm', 'ask-notice'])
+async function mintQuietLaneAck(lane: string, plain: string, sysKind: SystemAskKind): Promise<{ id: number; toName: string; outcome: string }> {
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0, sysKind }, Date.now())
   const outcome = await tryDeliverAsk(p).catch(e => `error: ${e instanceof Error ? e.message : String(e)}`)
-  process.stderr.write(`daemon: BUS ALARM ${kind} → @${p.toName} as bus ack ${p.id} (${outcome})\n`)
+  return { id: p.id, toName: p.toName, outcome }
 }
 
 async function sweepBusAlarms(room: string): Promise<void> {
   const now = Date.now()
   // An alarm's own row is not a population member: held behind a busy or box-occupied lane it would
   // otherwise read as a stuck ask a minute later and mint another alarm about itself, one per minute.
-  const open = listPending().filter(p => p.sysKind !== 'bus-alarm' && (!p.noReply || stillQueued(p)))
+  const open = listPending().filter(p => !(p.sysKind && QUIET_LANE_KINDS.has(p.sysKind)) && (!p.noReply || stillQueued(p)))
   // One capture per TARGET, not per row: an orchestrator fanning five asks at one worker would
   // otherwise read the same screen five times every 15 seconds.
   const runnableBySid = new Map<string, boolean>()

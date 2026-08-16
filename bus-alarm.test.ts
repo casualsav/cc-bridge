@@ -188,9 +188,31 @@ function alarmSenderBody(src: string): string {
 }
 test('sendAlarmCard mints a quiet noReply bus-alarm ack to the lane and sends to no chat', () => {
   const body = alarmSenderBody(readFileSync(new URL(process.env.ALARM_SRC ?? './daemon.ts', import.meta.url), 'utf8'))
-  expect(body).toContain("sysKind: 'bus-alarm'")
+  expect(body).toContain("mintQuietLaneAck(lane, alarmPlain(html), 'bus-alarm')")
   expect(body).toContain('noReply: true, quiet: true')
   expect(body).toContain('tryDeliverAsk(p)')
   expect(body).not.toContain('channel.sendText')
   expect(body).not.toContain('.chatId')
+})
+
+// Unit 4b: a chat-origin ask's expiry and held-an-hour notices go into the lane's context as quiet
+// bus acks and NEVER card the asker's surface (which for the chat lane is the owner's DM); a
+// worker-origin ask keeps its card. Source-bound: in each loop the chat-lane branch (mint + continue)
+// must come BEFORE the sendText. Watched FAILING against `git show 155e886:daemon.ts` (pre-4b).
+test('expiry and held notices: chat-lane askers get a quiet ask-notice ack, workers keep their card', () => {
+  const src = readFileSync(new URL(process.env.ALARM_SRC ?? './daemon.ts', import.meta.url), 'utf8')
+  const sweep = src.slice(src.indexOf('\nasync function sweepBus('), src.indexOf('\nasync function sendAlarmCard('))
+  for (const loop of ['for (const p of expirePending(', 'for (const p of heldTooLong(']) {
+    const at = sweep.indexOf(loop); expect(at).toBeGreaterThan(0)
+    const body = sweep.slice(at, sweep.indexOf('\n  }\n', at))
+    const mint = body.indexOf("mintQuietLaneAck(p.fromSid, "), card = body.indexOf('channel.sendText(')
+    expect(mint).toBeGreaterThan(0)
+    expect(card).toBeGreaterThan(mint)                                  // the lane branch runs first…
+    expect(body.slice(mint, card)).toContain('continue')                // …and leaves before the card
+    expect(body).toContain("'ask-notice')")
+    expect(body).toContain('isChatLaneSession(p.fromSid)')
+  }
+  // The exclusion that stops a held notice from alarming about itself.
+  expect(src).toContain("QUIET_LANE_KINDS = new Set<SystemAskKind>(['bus-alarm', 'ask-notice'])")
+  expect(src).toContain('!(p.sysKind && QUIET_LANE_KINDS.has(p.sysKind)) && (!p.noReply || stillQueued(p))')
 })
