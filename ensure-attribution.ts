@@ -65,13 +65,17 @@ export const readingText = (r: { daemonPid: number | null; watchdogPid: number |
  * is a fresh PROCESS every 60s, so the guard's entry lives in a file, not the module map: load it,
  * gate, store it. The signature carries the pids and the version, so a bounce nobody logged still
  * surfaces as a TRANSITION line at the next tick ("watchdog 1044092 → 1044091"), which is the whole
- * point. Returns the verdict; the caller writes the line (or nothing) — same contract as decisionGate.
+ * point. Returns the verdict; the caller writes the line (or nothing) — same contract as decisionGate,
+ * except the steady-state reminder is every 30 minutes, not the bus's 5 (@chat ruling 2026-08-16: 288
+ * lines/day per instance was 13% of the log for zero information; 48 proves the same liveness). The first
+ * line and every transition keep full fidelity.
  */
+export const NOOP_REMINDER_MS = 30 * 60_000
 export function gateNoop(o: { stateFile: string; key: string; sig: string; now: number }): ReturnType<typeof decisionGate> {
   let stored: DecisionEntry | null = null
   try { stored = JSON.parse(readFileSync(o.stateFile, 'utf8')) as DecisionEntry } catch {}
   if (stored && typeof stored.sig === 'string') importDecision(o.key, stored)
-  const v = decisionGate(o.key, o.sig, o.now)
+  const v = decisionGate(o.key, o.sig, o.now, NOOP_REMINDER_MS)
   const e = exportDecision(o.key)
   try { if (e) writeFileSync(o.stateFile, JSON.stringify(e), { mode: 0o600 }) } catch {}
   return v

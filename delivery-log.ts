@@ -37,13 +37,13 @@ export const predicateClass = (p: string): string => p.replace(/"(?:[^"\\]|\\.)*
 
 export type GateVerdict = 'first' | 'transition' | 'reminder' | null
 /** Pure: what this reading of `key` earns. Advances the entry either way. */
-export function decisionGate(key: string, sig: string, now: number): GateVerdict {
+export function decisionGate(key: string, sig: string, now: number, reminderMs: number = REMINDER_MS): GateVerdict {
   const e = seen.get(key)
   if (!e) { seen.set(key, { sig, since: now, count: 1, lastLoggedAt: now, touchedAt: now }); return 'first' }
   e.touchedAt = now
   if (e.sig !== sig) { e.sig = sig; e.since = now; e.count = 1; e.lastLoggedAt = now; return 'transition' }
   e.count++
-  if (now - e.lastLoggedAt >= REMINDER_MS) { e.lastLoggedAt = now; return 'reminder' }
+  if (now - e.lastLoggedAt >= reminderMs) { e.lastLoggedAt = now; return 'reminder' }
   return null
 }
 export const decisionState = (key: string): { since: number; count: number } | null => {

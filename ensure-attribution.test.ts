@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { inferTrigger, gateNoop, readingText, type ProcInfo, type ReadProc } from './ensure-attribution.ts'
+import { inferTrigger, gateNoop, readingText, NOOP_REMINDER_MS, type ProcInfo, type ReadProc } from './ensure-attribution.ts'
 import { _resetDecisionsForTest, REMINDER_MS } from './delivery-log.ts'
 
 const chain = (rows: Record<number, ProcInfo>): ReadProc => pid => rows[pid] ?? null
@@ -86,9 +86,13 @@ test('gateNoop: first logs, a repeat is silent ACROSS processes, a pid change is
   // The bounce nobody logged: a new watchdog pid under the same version → a TRANSITION, unthrottled.
   expect(gateNoop({ stateFile, key, sig: 'noop watchdog=9 daemon=2 v=0.5.144', now: t0 + 180_000 })).toBe('transition')
   _resetDecisionsForTest()
-  expect(gateNoop({ stateFile, key, sig: 'noop watchdog=9 daemon=2 v=0.5.144', now: t0 + 180_000 + REMINDER_MS })).toBe('reminder')
+  // the bus's 5-minute reminder is NOT this line's cadence: 30 minutes (ruling 2026-08-16)
+  expect(NOOP_REMINDER_MS).toBe(30 * 60_000); expect(NOOP_REMINDER_MS).toBeGreaterThan(REMINDER_MS)
+  expect(gateNoop({ stateFile, key, sig: 'noop watchdog=9 daemon=2 v=0.5.144', now: t0 + 180_000 + REMINDER_MS })).toBeNull()
+  _resetDecisionsForTest()
+  expect(gateNoop({ stateFile, key, sig: 'noop watchdog=9 daemon=2 v=0.5.144', now: t0 + 180_000 + NOOP_REMINDER_MS })).toBe('reminder')
   const stored = JSON.parse(readFileSync(stateFile, 'utf8'))
-  expect(stored.sig).toBe('noop watchdog=9 daemon=2 v=0.5.144'); expect(stored.count).toBe(2)
+  expect(stored.sig).toBe('noop watchdog=9 daemon=2 v=0.5.144'); expect(stored.count).toBe(3)
 })
 
 test('gateNoop: a corrupt state file is a first reading, not a crash', () => {
