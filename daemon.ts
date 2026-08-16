@@ -117,7 +117,7 @@ import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { paneFreedom } from './session-freedom.ts'
-import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, type StuckRow } from './bus-alarm.ts'
+import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
   type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
@@ -4863,35 +4863,37 @@ async function sweepBus(): Promise<void> {
 
 // ---- the stall alarms (ask 544) --------------------------------------------------------------
 //
-// The whole point is that these reach the HUMAN. A wedged worker gets escalated to the orchestrator
-// lane (wakeOrchestrator, and that stays right — unblocking a worker is what he delegates), but a
-// frozen PIPELINE may be the lane itself, and the class this exists for is the one he found by waking
-// up. So: his DM, both alarms, never the lane. Nothing here re-issues, re-pastes or re-sends —
-// alarming and stopping is the design (owner ruling, ratified 2026-08-15).
+// These reach the ORCHESTRATING LANE, as bus traffic. They were built (2026-08-15) to page the owner's
+// DM — the frozen pipeline might be the lane itself, and he found the first one by waking up — and he
+// reversed that the next day: "not something I want to be bothered with"; the 🚨 cards on his phone
+// were the pelting, and the lane is who acts on a stuck ask anyway (owner directive 2026-08-16, program
+// unit 4). So: a quiet noReply @system ack to the chat lane, the same shape as spawn-news; his DM gets
+// nothing — `quiet` withholds the mirror card, and the row is removed on delivery so nothing can ever
+// route an answer to a human surface. Nothing here re-issues, re-pastes or re-sends — alarming and
+// stopping is still the design. The log lines are kept verbatim: they are the audit trail this unit
+// leaves behind, and `BUS ALARM <kind>` is what the audit greps for.
 async function sendAlarmCard(kind: string, html: string): Promise<void> {
-  // Not `silent` — every other bus card is, and that is exactly the difference between a status line
-  // and an alarm. If it does not light up a phone it does not do its job.
-  //
-  // The OUTCOME is logged, per chat, with the message id — an alarm whose delivery cannot be checked
-  // afterwards is an alarm nobody can trust, and this is the one send in the bus that has no reader
-  // downstream to notice its absence. No retry and no fallback on failure: a page the owner did not
-  // get is a fault to be seen, not smoothed over (CLAUDE.md's outbound rule — an unknown outcome is
-  // abandoned loudly), and the condition is re-evaluated on the next sweep anyway.
-  const chats = listDmChatSessions().map(l => l.chatId)
-  if (!chats.length) { process.stderr.write(`daemon: BUS ALARM ${kind} — NOT SENT: no DM chat lane to reach the owner\n`); return }
-  for (const chat of chats) {
-    try {
-      const ref = await channel.sendText(chat, html)
-      process.stderr.write(`daemon: BUS ALARM ${kind} delivered to ${chat} → message id ${ref.messageId}\n`)
-    } catch (e) {
-      process.stderr.write(`daemon: BUS ALARM ${kind} FAILED to ${chat} — ${e instanceof Error ? e.message : String(e)}\n`)
-    }
-  }
+  // The lane, not his chats — and the same lane wakeOrchestrator picks, so a fleet alert and a stall
+  // alarm land in one context. No lane is logged and dropped, not retried: the condition is re-evaluated
+  // on the next sweep anyway, and a page nobody can receive is a fault to be seen (CLAUDE.md's outbound
+  // rule — an unknown outcome is abandoned loudly).
+  const lane = listDmChatSessions()[0]?.sessionId
+  if (!lane) { process.stderr.write(`daemon: BUS ALARM ${kind} — NOT SENT: no DM chat lane to reach the orchestrator\n`); return }
+  const plain = alarmPlain(html)
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'bus-alarm' }, Date.now())
+  // NO ledger row, unlike every other mint: the heartbeat measures ledger silence, and an alarm that
+  // wrote to the ledger would reset the very clock it fired on — a stuck alarm would then hide a
+  // heartbeat for 20 minutes, and a frozen bus would re-page every 20 minutes instead of once per
+  // silence. The row in agent-bus.json, the lane's context and the log line are its record.
+  const outcome = await tryDeliverAsk(p).catch(e => `error: ${e instanceof Error ? e.message : String(e)}`)
+  process.stderr.write(`daemon: BUS ALARM ${kind} → @${p.toName} as bus ack ${p.id} (${outcome})\n`)
 }
 
 async function sweepBusAlarms(room: string): Promise<void> {
   const now = Date.now()
-  const open = listPending().filter(p => !p.noReply || stillQueued(p))
+  // An alarm's own row is not a population member: held behind a busy or box-occupied lane it would
+  // otherwise read as a stuck ask a minute later and mint another alarm about itself, one per minute.
+  const open = listPending().filter(p => p.sysKind !== 'bus-alarm' && (!p.noReply || stillQueued(p)))
   // One capture per TARGET, not per row: an orchestrator fanning five asks at one worker would
   // otherwise read the same screen five times every 15 seconds.
   const runnableBySid = new Map<string, boolean>()

@@ -470,7 +470,7 @@ test('systemAskLabel is specific for an answerable kind and NEUTRAL for everythi
   // The five ack kinds are `noReply` — delivery removes the row, so they cannot be answered and
   // cannot reach this card. They resolve neutral BY DESIGN; a specific label here would be a claim
   // about a card that never renders.
-  for (const k of ['post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked'] as const)
+  for (const k of ['post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked', 'bus-alarm'] as const)
     expect(systemAskLabel(k).did).toBe('answered a @system ask')
 })
 
@@ -480,7 +480,7 @@ test('systemAskLabel is specific for an answerable kind and NEUTRAL for everythi
 test('every @system mint site in daemon.ts names a sysKind, and every kind it names is real', () => {
   const src = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
   const KNOWN = new Set(['ctx-nudge', 'fleet-alert', 'surfaceless-block', 'post-relay',
-                         'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked'])
+                         'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked', 'bus-alarm'])
   const sites: string[] = []
   const unnamed: string[] = []
   for (let i = src.indexOf('fromSid: SYSTEM_SID'); i !== -1; i = src.indexOf('fromSid: SYSTEM_SID', i + 1)) {
@@ -489,9 +489,9 @@ test('every @system mint site in daemon.ts names a sysKind, and every kind it na
     if (kind) sites.push(kind); else unnamed.push(src.slice(i, i + 90))
   }
   expect(unnamed).toEqual([])
-  expect(sites.length).toBe(9)                                   // the whole class, not a sample
+  expect(sites.length).toBe(10)                                   // the whole class, not a sample
   expect(sites.filter(k => !KNOWN.has(k))).toEqual([])
-  expect(new Set(sites).size).toBe(9)                            // one site per kind, no duplicates
+  expect(new Set(sites).size).toBe(10)                            // one site per kind, no duplicates
 })
 
 // The whitelist trap `noReply` and `quiet` both fell into: loadBus rebuilds each row field by field,

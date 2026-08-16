@@ -87,6 +87,16 @@ const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;'
 // keeping — so listing them and stopping is the honest end of the sentence.
 const LEVERS = 'Levers: re-issue the ask by hand · <code>tg keys &lt;name&gt; enter</code> (or esc) if a screen is holding the pane · <code>tg kill &lt;name&gt;</code> then <code>tg reopen &lt;name&gt;</code>. Nothing is retried automatically.'
 
+/**
+ * The card as PLAIN TEXT, for typing into the chat lane's pane as a bus ack (owner directive
+ * 2026-08-16: alarms go to @chat as bus traffic, his DM gets nothing). The renderers below emit only
+ * <b>/<code> and the three entities `esc` produces, so stripping those is the exact inverse — nothing
+ * else in a card is markup.
+ */
+export function alarmPlain(html: string): string {
+  return html.replace(/<\/?(?:b|code)>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+}
+
 /** ONE card for however many rows went stuck in this pass — he must never wake to a stack of pages. */
 export function stuckAlarmCard(rows: StuckRow[]): string {
   const head = rows.length === 1

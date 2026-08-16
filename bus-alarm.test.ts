@@ -8,7 +8,7 @@
 // legitimately WORKING past its TTL, an answered ask, an already-paged row.
 import { test, expect, beforeEach } from 'bun:test'
 import {
-  planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard,
+  planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain,
   HEARTBEAT_SILENCE_MS, DELIVERY_STALL_MS, type StuckRow,
 } from './bus-alarm.ts'
 import {
@@ -156,4 +156,41 @@ test('card text escapes what a session put in it — an ask body reaches this ca
   const card = stuckAlarmCard([row({ toName: '<b>evil</b>', observed: 'box holds "a & b"' })])
   expect(card).toContain('&lt;b&gt;evil&lt;/b&gt;')
   expect(card).toContain('a &amp; b')
+})
+
+// Unit 4 (2026-08-16): the alarm is typed into the chat lane's pane as a bus ack, so the card must
+// come back out as plain text — tags gone, entities restored, and a session-supplied string that
+// LOOKED like markup arrives as the literal characters the session wrote, not as markup.
+test('alarmPlain is the exact inverse of the card renderer: no tags, entities restored, no markup smuggled', () => {
+  const card = stuckAlarmCard([row({ toName: '<b>evil</b>', observed: 'box holds "a & b" <code>x</code>' })])
+  const plain = alarmPlain(card)
+  expect(plain).not.toMatch(/&(?:lt|gt|amp);/)
+  expect(plain).toContain('@<b>evil</b>')                       // the session's literal text, restored
+  expect(plain).toContain('"a & b" <code>x</code>')
+  expect(plain).toContain('tg keys <name> enter')                // the levers, de-tagged
+  expect(plain).not.toContain('<b>Ask 472</b>')                  // OUR bold is gone…
+  expect(plain).toContain('Ask 472')                             // …its text is not
+  const hb = alarmPlain(heartbeatCard({ silentForMs: 21 * MIN, openAsks: 1, oldest: row() }))
+  expect(hb).toContain('has not moved in 21m')
+  expect(hb).not.toMatch(/<\/?(?:b|code)>/)
+})
+
+// Source-bound control for the reroute (unit 4). The sender's body must mint a quiet noReply
+// @system ack to the lane and must not send to any chat directly — the "his DM gets nothing" half.
+// Watched FAILING against `git show 850ecc2:daemon.ts` (the pre-unit-4 sender), which is the
+// binding that makes this a control rather than a restatement.
+import { readFileSync } from 'node:fs'
+function alarmSenderBody(src: string): string {
+  const start = src.indexOf('async function sendAlarmCard(')
+  const end = src.indexOf('\nasync function sweepBusAlarms(', start)
+  if (start < 0 || end < 0) throw new Error('sendAlarmCard / sweepBusAlarms not found')
+  return src.slice(start, end)
+}
+test('sendAlarmCard mints a quiet noReply bus-alarm ack to the lane and sends to no chat', () => {
+  const body = alarmSenderBody(readFileSync(new URL(process.env.ALARM_SRC ?? './daemon.ts', import.meta.url), 'utf8'))
+  expect(body).toContain("sysKind: 'bus-alarm'")
+  expect(body).toContain('noReply: true, quiet: true')
+  expect(body).toContain('tryDeliverAsk(p)')
+  expect(body).not.toContain('channel.sendText')
+  expect(body).not.toContain('.chatId')
 })
