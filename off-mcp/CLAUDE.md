@@ -24,6 +24,11 @@ message · `@name` = sender (only when not the owner) · `img=`/`att=` = a local
 
 No marker at all means an older daemon: treat it as human.
 
+**A `<task-notification>` wake is not a new sender.** When a background task finishes, the harness
+starts a new turn with that block — the bridge routes THAT turn's reply exactly where the message
+before it came from (his DM stays his DM). Keep speaking to the same reader in the same person: a turn
+chain that began `from=dm` is still "you", never "the owner" or "he", however many wakes it spans.
+
 ## Replying
 
 Reply = final text block, auto-delivered. Be terse: no preamble, no recap. Your Markdown renders
