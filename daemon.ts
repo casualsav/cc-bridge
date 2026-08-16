@@ -116,6 +116,7 @@ import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } 
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
+import { paneFreedom } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, type StuckRow } from './bus-alarm.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
@@ -4197,6 +4198,23 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // full history at the predicates' old site; do not reintroduce a defer to save wake cost.
     const pane = await paneForSession(cur.toSid).catch(() => null)
     if (!pane) return 'no-session'
+    // UNIT 0 (2026-08-16) — THE FREEDOM CHECK COMES OFF THE SCREEN. Claude Code writes its own
+    // per-session state to `<config dir>/sessions/<pid>.json`, status included; `session-freedom.ts`
+    // reads it. This runs BEFORE the capture because it is both cheaper and more trustworthy: a
+    // terminal is a picture of a TUI that gets redesigned, and one such redesign (the message queue,
+    // ~2026-07-06) is the whole reason this file has an R-1.
+    //
+    // It is a VETO over `planAskGate`, not a replacement, and the split is deliberate: the record
+    // answers "is a turn running", which the screen keeps getting wrong, and the screen keeps the
+    // questions the record cannot see at all — half-typed text in the box, a picker, a wedge.
+    // 'unknown' (no record, dead pid, a CLI that stopped writing them) falls through to the screen
+    // alone, which is exactly the shipped v0.5.128 behaviour and so can never be a regression — but it
+    // is LOGGED, because a check that silently stops checking is this repo's most expensive class.
+    const freedom = paneFreedom(pane, listAccounts().map(a => a.configDir))
+    if (freedom.freedom === 'busy') return 'busy'
+    if (freedom.freedom === 'unknown') {
+      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} — session registry SILENT for ${pane} (${freedom.why}); falling back to the screen gate\n`)
+    }
     const cap = await capturePane(pane).catch(() => '')
     if (!cap) return 'no-session'
     // R-1 (2026-08-15) — THE RESTORATION. v0.3.35 promised "deliver iff the target is at a normal
