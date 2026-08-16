@@ -433,7 +433,11 @@ thing most likely to be "fixed" back:
   traffic as seen.
 - NOT in `BUS_ANCHOR` — a mid-turn aside replays as a `queued_command` attachment, and adding
   `btw` beside `ask|ack|re` would let an idle-case aside re-anchor an OWNER's turn to "bus" and
-  silence the reply he is waiting for. Accepted cost: an idle aside classes human and pings.
+  silence the reply he is waiting for. Since 2026-08-16 an aside is a CONTINUATION for the anchor
+  read (`isTurnAnchor`, beside the task-notification wake): the reply it draws and every wake after
+  it keep the reader the session already had — an aside into an owner-direct chain retired his route
+  and his final report went uncarded (@weather 21:31–21:40Z). An idle aside inherits the previous
+  turn's class instead of defaulting to human.
 
 **His own message to a session is a HUMAN message with a ROUTED reply — not an ask** (ruling
 2026-08-11: of the two artifacts per exchange, the one he could read was the wrong one). `@name

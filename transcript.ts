@@ -92,7 +92,12 @@ function isRealUserText(e: Entry): boolean {
 // real answer ("Done and live …") hung off `<task-notification>` — no route match, no card, and it
 // classed HUMAN where the first half was his. The block is harness-written; model prose can never
 // be one (see the feed reader below, which relies on the same fact).
-const CONTINUATION_WAKE = /^\s*<task-notification>/
+// A `tg btw` ASIDE is the second member: it lands mid-chain by design and steers, it does not start
+// a conversation — the reply it draws, and every wake after it, still belong to whoever the session
+// was answering. Seen 2026-08-16 21:31Z: an aside into @weather's owner-direct chain re-anchored the
+// turn, the owner's route retired on that "foreign" turn, and his final report (21:40Z) was never
+// carded. Consistent with BUS_ANCHOR deliberately excluding btw (see the aside's CLAUDE.md entry).
+const CONTINUATION_WAKE = /^\s*(?:<task-notification>|<tg\s+@[\w.-]+\s+btw>)/
 function isContinuationWake(e: Entry): boolean {
   return isRealUserText(e) && CONTINUATION_WAKE.test(textOf(e.message?.content))
 }

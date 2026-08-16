@@ -76,6 +76,18 @@ test('the weather shape, 2026-08-16 19:49–19:53Z: a background-task wake conti
   expect(replies.filter(x => r.consume('s', x.anchorText).length).map(x => x.text))
     .toEqual(['Healthy. Waiting on the gate result.', 'Done and live — reload /h/<station>.'])
   expect(r.size()).toBe(0)   // the @chat turn retired it
+  // The 21:31Z shape: a `tg btw` aside lands mid-chain, draws a reply, and a wake follows — the aside is a
+  // continuation too, so his route neither retires on it nor misses the report that comes after it.
+  const h = fixture([
+    user('<tg 13544 from=dm>queue these four UI items</tg>', 'u1'), asst('Got the four UI items — mapping them now.', 'a1'),
+    user('<tg @cc-bridge btw>Steering: speak to him in second person.</tg>', 'u2'), asst('Noted — status: workers running.', 'a2'),
+    user(wake, 'u3'), asst('All four UI items and the WebSocket feed are live.', 'a3'),
+  ])
+  const hr = finalRepliesAfter(h, '')
+  expect(hr.map(x => x.anchorText.slice(0, 15))).toEqual(['<tg 13544 from=', '<tg 13544 from=', '<tg 13544 from='])
+  const r2 = createOwnerReplyRoutes()
+  r2.arm({ sid: 's', chat: '111', name: 'weather', marker: '<tg 13544 from=dm>' })
+  expect(hr.filter(x => r2.consume('s', x.anchorText).length).map(x => x.text)).toEqual(hr.map(x => x.text))
   // and the Stop-hook reader agrees a bus turn continued by a wake is still bus-anchored
   const g = fixture([user('<tg @chat ask=41>go</tg>', 'u1'), asst('waiting on CI', 'a1'), user(wake, 'u2')])
   expect(turnAnchorIsBus(g)).toBe(true)
