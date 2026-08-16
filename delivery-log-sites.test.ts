@@ -28,7 +28,7 @@ test('bus family: tryDeliverAsk, deliverAside, deliverAnswerToAsker, the foundin
   const a = bodyOf(/\nasync function deliverAside\(/)
   expect(count(a, /\brefused\('|\brefused\(`/g)).toBe(6)         // no pane · capture empty · paneAcceptsText · wedged · occupied · not-landed
   const d = bodyOf(/\nasync function deliverAnswerToAsker\(/)
-  expect(count(d, /logDecision\(\{/g)).toBe(3)                    // closed row · dead asker · not landed
+  expect(count(d, /logDecision\(\{/g)).toBe(5)                    // closed row · dead asker · wedged/unreadable · timeout (unit 3) · not landed
   expect(count(src, /what: `founding \$\{p \? `ask \$\{p\.id\}` : 'message'\}`/g)).toBe(1)   // busDeliver=false in launchSpawn
 })
 

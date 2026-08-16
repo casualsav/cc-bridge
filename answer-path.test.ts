@@ -61,7 +61,7 @@ test('proof: confirmInjections walks the answers map against the ASKER transcrip
 })
 
 test('every caller passes what the gate needs: the socket handler flags undelivered rows; hermes/openclaw get the long wait', () => {
-  expect(src).toContain('const undelivered = !p.injected && p.pastedAt == null')
+  expect(src).toContain('const undelivered = !p.injected && p.pastedAt == null && !busInFlight.has(p.id)')
   expect(src).toContain('deliverAnswerToAsker(p, answerer, answerText, refs, { answererSid, undelivered })')
   expect((src.match(/HERMES_ANSWER_OPTS\)/g) ?? []).length).toBe(6)   // 3 completion sites × (result + error)
 })

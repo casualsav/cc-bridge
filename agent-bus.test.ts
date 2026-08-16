@@ -492,7 +492,7 @@ test('every @system mint site in daemon.ts names a sysKind, and every kind it na
   }
   for (const m of src.matchAll(/mintQuietLaneAck\((?:[^\n]*?), '([a-z-]+)'\)/g)) sites.push(m[1]!)
   expect(unnamed).toEqual([])
-  expect(sites.length).toBe(12)                                   // the whole class, not a sample (11 kinds; ask-notice minted at 2 sites)
+  expect(sites.length).toBe(13)                                   // the whole class, not a sample (11 kinds; ask-notice minted at 3 sites)
   expect(sites.filter(k => !KNOWN.has(k))).toEqual([])
   expect(new Set(sites).size).toBe(11)
 })

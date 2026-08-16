@@ -115,7 +115,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
-import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
+import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { paneFreedom } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
@@ -185,6 +185,7 @@ import {
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   systemAskLabel,
+  recordAnswerPasted, clearAnswerInFlight, listAnswersInFlight,
   type BusEndpoint, type BusPending, type LedgerEntry, type SystemAskKind,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -4366,7 +4367,10 @@ function onAskConfirmed(cur: BusPending, now: number): void {
 // `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting it back
 // would false-positive on.
 const CONFIRM_TAIL_BYTES = 512 * 1024
-async function askBlockInTranscript(sid: string, id: number): Promise<boolean> {
+const askBlockInTranscript = (sid: string, id: number): Promise<boolean> => transcriptTailCarries(sid, t => blockCarriesAsk(t, id))
+// Unit 3: an ANSWER's proof — the `re=<id>` block in the ASKER's transcript.
+const answerBlockInTranscript = (sid: string, id: number): Promise<boolean> => transcriptTailCarries(sid, t => blockCarriesAnswer(t, id))
+async function transcriptTailCarries(sid: string, carries: (tail: string) => boolean): Promise<boolean> {
   try {
     const pane = await paneForSession(sid).catch(() => null)
     const file = pane ? await transcriptForPane(pane, null).catch(() => null) : null
@@ -4377,7 +4381,7 @@ async function askBlockInTranscript(sid: string, id: number): Promise<boolean> {
     try {
       const buf = Buffer.allocUnsafe(size - start)
       readSync(fd, buf, 0, buf.length, start)
-      return blockCarriesAsk(buf.toString('utf8'), id)
+      return carries(buf.toString('utf8'))
     } finally { closeSync(fd) }
   } catch { return false }
 }
@@ -4415,6 +4419,28 @@ async function confirmInjections(): Promise<void> {
         { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', cur.id,
       `(ask ${cur.id} was PASTED into @${cur.toName}'s pane but never entered its conversation — the CLI accepted and discarded it. Not re-sent, because nothing can see that queue and a retry would duplicate. Re-send if it still matters.)`))
+  }
+  // Unit 3 (2026-08-16): ANSWERS get the same proof. The record is separate from the pending row (the
+  // row was removed at paste, exactly as before), so nothing that reads rows learns a third state. On
+  // proof the record dies with one line. On 120s without proof the ASK IS RE-OPENED (its row rides in
+  // the record) and the answerer is told to re-run — the body was never stored, by ruling. Accepted
+  // risk, written down: a proof FALSE-NEGATIVE (answer landed, the match missed) re-opens an answered
+  // ask and the re-run produces a DUPLICATE answer block. Noise; a silently lost answer was the disease.
+  for (const a of listAnswersInFlight()) {
+    const seen = await answerBlockInTranscript(a.askerSid, a.id).catch(() => false)
+    const plan = planInjectionConfirm({ seen, pastedAt: a.pastedAt, now })
+    if (plan === 'wait') continue
+    clearAnswerInFlight(a.id)
+    if (plan === 'confirm') {
+      process.stderr.write(`daemon: answer ${a.id} by @${a.answerer} → @${a.row.fromName} CONFIRMED in its transcript after ${Math.round((now - a.pastedAt) / 1000)}s\n`)
+      continue
+    }
+    if (!getPending(a.id)) putPending(a.row)   // a rotated id already re-minted keeps its own row
+    appendLedger(busLedgerRoom(), { ts: now, kind: 'answer-unconfirmed', from: a.answerer, to: a.row.fromName, id: a.id, text: 'answer pasted but never appeared in the asker\'s conversation — ask re-opened' })
+    process.stderr.write(`daemon: answer ${a.id} by @${a.answerer} → @${a.row.fromName} was pasted into ${a.pane} but NEVER appeared in its conversation after ${Math.round(CONFIRM_WINDOW_MS / 1000)}s — ask re-opened, @${a.answerer} told to re-run\n`)
+    if (a.answererSid) {
+      void mintQuietLaneAck(a.answererSid, `(your answer to ask ${a.id} was pasted into @${a.row.fromName}'s pane but never entered its conversation — the CLI accepted and discarded it. The ask is re-opened and your answer was not stored: re-run \`tg answer ${a.id}\`.)`, 'ask-notice').catch(() => {})
+    }
   }
 }
 
@@ -4992,7 +5018,56 @@ async function sweepBusAlarms(room: string): Promise<void> {
 // expired mid-flight), clears it BEFORE injecting, restores it on a failed paste (so the answer isn't
 // lost with a false-success record), and logs/cards only a REAL delivery. Returns a status string; a
 // leading '!' marks a failure the caller relays back as an error.
-async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBody: string, refs: string[]): Promise<string> {
+// ---- unit 3: the answer path's gate (2026-08-16) ---------------------------------------------------
+// The record veto first (busy-only, v0.5.139 semantics), then the screen for what the record cannot see
+// (a picker, a queued-messages bar, an armed `!` box), polled until free or the bound. The bound is set
+// by the transport and was measured, not chosen (unit 1, rolled back for other reasons): tgctl exits at
+// 30s, and a wait past it hands the answering agent an UNKNOWN OUTCOME — worse than a bounce. 20s leaves
+// ~10s for the lock, the paste and the round trip. Past the bound the answer is REFUSED with the ask kept
+// open and the body NOT stored (no body-holding queue, by ruling; the revisit trigger is one real answer
+// lost to a worker that never re-ran). A WEDGED screen refuses at once — a picker will not clear because
+// we stared at it for twenty seconds. `unknown` from the registry is not a wait: it falls to the screen.
+const ANSWER_WAIT_MS = 20_000
+// Hermes / openclaw completions answer from INSIDE the daemon: no socket bound, and no agent to teach
+// the re-run loop to — a bounce there is a lost completion. They wait longer (the body already lives in
+// daemon memory for the run's whole life, so this is not a new queue) and past that fall back to the
+// status-quo paste into the CLI queue, LOGGED as such (ruling 2026-08-16, @chat 687).
+const HERMES_ANSWER_WAIT_MS = 10 * 60_000
+type AnswerGate = { verdict: 'free' | 'timeout' | 'wedged' | 'unreadable'; waitedMs: number; why: string }
+async function awaitAnswerable(pane: string, label: string, waitMs: number, pollMs: number): Promise<AnswerGate> {
+  const t0 = Date.now()
+  let announced = false
+  let why = ''
+  for (;;) {
+    const f = paneFreedom(pane, listAccounts().map(a => a.configDir))
+    if (f.freedom === 'busy') why = `paneFreedom=busy (${f.why})`
+    else {
+      const cap = await capturePane(pane).catch(() => '')
+      if (!cap) return { verdict: 'unreadable', waitedMs: Date.now() - t0, why: 'capture empty' }
+      const r = { atPrompt: onNormalPrompt(cap), working: detectWorking(cap), queued: hasQueuedMessages(cap), bashArmed: bashModeArmed(cap) }
+      const gate = planAskGate(r)
+      const shown = `planAskGate=${gate} (atPrompt=${+r.atPrompt} working=${+r.working} queued=${+r.queued} bashArmed=${+r.bashArmed})`
+      if (gate === 'deliver') {
+        if (announced) process.stderr.write(`daemon: ${label} — ${pane} reached a prompt after ${Math.round((Date.now() - t0) / 1000)}s; delivering now\n`)
+        return { verdict: 'free', waitedMs: Date.now() - t0, why: shown }
+      }
+      if (gate === 'wedged') return { verdict: 'wedged', waitedMs: Date.now() - t0, why: shown }
+      why = shown
+    }
+    if (Date.now() - t0 >= waitMs) return { verdict: 'timeout', waitedMs: Date.now() - t0, why }
+    if (!announced) { announced = true; process.stderr.write(`daemon: ${label} — ${pane} ${why}; waiting for a prompt rather than queueing it in the CLI (up to ${Math.round(waitMs / 1000)}s)\n`) }
+    await sleep(pollMs)
+  }
+}
+
+type AnswerOpts = {
+  waitMs?: number; pollMs?: number
+  queueOnTimeout?: boolean      // non-Claude answerers: legacy paste into the CLI queue past the bound, logged
+  answererSid?: string | null   // a bridged Claude answerer — where the "never appeared, re-run" notice goes
+  undelivered?: boolean         // the row had never been delivered to its target when this answer came
+}
+const HERMES_ANSWER_OPTS: AnswerOpts = { waitMs: HERMES_ANSWER_WAIT_MS, pollMs: 5_000, queueOnTimeout: true }
+async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBody: string, refs: string[], opts: AnswerOpts = {}): Promise<string> {
   // An answer body is the same class of leak as a slash command's stdout — an agent that pastes
   // terminal output into its answer pastes the escape codes with it — but it is STRIPPED here
   // rather than translated, which is the opposite of what the report card does two files over.
@@ -5005,7 +5080,9 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const room = busLedgerRoom()
   const cur = getPending(pending.id)
   if (!cur) { logDecision({ family: 'bus', what: `answer ${pending.id} by @${answerer}`, target: pending.fromName, pane: null, decision: 'REFUSED', predicate: 'row already closed (getPending miss)' }); return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)` }
-  removePending(cur.id)
+  // The row is removed at each route's point of no return (unit 3), not here: the pane route may now
+  // WAIT up to the bound before it pastes, and a daemon restart inside that wait must find the ask
+  // still open rather than gone with an answer that was never delivered.
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
@@ -5015,6 +5092,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
     process.stderr.write(`daemon: ask ${cur.id} is ownerDirect but @${cur.fromName} has no DM chat lane — delivering into the pane instead\n`)
   }
   if (route === 'system') {
+    removePending(cur.id)
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
     // The card says WHICH @system ask this answers. It read "handled a context nudge" for every kind
     // — so a wedged-prompt escalation reached him described as a context nudge (owner-reported).
@@ -5025,6 +5103,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
           { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     })()
+    process.stderr.write(`daemon: answer ${cur.id} by @${answerer} → @system DELIVERED via system-card\n`)
     return `logged (ask ${cur.id}) — @system has no session to deliver into; the owner got the summary`
   }
   // The owner addressed this session himself, so the answer goes to HIM and stops there — not into
@@ -5037,18 +5116,36 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // does not know about, and the lane is the only party that can see two workers heading for the same
   // file. Direct is what he asked for; the coordination is his to hold on these threads.
   if (route === 'owner-card') {
+    removePending(cur.id)
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
     // Refs are named, not attached: they are paths in the shared dir, and the pointer is the whole
     // convention. Dropping them would lose the only address the deliverable has on his surface.
     const shown = [cur.expiredAt != null ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n` : '', body,
       refs.length ? `\n\n📎 ${refs.join('\n📎 ')}` : ''].join('')
     await sendOwnerAnswerCard(ownerChat!, answerer, shown, cur.toSid)
+    process.stderr.write(`daemon: answer ${cur.id} by @${answerer} → owner DELIVERED via owner-card\n`)
     return `answered the owner directly (ask ${cur.id})`
   }
   const askerPane = await paneForSession(cur.fromSid).catch(() => null)
   if (!askerPane) { logDecision({ family: 'bus', what: `answer ${cur.id} by @${answerer}`, target: cur.fromName, pane: null, decision: 'REFUSED', predicate: 'no pane (paneForSession)', hint: 'row restored' }); putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
   // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
   // asker knows why it arrives after a "timed out" note. Prepend to the delivered body + the room card.
+  const label = `answer ${cur.id} by @${answerer} → @${cur.fromName}`
+  const gate = await awaitAnswerable(askerPane, label, opts.waitMs ?? ANSWER_WAIT_MS, opts.pollMs ?? 1_000)
+  let queuedMidTurn = false
+  if (gate.verdict === 'wedged' || gate.verdict === 'unreadable') {
+    logDecision({ family: 'bus', what: `answer ${cur.id} by @${answerer}`, target: cur.fromName, pane: askerPane, decision: 'REFUSED', predicate: gate.why, hint: 'row kept open, body not stored' })
+    putPending(cur)
+    return `!@${cur.fromName}'s pane is not at a prompt and no turn is running (${gate.why}) — a picker, permission prompt or unrecognised screen owns it, so nothing was pasted. Your answer was NOT stored: keep it, clear their screen if it is yours to clear (\`tg keys ${cur.fromName} esc\`), and re-run \`tg answer ${cur.id}\` — the ask is kept open, so re-running is safe and is the ONLY thing that delivers it`
+  }
+  if (gate.verdict === 'timeout') {
+    if (!opts.queueOnTimeout) {
+      logDecision({ family: 'bus', what: `answer ${cur.id} by @${answerer}`, target: cur.fromName, pane: askerPane, decision: 'REFUSED', predicate: `${gate.why} after ${Math.round(gate.waitedMs / 1000)}s`, hint: 'row kept open, body not stored' })
+      putPending(cur)
+      return `!@${cur.fromName} has been mid-turn for ${Math.round(gate.waitedMs / 1000)}s, so nothing was pasted into their CLI queue. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` when they are free — \`tg watch ${cur.fromName}\` wakes you at their next prompt; the ask is kept open, so re-running is safe and is the ONLY thing that delivers it`
+    }
+    queuedMidTurn = true
+  }
   const late = cur.expiredAt != null
   const deliveredBody = late ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n${body}` : body
   // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
@@ -5060,6 +5157,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // isBusAnchored strips the digest and reads the `re=` envelope behind it.
   const flush = flushDigestFor(cur.fromSid)
   const answerBlock = formatAnswerBlock(answerer, cur.id, deliveredBody, refs)
+  removePending(cur.id)   // the point of no return: from here a failure RESTORES the row (putPending) explicitly
   const outcome = await busDeliverOutcome(askerPane, flush ? `${flush.block}\n${answerBlock}` : answerBlock).catch(() => 'failed' as PasteOutcome)
   const ok = outcome === 'landed'
   // Only on a landed paste, for the same reason every other markSeen is gated on one.
@@ -5101,8 +5199,12 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // endpoint resolves to its name rather than a sid and simply has no pane — no card, no error.
   const answered = resolveEndpoint(answerer, busEndpoints())
   if (!('error' in answered)) void notifyAskSent(answered.id, cur.fromName, body, 'answer', cur.fromSid)
-  appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
-  return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
+  appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs, ...(opts.undelivered ? { undelivered: true } : {}) })
+  // Pasted, not proved: confirmInjections promotes it on transcript proof or re-opens the ask.
+  recordAnswerPasted({ id: cur.id, row: cur, askerSid: cur.fromSid, pane: askerPane, answerer, pastedAt: Date.now(), ...(opts.answererSid ? { answererSid: opts.answererSid } : {}) })
+  const waited = Math.round(gate.waitedMs / 1000)
+  process.stderr.write(`daemon: ${label} (${askerPane}) ${queuedMidTurn ? `QUEUED-MID-TURN (non-Claude answerer, waited ${waited}s: ${gate.why})` : waited >= 2 ? `DELIVERED after ${waited}s wait` : 'DELIVERED'}${opts.undelivered ? ` — row was never delivered to @${cur.toName} (answered undelivered)` : ''}\n`)
+  return `answered @${cur.fromName} (ask ${cur.id})${waited >= 2 ? ` (waited ${waited}s for their prompt)` : ''}${late ? ' (late — delivered after the timeout)' : ''}`
 }
 
 // Run a hermes ask end-to-end: spawn `hermes -z`, mark the ask delivered (arms the TTL from spawn), and
@@ -5137,11 +5239,11 @@ async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<H
       // even if handing it back blocks on a busy pane. One silent run cost 80 minutes of guessing.
       process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} ${result.ok ? `finished (${result.text.length} chars)` : `FAILED — ${result.error}`}\n`)
       const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
-      const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
+      const status = await deliverAnswerToAsker(pending, cfg.name, body, [], HERMES_ANSWER_OPTS)
       process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} → ${status}\n`)
     } catch (e) {
       process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} threw: ${e}\n`)
-      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, [], HERMES_ANSWER_OPTS).catch(() => {})
     } finally { hermesInFlight.delete(pending.id) }
   })()
   return start
@@ -5274,10 +5376,10 @@ async function runHermesPaneAsk(pending: BusPending, cfg: HermesEndpoint): Promi
       const r = await runHermesPaneTurn(cfg, pending.text)
       process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} ${r.ok ? `finished (${r.reply.length} chars)` : `FAILED — ${r.error}`}\n`)
       const body = r.ok ? r.reply : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${r.error}`
-      process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [])}\n`)
+      process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [], HERMES_ANSWER_OPTS)}\n`)
     } catch (e) {
       process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} threw: ${e}\n`)
-      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, [], HERMES_ANSWER_OPTS).catch(() => {})
     } finally { hermesInFlight.delete(pending.id) }
   })()
   return { ok: true }
@@ -5400,10 +5502,10 @@ async function runOpenclawAsk(pending: BusPending, cfg: HermesEndpoint): Promise
       const result = await done
       process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} ${result.ok ? `finished (${result.text.length} chars)` : `FAILED — ${result.error}`}\n`)
       const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
-      process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [])}\n`)
+      process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [], HERMES_ANSWER_OPTS)}\n`)
     } catch (e) {
       process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} threw: ${e}\n`)
-      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, [], HERMES_ANSWER_OPTS).catch(() => {})
     } finally { hermesInFlight.delete(pending.id); openclawTurns.delete(cfg.name) }
   })()
   return start
@@ -7669,7 +7771,12 @@ async function handleCall(
         // Shared with async hermes-run completion: re-checks/clears the pending, restores on a failed
         // delivery, logs/cards only a real delivery, and flags an answerer≠target mismatch.
         const answerText = String(args.text ?? '').trim()
-        const status = await deliverAnswerToAsker(p, answerer, answerText, refs)
+        // Unit 3: allowed-but-logged — a row nobody ever delivered can still be answered (a target that
+        // read its ask out of agent-bus.json while the paste path was stuck did exactly that this morning).
+        // `busInFlight` counts as delivered: a fast answerer can reply inside the paste's settle window,
+        // before tryDeliverAsk stamps pastedAt (seen live on answer 691, 2026-08-16 — a false positive).
+        const undelivered = !p.injected && p.pastedAt == null && !busInFlight.has(p.id)
+        const status = await deliverAnswerToAsker(p, answerer, answerText, refs, { answererSid, undelivered })
         if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
         // The answering session's own copy, for its mini-app feed. Keyed on the ANSWERER where we
         // know it (a session may answer an ask addressed to another), falling back to the target.

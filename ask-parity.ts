@@ -98,3 +98,8 @@ export function assigneeSpokeAboutAsk(p: BusPending, entries: LedgerEntry[]): bo
 export function mentionsAsk(text: string | undefined, id: number): boolean {
   return !!text && new RegExp(`(?<!\\d)${id}(?!\\d)`).test(text)
 }
+
+// Unit 3: an ANSWER's proof marker — the `re=<id>` envelope formatAnswerBlock writes into the asker's
+// transcript. Sibling of blockCarriesAsk; the same 120s planInjectionConfirm window applies.
+export const blockCarriesAnswer = (text: string, id: number): boolean =>
+  new RegExp(`re=${id}(?!\\d)`).test(text)

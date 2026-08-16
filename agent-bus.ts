@@ -257,78 +257,101 @@ export type BusState = {
   // it is bounded by the window and by the cooldown, never by uptime. Optional for the same reason the
   // two above are: agent-bus.json exists in production written by builds that never heard of it.
   used?: Record<string, number>
+  // ---- answers in flight (program unit 3, 2026-08-16) ----
+  // An answer that was PASTED into the asker's pane and awaits transcript proof. Deliberately NOT a
+  // state on the pending row: the row is removed at paste exactly as before, so nothing that reads
+  // pending rows (stillQueued, owesAnswer, the roster, expiry, the reap, both alarms) learns a third
+  // state. The row itself rides inside the record so an unconfirmed answer can put it back.
+  answers?: Record<string, AnswerInFlight>
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {} })
+export type AnswerInFlight = {
+  id: number            // the ask id (rotates — the record dies with proof or the 120s window)
+  row: BusPending       // the pending row as it was when the answer removed it; putPending on no-proof
+  askerSid: string
+  pane: string          // where the answer was pasted; re-validated at use
+  answerer: string      // endpoint name; the re-run notice goes here
+  answererSid?: string  // when the answerer is a bridged Claude session (a hermes name has none)
+  pastedAt: number
+}
+
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {}, answers: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
 function save(): void { if (persist) writeJsonFile(busFile(), store) }
 
+/** Rebuild ONE pending row from arbitrary JSON — the allowlist `agent-bus-persist.test.ts` enumerates
+ *  against `BusPending`. Shared by `pending` and by the row inside an answer-in-flight record. */
+function rebuildPending(e: unknown): BusPending | null {
+  const p = e as Partial<BusPending>
+  if (!p || typeof p.id !== 'number' || typeof p.fromSid !== 'string' || typeof p.toSid !== 'string') return null
+  return {
+      id: p.id,
+      fromSid: p.fromSid,
+      toSid: p.toSid,
+      fromKind: p.fromKind === 'hermes' ? 'hermes' : 'claude',   // pre-P1.5 entries had no kind → claude
+      toKind: p.toKind === 'hermes' ? 'hermes' : 'claude',
+      fromName: typeof p.fromName === 'string' ? p.fromName : '',
+      toName: typeof p.toName === 'string' ? p.toName : '',
+      text: typeof p.text === 'string' ? p.text : '',
+      refs: Array.isArray(p.refs) ? p.refs.filter((r): r is string => typeof r === 'string') : [],
+      createdAt: typeof p.createdAt === 'number' ? p.createdAt : 0,
+      expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
+      injected: p.injected === true,
+      ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
+      ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
+      ...(typeof p.blockedByBox === 'string' ? { blockedByBox: p.blockedByBox } : {}),
+      // Was written by markPasted and then DROPPED here, so the field's own comment ("Persisted, so
+      // a daemon restart cannot forget and re-paste") described a safety that did not exist: after a
+      // restart the retry pasted a block that was already in the box, which is the duplicate class
+      // the three-outcome split exists to prevent. Restored 2026-08-03; the pane id is re-validated
+      // at use, so a stale one from a session that has since been restarted is harmless.
+      ...(typeof p.pastedPane === 'string' ? { pastedPane: p.pastedPane } : {}),
+      // R-4: persisted for the same reason pastedPane is — a restart inside the confirmation window
+      // must not re-paste a block that is already on its way into the target's conversation.
+      ...(typeof p.pastedAt === 'number' ? { pastedAt: p.pastedAt } : {}),
+      ...(typeof p.unconfirmedAt === 'number' ? { unconfirmedAt: p.unconfirmedAt } : {}),
+      ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
+      // "Told once" has to mean once across restarts too — this box ships several times an hour, and
+      // an in-memory flag would re-notify every asker holding a long-held row on each deploy.
+      ...(typeof p.heldNoticeAt === 'number' ? { heldNoticeAt: p.heldNoticeAt } : {}),
+      ...(typeof p.runnableSince === 'number' ? { runnableSince: p.runnableSince } : {}),
+      ...(typeof p.stuckPagedAt === 'number' ? { stuckPagedAt: p.stuckPagedAt } : {}),
+      ...(p.founding === true ? { founding: true as const } : {}),
+      // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
+      // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
+      // it the ack became a pending that never self-clears: it collected the 60-minute "no answer
+      // yet from @X" notice and entered the dead-letter reaper, for an FYI nobody was ever going to
+      // answer. That phantom unanswered ask is the exact noise `tg ack` exists to prevent, so it
+      // belongs closed at the store rather than in the convention. `quiet` rode the same gap: its
+      // loss mirrors a deliberately-silent daemon notice onto the human surface.
+      ...(p.noReply === true ? { noReply: true as const } : {}),
+      ...(p.quiet === true ? { quiet: true as const } : {}),
+      // The SAME trap, hit a third time and observed in production this time (2026-08-09): an open
+      // owner-direct ask that outlived a restart reloaded as an ordinary lane ask, so its answer was
+      // typed into the chat agent and no delivery reaction ever fired. A deploy is a restart, which
+      // makes this the common case rather than the rare one — ask 846 was minted, the daemon was
+      // redeployed while it was open, and the answer went to the orchestrator. Every optional field
+      // on BusPending must be listed here; `agent-bus-persist.test.ts` enumerates them so the fourth
+      // one cannot be forgotten the way these three were.
+      ...(p.ownerDirect === true ? { ownerDirect: true as const } : {}),
+      ...(typeof p.ownerMsgId === 'number' ? { ownerMsgId: p.ownerMsgId } : {}),
+      // Same whitelist trap the two lines above document: a @system ask outliving a restart would
+      // reload with no kind and answer back as the neutral label — right, but less than we knew.
+      ...(SYSTEM_ASK_KINDS.has(p.sysKind as string) ? { sysKind: p.sysKind as SystemAskKind } : {}),
+      depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
+  }
+}
+
 export function loadBus(): BusState {
   const raw = readJsonFile<Partial<BusState> | null>(busFile(), null)
   if (raw && typeof raw === 'object') {
     const pending: Record<string, BusPending> = {}
     for (const [id, e] of Object.entries(raw.pending ?? {})) {
-      const p = e as Partial<BusPending>
-      if (!p || typeof p.id !== 'number' || typeof p.fromSid !== 'string' || typeof p.toSid !== 'string') continue
-      pending[id] = {
-        id: p.id,
-        fromSid: p.fromSid,
-        toSid: p.toSid,
-        fromKind: p.fromKind === 'hermes' ? 'hermes' : 'claude',   // pre-P1.5 entries had no kind → claude
-        toKind: p.toKind === 'hermes' ? 'hermes' : 'claude',
-        fromName: typeof p.fromName === 'string' ? p.fromName : '',
-        toName: typeof p.toName === 'string' ? p.toName : '',
-        text: typeof p.text === 'string' ? p.text : '',
-        refs: Array.isArray(p.refs) ? p.refs.filter((r): r is string => typeof r === 'string') : [],
-        createdAt: typeof p.createdAt === 'number' ? p.createdAt : 0,
-        expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
-        injected: p.injected === true,
-        ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
-        ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
-        ...(typeof p.blockedByBox === 'string' ? { blockedByBox: p.blockedByBox } : {}),
-        // Was written by markPasted and then DROPPED here, so the field's own comment ("Persisted, so
-        // a daemon restart cannot forget and re-paste") described a safety that did not exist: after a
-        // restart the retry pasted a block that was already in the box, which is the duplicate class
-        // the three-outcome split exists to prevent. Restored 2026-08-03; the pane id is re-validated
-        // at use, so a stale one from a session that has since been restarted is harmless.
-        ...(typeof p.pastedPane === 'string' ? { pastedPane: p.pastedPane } : {}),
-        // R-4: persisted for the same reason pastedPane is — a restart inside the confirmation window
-        // must not re-paste a block that is already on its way into the target's conversation.
-        ...(typeof p.pastedAt === 'number' ? { pastedAt: p.pastedAt } : {}),
-        ...(typeof p.unconfirmedAt === 'number' ? { unconfirmedAt: p.unconfirmedAt } : {}),
-        ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
-        // "Told once" has to mean once across restarts too — this box ships several times an hour, and
-        // an in-memory flag would re-notify every asker holding a long-held row on each deploy.
-        ...(typeof p.heldNoticeAt === 'number' ? { heldNoticeAt: p.heldNoticeAt } : {}),
-        ...(typeof p.runnableSince === 'number' ? { runnableSince: p.runnableSince } : {}),
-        ...(typeof p.stuckPagedAt === 'number' ? { stuckPagedAt: p.stuckPagedAt } : {}),
-        ...(p.founding === true ? { founding: true as const } : {}),
-        // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
-        // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
-        // it the ack became a pending that never self-clears: it collected the 60-minute "no answer
-        // yet from @X" notice and entered the dead-letter reaper, for an FYI nobody was ever going to
-        // answer. That phantom unanswered ask is the exact noise `tg ack` exists to prevent, so it
-        // belongs closed at the store rather than in the convention. `quiet` rode the same gap: its
-        // loss mirrors a deliberately-silent daemon notice onto the human surface.
-        ...(p.noReply === true ? { noReply: true as const } : {}),
-        ...(p.quiet === true ? { quiet: true as const } : {}),
-        // The SAME trap, hit a third time and observed in production this time (2026-08-09): an open
-        // owner-direct ask that outlived a restart reloaded as an ordinary lane ask, so its answer was
-        // typed into the chat agent and no delivery reaction ever fired. A deploy is a restart, which
-        // makes this the common case rather than the rare one — ask 846 was minted, the daemon was
-        // redeployed while it was open, and the answer went to the orchestrator. Every optional field
-        // on BusPending must be listed here; `agent-bus-persist.test.ts` enumerates them so the fourth
-        // one cannot be forgotten the way these three were.
-        ...(p.ownerDirect === true ? { ownerDirect: true as const } : {}),
-        ...(typeof p.ownerMsgId === 'number' ? { ownerMsgId: p.ownerMsgId } : {}),
-        // Same whitelist trap the two lines above document: a @system ask outliving a restart would
-        // reload with no kind and answer back as the neutral label — right, but less than we knew.
-        ...(SYSTEM_ASK_KINDS.has(p.sysKind as string) ? { sysKind: p.sysKind as SystemAskKind } : {}),
-        depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
-      }
+      const row = rebuildPending(e)
+      if (row) pending[id] = row
     }
     // Sanitize the digest watermark like `pending`: keep only finite-number values (a corrupt/hand-
     // edited agent-bus.json can't poison it). Stale keys are pruned on the next markSeen, not here.
@@ -350,6 +373,16 @@ export function loadBus(): BusState {
     // buy: a restart would forget that an id was in use last hour and hand it straight back out.
     const used: Record<string, number> = {}
     for (const [k, v] of Object.entries(raw.used ?? {})) if (typeof v === 'number' && Number.isFinite(v)) used[k] = v
+    // Answers in flight: absent in every agent-bus.json written before unit 3. A record whose row does
+    // not rebuild is dropped — the answer it tracked cannot be re-opened without its row anyway.
+    const answers: Record<string, AnswerInFlight> = {}
+    for (const [k, v] of Object.entries(raw.answers ?? {})) {
+      const a = v as Partial<AnswerInFlight>
+      const row = a && rebuildPending(a.row)
+      if (!row || typeof a.id !== 'number' || typeof a.askerSid !== 'string' || typeof a.pane !== 'string' || typeof a.pastedAt !== 'number') continue
+      answers[k] = { id: a.id, row, askerSid: a.askerSid, pane: a.pane, answerer: typeof a.answerer === 'string' ? a.answerer : '', pastedAt: a.pastedAt,
+        ...(typeof a.answererSid === 'string' ? { answererSid: a.answererSid } : {}) }
+    }
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
@@ -360,6 +393,7 @@ export function loadBus(): BusState {
       reportedAt,
       briefedBy,
       used,
+      answers,
     }
     loaded = true
     return store
@@ -367,6 +401,12 @@ export function loadBus(): BusState {
   loaded = true
   return store
 }
+
+// ---- answers in flight (unit 3) ----
+export function recordAnswerPasted(a: AnswerInFlight): void { ensureLoaded(); (store.answers ??= {})[String(a.id)] = a; save() }
+export function clearAnswerInFlight(id: number): void { ensureLoaded(); if (store.answers) { delete store.answers[String(id)]; save() } }
+export function listAnswersInFlight(): AnswerInFlight[] { ensureLoaded(); return Object.values(store.answers ?? {}) }
+export const answerInFlight = (id: number): AnswerInFlight | undefined => { ensureLoaded(); return store.answers?.[String(id)] }
 
 function ensureLoaded(): void { if (!loaded) loadBus() }
 
@@ -1168,7 +1208,7 @@ export type LedgerEntry = {
   // carrying it sit in live ledger.jsonl files, so the type still describes real data.
   // `btw` is an aside (tg btw): delivered mid-turn, no id, no pending row — so it appears here and in
   // digests as history, and nowhere in the pending registry.
-  kind: 'ask' | 'ack' | 'answer' | 'btw' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate'
+  kind: 'ask' | 'ack' | 'answer' | 'btw' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate' | 'answer-unconfirmed'
   from: string
   to?: string
   id?: number
@@ -1182,6 +1222,9 @@ export type LedgerEntry = {
   // suppressed non-event is not news). Without this the two surfaces disagreed about whether anything
   // had happened at all, which cost a wrong three-branch diagnosis of a working predicate.
   suppressed?: boolean
+  // An `answer` row for an ask that had never been delivered to its target when the answer came
+  // (unit 3, 2026-08-16): allowed, and marked so a reader can tell bookkeeping from delivery.
+  undelivered?: boolean
   // Set by digestSince on the rows it hands to a flush, NEVER persisted: a deferred FYI is derived
   // from the watermark (see the note there), not recorded at append time. It travels only far enough
   // to tell the block builder to render this line verbatim instead of clamping it.

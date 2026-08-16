@@ -385,6 +385,19 @@ against that list. Controls: `delivery-log.test.ts` (fake clock), `delivery-log-
 enumeration), `bun scripts/logging-only-diff.ts` (a diff of the delivery files strips log calls and must
 leave no residual). Alarms (`BUS ALARM`) reach @chat as quiet bus acks since v0.5.140, never his DM.
 
+**`tg answer` runs the same instruments as an ask (v0.5.143, unit 3): record veto → screen gate → a
+20-second in-memory wait → paste → transcript PROOF.** The bound is tgctl's 30s socket timeout (a wait past
+it hands the answerer an UNKNOWN outcome — worse than a bounce); past it the answer is REFUSED with the ask
+kept open and the body NOT stored — no body-holding queue, by ruling; the revisit trigger is one real answer
+lost to a worker that never re-ran. Hermes/openclaw completions (no agent to re-run) wait 10 minutes then
+take the legacy CLI-queue paste, logged `QUEUED-MID-TURN`. Proof rides a separate `answers` map in
+`agent-bus.json` (`AnswerInFlight`, row included), NOT a state on the pending row, so nothing that reads
+rows learns a third state; on 120s without proof the ask is RE-OPENED and the answerer told to re-run.
+**Accepted risk, written down for the day a dupe is reported: a proof false-negative (answer landed, match
+missed) re-opens an answered ask and the re-run doubles the answer block — noise; a silently lost answer
+was the disease.** Answering a row that was never delivered is allowed and logged (`answered undelivered`,
+ledger `undelivered: true`). Proof: `answer-path.test.ts` (source-bound), `agent-bus-persist.test.ts`.
+
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
 instead: `checkConcludedTurnObligations` nudges THE SESSION once per ask, after a grace; nothing

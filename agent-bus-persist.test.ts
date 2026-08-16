@@ -26,7 +26,10 @@ test('every field on BusPending is reconstructed by loadBus — no field survive
   const fields = [...type.matchAll(/^ {2}(\w+)\??:/gm)].map(m => m[1]!)
   expect(fields).toContain('ownerDirect')       // the instrument must see the fields it is checking
   expect(fields.length).toBeGreaterThan(12)
-  const load = src.slice(src.indexOf('export function loadBus()'), src.indexOf('export function', src.indexOf('export function loadBus()') + 30))
+  // Since unit 3 the row allowlist lives in `rebuildPending` (shared by `pending` and by the row inside
+  // an answer-in-flight record); loadBus calls it for both. Enumerate against the helper.
+  const load = src.slice(src.indexOf('function rebuildPending('), src.indexOf('export function loadBus()'))
+  expect(load.length).toBeGreaterThan(200)
   const missing = fields.filter(f => !load.includes(`p.${f}`))
   expect(missing).toEqual([])
 })
@@ -60,4 +63,23 @@ test('both stall-alarm dedup memos survive a restart — a deploy must never re-
   // The assertion that matters: the planners agree after the reload, so neither alarm re-fires.
   expect(planStuckAlarm(state.pending[String(p.id)]!, { runnable: true, now: 60 * 60_000 })).toBeNull()
   expect(planHeartbeat({ openAsks: 1, lastEventAt: 1_000, now: 1_000 + HEARTBEAT_SILENCE_MS, pagedFor: heartbeatPagedFor() })).toBe(false)
+})
+
+// Unit 3: an answer in flight survives a restart WITH its row — that row is what re-opens the ask when
+// proof never comes, and a restart inside the 120s window is the common case (a deploy is a restart).
+test('an answer-in-flight record round-trips through agent-bus.json with its row intact', async () => {
+  const { recordAnswerPasted, listAnswersInFlight, clearAnswerInFlight, removePending } = await import('./agent-bus.ts')
+  setBusStateDir(mkdtempSync(join(tmpdir(), 'bus-persist-')))
+  const p = createPending({ fromSid: 'sid-lane', toSid: 'sid-worker', fromName: 'chat', toName: 'worker', text: 'q', refs: [], noReply: undefined as never }, 1000)
+  removePending(p.id)
+  recordAnswerPasted({ id: p.id, row: p, askerSid: 'sid-lane', pane: '%9', answerer: 'worker', answererSid: 'sid-worker', pastedAt: 2000 })
+  const again = loadBus()
+  const rec = again.answers?.[String(p.id)]
+  expect(rec?.pane).toBe('%9')
+  expect(rec?.answererSid).toBe('sid-worker')
+  expect(rec?.row.fromName).toBe('chat')
+  expect(rec?.row.text).toBe('q')
+  expect(listAnswersInFlight().map(a => a.id)).toEqual([p.id])
+  clearAnswerInFlight(p.id)
+  expect(loadBus().answers?.[String(p.id)]).toBeUndefined()
 })
