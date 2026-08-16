@@ -51,7 +51,7 @@ test('SOURCE: a row whose block is SITTING IN THE TARGET BOX is kept, not remove
 test('SOURCE: answers and the owner path WAIT for a prompt instead of pasting into a busy pane', () => {
   // Both used to paste unconditionally through busDeliverOutcome, which has no freedom gate — the last
   // two unguarded feeds into the CLI message queue after Unit 0 closed the ask side.
-  const answer = fn('async function deliverAnswerToAsker', 7000)
+  const answer = fn('async function deliverAnswerToAsker', 9000)
   expect(answer).toContain('awaitPaneFree(')
   expect(answer.indexOf('awaitPaneFree(')).toBeLessThan(answer.indexOf('busDeliverOutcome('))
   const owner = fn('async function ownerDirectDispatch(', 5500)
@@ -59,13 +59,18 @@ test('SOURCE: answers and the owner path WAIT for a prompt instead of pasting in
   expect(owner.indexOf('awaitPaneFree(')).toBeLessThan(owner.indexOf('busDeliverOutcome('))
 })
 
-test('SOURCE: an answer is never DROPPED on the wait timing out — the ask row is restored', () => {
-  // The failure this forbids: a refused answer the sender does not retry is a lost answer AND a
-  // permanently open row, which is a new species of the stall this whole build exists to kill.
-  const answer = fn('async function deliverAnswerToAsker', 7000)
-  const timeout = answer.slice(answer.indexOf("if (free === 'timeout')"))
-  expect(timeout.slice(0, 400)).toContain('putPending(cur)')
-  expect(timeout.slice(0, 400)).toMatch(/re-run/)
+test('SOURCE: the answer WAIT happens BEFORE the row is removed, so a restart cannot eat both', () => {
+  // The row is removed only once we are committed to delivering. Waiting with it already gone means a
+  // daemon restart inside the window loses the ask AND the answer, with nothing to restore and nobody
+  // told — a window that used to be one paste (~1s) and that this wait would have widened twentyfold.
+  // This is the assertion most likely to be undone by "tidying" the wait down next to the paste.
+  const answer = fn('async function deliverAnswerToAsker', 9000)
+  expect(answer.indexOf('awaitPaneFree(')).toBeLessThan(answer.indexOf('removePending(cur.id)'))
+  // And because nothing was removed, the timeout path must NOT try to restore — a putPending there
+  // would be a second copy of a row that never left.
+  const timeout = answer.slice(answer.indexOf("if (free === 'timeout')"), answer.indexOf('removePending(cur.id)'))
+  expect(timeout).not.toContain('putPending(cur)')
+  expect(timeout).toMatch(/re-run/)
 })
 
 test('SOURCE: awaitPaneFree treats an unreadable registry as a fall-through, never as a wait', () => {

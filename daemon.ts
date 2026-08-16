@@ -5016,7 +5016,6 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const room = busLedgerRoom()
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
-  removePending(cur.id)
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
@@ -5025,6 +5024,27 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   if (cur.ownerDirect && route !== 'owner-card' && route !== 'system') {
     process.stderr.write(`daemon: ask ${cur.id} is ownerDirect but @${cur.fromName} has no DM chat lane — delivering into the pane instead\n`)
   }
+  // UNIT 1 ruling 1 (@chat ask 572) — AN ANSWER WAITS FOR A PROMPT; it does not go into the CLI's queue.
+  // Until now this path pasted unconditionally, so answering a mid-turn asker fed the same message queue
+  // that swallowed asks 472 and 474 — the last unguarded feed into it after Unit 0 closed the ask side.
+  // The answer is NOT refused on busy and NOT stored: an answer discharges an obligation that already
+  // exists, and a refusal the sender never retries is a lost answer plus a permanently open row, which
+  // is a new species of the very stall this build exists to kill.
+  //
+  // BEFORE `removePending`, and that ordering is the point. The row is removed only once we are
+  // committed to delivering; a wait with the row already gone would mean a daemon restart inside the
+  // window loses the ask AND the answer, with nothing to restore and nobody told. That window used to
+  // be one paste (~1s) and this wait would have widened it twentyfold.
+  let askerPane: string | null = null
+  if (route !== 'system' && route !== 'owner-card') {
+    askerPane = await paneForSession(cur.fromSid).catch(() => null)
+    if (!askerPane) return `!@${cur.fromName}'s session is no longer running — not delivered`
+    const free = await awaitPaneFree(askerPane, `answer to ask ${cur.id} → @${cur.fromName}`, ANSWER_WAIT_MS)
+    if (free === 'timeout') {
+      return `!@${cur.fromName} has been mid-turn for ${Math.round(ANSWER_WAIT_MS / 1000)}s, so nothing was pasted into their CLI queue. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` — the ask is kept open, so re-running is safe and is the ONLY thing that delivers it`
+    }
+  }
+  removePending(cur.id)
   if (route === 'system') {
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
     // The card says WHICH @system ask this answers. It read "handled a context nudge" for every kind
@@ -5056,20 +5076,8 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
     await sendOwnerAnswerCard(ownerChat!, answerer, shown, cur.toSid)
     return `answered the owner directly (ask ${cur.id})`
   }
-  const askerPane = await paneForSession(cur.fromSid).catch(() => null)
+  // Resolved and waited on ABOVE, before the row was removed; non-null on every path that reaches here.
   if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
-  // UNIT 1 ruling 1 (@chat ask 572) — AN ANSWER WAITS FOR A PROMPT; it does not go into the CLI's queue.
-  // Until now this path pasted unconditionally, so answering a mid-turn asker fed the same message queue
-  // that swallowed asks 472 and 474 — the last unguarded feed into it after Unit 0 closed the ask side.
-  // The answer is NOT refused on busy and NOT stored: an answer discharges an obligation that already
-  // exists, and a refusal the sender never retries is a lost answer plus a permanently open row, which
-  // is a new species of the very stall this build exists to kill. So it waits, in memory, and only a
-  // target still busy after the bound falls through to a refusal with the ask kept open.
-  const free = await awaitPaneFree(askerPane, `answer to ask ${cur.id} → @${cur.fromName}`, ANSWER_WAIT_MS)
-  if (free === 'timeout') {
-    putPending(cur)
-    return `!@${cur.fromName} has been mid-turn for ${Math.round(ANSWER_WAIT_MS / 1000)}s, so nothing was pasted into their CLI queue. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` — the ask is kept open, so re-running is safe and is the ONLY thing that delivers it`
-  }
   // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
   // asker knows why it arrives after a "timed out" note. Prepend to the delivered body + the room card.
   const late = cur.expiredAt != null
