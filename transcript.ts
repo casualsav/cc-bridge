@@ -97,7 +97,13 @@ function isRealUserText(e: Entry): boolean {
 // was answering. Seen 2026-08-16 21:31Z: an aside into @weather's owner-direct chain re-anchored the
 // turn, the owner's route retired on that "foreign" turn, and his final report (21:40Z) was never
 // carded. Consistent with BUS_ANCHOR deliberately excluding btw (see the aside's CLAUDE.md entry).
-const CONTINUATION_WAKE = /^\s*(?:<task-notification>|<tg\s+@[\w.-]+\s+btw>)/
+// The rest of the family (turn-shape table, `$(tg shared)/unit2-design-note.md` §9, fixtures in
+// owner-direct.test.ts): a slash command's `<command-name>` and its `<local-command-stdout>`, bash-mode
+// `<bash-input>`/`<bash-stdout>`, and `[Request interrupted by user]` — all real (non-meta) user entries
+// on CLI 2.1.226, measured 2026-08-17 across this box's transcripts (105 /clear, 71 /model, 51 /compact
+// …), and none of them has an AUTHOR: a `tg slash /compact` from the chat lane into a worker mid-chain
+// must not hand its owner-direct chain a "foreign" turn.
+const CONTINUATION_WAKE = /^\s*(?:<task-notification>|<tg\s+@[\w.-]+\s+btw>|<command-name>|<local-command-stdout>|<bash-input>|<bash-stdout>|\[Request interrupted by user)/
 function isContinuationWake(e: Entry): boolean {
   return isRealUserText(e) && CONTINUATION_WAKE.test(textOf(e.message?.content))
 }

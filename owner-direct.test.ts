@@ -428,3 +428,51 @@ test('a session may not be named owner', () => {
   expect(spawnCase).toContain('isOwnerAddress(topicName)')
   expect(spawnCase).toContain('is reserved — @owner addresses the human')
 })
+
+// ---- THE TURN-SHAPE TABLE (design note §9, @chat ack 718): every user-entry shape transcript.ts can see,
+// what it does to the anchor CLASS and to an armed owner-direct ROUTE. One row per shape, one fixture per
+// row — no cell is guesswork. `HIS` is the owner's routed message; the route is armed on it before the shape
+// lands, the shape's reply is then read through finalRepliesAfter + consume.
+const HIS = '<tg 7 from=dm>are you up?</tg>'
+type Row = { shape: string; entry: string; anchor: 'inherit' | 'bus' | 'human'; route: 'match' | 'retire' | 'ignore'; meta?: true }
+const TABLE: Row[] = [
+  { shape: 'task-notification wake',        entry: '<task-notification>\n<task-id>x</task-id>\n</task-notification>', anchor: 'inherit', route: 'match' },
+  { shape: 'tg btw aside',                  entry: '<tg @chat btw>stop, X changed</tg>',                     anchor: 'inherit', route: 'match' },
+  { shape: 'slash command (tg slash/typed)', entry: '<command-name>/compact</command-name>\n<command-message>compact</command-message>', anchor: 'inherit', route: 'match' },
+  { shape: 'local command stdout',          entry: '<local-command-stdout>Compacted</local-command-stdout>', anchor: 'inherit', route: 'match' },
+  { shape: 'bash-mode input',               entry: '<bash-input>ls</bash-input>',                              anchor: 'inherit', route: 'match' },
+  { shape: 'bash-mode stdout',              entry: '<bash-stdout>a b</bash-stdout><bash-stderr></bash-stderr>', anchor: 'inherit', route: 'match' },
+  { shape: 'request interrupted',           entry: '[Request interrupted by user]',                            anchor: 'inherit', route: 'match' },
+  { shape: 'his next DM message (new id)',  entry: '<tg 8 from=dm>and now?</tg>',                              anchor: 'human',   route: 'retire' },
+  { shape: 'his EDIT of a message',         entry: '<tg e8 from=dm>and now (edited)?</tg>',                    anchor: 'human',   route: 'retire' },
+  { shape: 'his scheduled replay (no id)',  entry: '<tg from=dm>@launch nightly</tg>',                          anchor: 'human',   route: 'retire' },
+  { shape: 'group / topic message',         entry: '<tg 9 from=group>hey</tg>',                                 anchor: 'human',   route: 'retire' },
+  { shape: 'mini-app message',              entry: '<tg from=app>ping</tg>',                                    anchor: 'human',   route: 'retire' },
+  { shape: 'plain terminal text',           entry: 'typed at the keyboard',                                     anchor: 'human',   route: 'retire' },
+  { shape: 'bus ask',                       entry: '<tg @chat ask=31>rebuild</tg>',                             anchor: 'bus',     route: 'retire' },
+  { shape: 'bus ack',                       entry: '<tg @chat ack=32>fyi</tg>',                                 anchor: 'bus',     route: 'retire' },
+  { shape: 'bus answer (re=)',              entry: '<tg @weather re=33>done</tg>',                              anchor: 'bus',     route: 'retire' },
+  { shape: 'digest-prefixed ask',           entry: '<tg bus-digest since=1>…</tg>\n<tg @chat ask=34>go</tg>',  anchor: 'bus',     route: 'retire' },
+  { shape: 'his founding ask (from=owner)', entry: '<tg @weather ask=35 from=owner>build it</tg>',              anchor: 'bus',     route: 'retire' },
+  { shape: 'skill / system-reminder injection (isMeta)', entry: '<system-reminder>…</system-reminder>',       anchor: 'inherit', route: 'match', meta: true },
+  { shape: 'thinking-only nudge (isMeta)',  entry: '[Your previous response had no visible output. Please retry.]', anchor: 'inherit', route: 'match', meta: true },
+]
+
+test.each(TABLE)('turn-shape table: $shape → anchor=$anchor route=$route', row => {
+  const f = fixture([
+    user(HIS, 'u1'), asst('yes', 'a1'),
+    { type: 'user', uuid: 'u2', ...(row.meta ? { isMeta: true } : {}), message: { role: 'user', content: row.entry } },
+    asst('reply after the shape', 'a2'),
+  ])
+  const replies = finalRepliesAfter(f, '')
+  const last = replies[replies.length - 1]!
+  expect(last.text).toBe('reply after the shape')
+  if (row.anchor === 'inherit') { expect(last.anchorText).toBe(HIS); expect(last.busAnchored).toBe(false) }
+  else { expect(last.anchorText).not.toBe(HIS); expect(last.busAnchored).toBe(row.anchor === 'bus') }
+  const r = createOwnerReplyRoutes()
+  r.arm({ sid: 's', chat: '111', name: 'w', marker: '<tg 7 from=dm>' })
+  expect(r.consume('s', replies[0]!.anchorText).length).toBe(1)   // his own turn's reply: matched
+  const second = r.consume('s', last.anchorText)
+  if (row.route === 'match') { expect(second.length).toBe(1); expect(r.size()).toBe(1) }
+  else if (row.route === 'retire') { expect(second).toEqual([]); expect(r.size()).toBe(0) }
+})
