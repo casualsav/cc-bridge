@@ -20448,6 +20448,11 @@ function touchHeartbeat(): void { try { writeFileSync(HEARTBEAT_FILE, String(Dat
 // Cross-guard the watchdog (it guards us): revive it if its pid is gone, so neither staying
 // down needs a new Claude session. ensure-daemon (SessionStart) covers the both-dead case.
 function ensureWatchdog(): void {
+  // A daemon that is shutting down must not spawn supervisors: on the third watched unit-5 deploy
+  // (03:13:28Z 2026-08-17) this 60s tick fired inside the drain, 29ms after `shutting down`, and
+  // launched a watchdog of the OLD version into the deploy's stop window (pid 2808147; it did not
+  // survive, and nothing named its death). The deploy's own chain brings the new pair up.
+  if (shuttingDown) return
   const watchdogPath = join(import.meta.dir, 'watchdog.ts')
   if (!existsSync(watchdogPath)) return
   try { const pid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8'), 10); if (pid > 1) { process.kill(pid, 0); return } } catch {}
