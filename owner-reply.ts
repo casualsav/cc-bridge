@@ -25,6 +25,8 @@
 // nothing and assert on `snapshot()`. Persisted for the same reason relay cursors are: a deploy lands
 // mid-turn constantly here, and a route lost with the process is an answer he never receives at all.
 
+import { logDecision as defaultLog } from './delivery-log.ts'
+
 export type OwnerReplyRoute = {
   sid: string      // the session that was addressed — its replies are the ones this route watches
   chat: string     // his DM, where the card goes
@@ -62,24 +64,31 @@ export type OwnerReplyRoutes = {
 
 export function createOwnerReplyRoutes(
   initial: OwnerReplyRoute[] = [],
-  opts: { save?: (rows: OwnerReplyRoute[]) => void; cap?: number; ttlMs?: number; now?: () => number } = {},
+  opts: { save?: (rows: OwnerReplyRoute[]) => void; cap?: number; ttlMs?: number; now?: () => number; log?: (d: Parameters<typeof defaultLog>[0]) => void } = {},
 ): OwnerReplyRoutes {
   const cap = opts.cap ?? OWNER_REPLY_CAP
   const ttlMs = opts.ttlMs ?? OWNER_REPLY_TTL_MS
   const now = opts.now ?? Date.now
+  // Injected the way `save` is — a test captures the decisions instead of writing them to the log
+  // the daemon this store runs inside is reading.
+  const logDecision = opts.log ?? defaultLog
   let rows: OwnerReplyRoute[] = initial.filter(r =>
     r && typeof r.sid === 'string' && typeof r.chat === 'string' && typeof r.marker === 'string' && typeof r.at === 'number')
 
   const prune = (): void => {
     const cutoff = now() - ttlMs
+    // An UNMATCHED route that ages out is an answer he was owed and never got a card for (audit
+    // §5.8's silent class); a matched one has already carried at least one, so it leaves quietly.
+    for (const r of rows) if (r.at < cutoff && r.matchedAt == null) logDecision({ family: 'owner', what: `route ${r.marker.slice(0, 32)}`, target: r.name || 'owner', pane: null, decision: 'DROPPED', predicate: `route aged out unmatched (${Math.round(ttlMs / 3_600_000)}h)`, hint: 'no turn of that session ever anchored on his message' })
     rows = rows.filter(r => r.at >= cutoff)
+    for (const r of rows.slice(0, Math.max(0, rows.length - cap))) logDecision({ family: 'owner', what: `route ${r.marker.slice(0, 32)}`, target: r.name || 'owner', pane: null, decision: 'DROPPED', predicate: `route evicted (cap ${cap})` })
     if (rows.length > cap) rows = rows.slice(rows.length - cap)
   }
   prune()
 
   return {
     arm(route) {
-      if (!route.sid || !route.chat || !route.marker) return
+      if (!route.sid || !route.chat || !route.marker) { logDecision({ family: 'owner', what: `route ${(route.marker || '-').slice(0, 32)}`, target: route.name || 'owner', pane: null, decision: 'REFUSED', predicate: `arm: missing ${!route.sid ? 'sid' : !route.chat ? 'chat' : 'marker'}`, hint: 'his reply has no route home' }); return }
       rows.push({ ...route, at: now() })
       prune()
       opts.save?.([...rows])
@@ -92,7 +101,10 @@ export function createOwnerReplyRoutes(
         // A concluded turn of his session that none of his messages anchored: the chain his matched
         // routes were riding is over. Unmatched routes stay — his message may be queued behind it.
         const stale = rows.filter(r => r.sid === sid && r.matchedAt != null)
-        if (stale.length) { rows = rows.filter(r => !stale.includes(r)); opts.save?.([...rows]) }
+        if (stale.length) { logDecision({ family: 'owner', what: `route ${stale[0]!.marker.slice(0, 32)}${stale.length > 1 ? ` +${stale.length - 1}` : ''}`, target: stale[0]!.name || 'owner', pane: null, decision: 'DROPPED', predicate: 'route retired — session concluded a turn he did not start' }); rows = rows.filter(r => !stale.includes(r)); opts.save?.([...rows]) }
+        // Keyed: an armed route sits through every OTHER reply that session makes, and one line per
+        // reply for up to 24h is the spam the guard exists to fold.
+        if (!stale.length && rows.some(r => r.sid === sid)) logDecision({ key: `owner-route:${sid}`, family: 'owner', what: `reply of ${sid.slice(0, 8)}`, target: rows.find(r => r.sid === sid)?.name || 'owner', pane: null, decision: 'REFUSED', predicate: 'marker not in anchor', hint: `${rows.filter(r => r.sid === sid).length} route(s) armed for this session, still waiting` })
         return []
       }
       const t = now()

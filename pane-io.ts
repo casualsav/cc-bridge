@@ -7,6 +7,7 @@
 // state (PaneWatcher, injection guards, the focused-pane registry) stays in daemon.ts and
 // calls down into these primitives.
 import { exec, sleep, hashText } from './proc.ts'
+import { logDecision } from './delivery-log.ts'
 
 // Capture the visible pane contents (joined wrapped lines, ANSI preserved).
 export async function capturePane(paneId: string): Promise<string> {
@@ -324,7 +325,7 @@ export async function withPaneDelivery<T>(paneId: string, fn: () => Promise<T>, 
   // NO STEALING. A timeout skips this delivery and reports failure; it never barges into a critical
   // section, because barging mid-paste is precisely the corruption being fixed. Losing a message
   // with a visible error beats corrupting one silently — every caller already surfaces a false.
-  if (!mineTurn) { release(); return timedOut() }
+  if (!mineTurn) { logDecision({ family: 'human', what: 'paste', target: paneId, pane: paneId, decision: 'REFUSED', predicate: `lock timeout ${Math.round(waitMs / 1000)}s` }); release(); return timedOut() }
   try { return await fn() }
   finally {
     release()

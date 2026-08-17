@@ -7,6 +7,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { normalizeCommandOutput } from './ansi.ts'
+import { logDecision } from './delivery-log.ts'
 
 // The default (main-account) projects root. Multi-account: every reader below takes an optional
 // `roots` list so the daemon can scan each registered account's <configDir>/projects too.
@@ -581,7 +582,16 @@ export function finalRepliesAfter(file: string, afterUuid: string, opts: { inclu
   // Lost cursor (compaction/rotation): scan from the top and keep only the last turn's conclusion,
   // so a lost cursor never dumps the whole backlog. It runs the SAME scan rather than reading the
   // tail its own way — a second reader of this transcript is a second place the nudge can escape.
-  if (afterUuid && at < 0) return scanFinalReplies(entries, -1, opts).slice(-1)
+  if (afterUuid && at < 0) {
+    // The ONE line this reader writes, and it is keyed for that reason: a lost cursor persists
+    // across ticks, so the guard makes it once per lost cursor instead of once per poll.
+    logDecision({
+      key: `cursor:${file}`, family: 'relay', what: `replies after ${afterUuid.slice(0, 8)}`,
+      target: file.slice(file.lastIndexOf('/') + 1), pane: null, decision: 'DROPPED',
+      predicate: `cursor lost (${Math.max(0, scanFinalReplies(entries, -1, opts).length - 1)} replies collapsed)`,
+    })
+    return scanFinalReplies(entries, -1, opts).slice(-1)
+  }
   return scanFinalReplies(entries, at, opts)
 }
 

@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, renameSync, statSync, mkdirSync } from 'no
 import { randomBytes } from 'node:crypto'
 import type { Context } from 'grammy'
 import { ACCESS_FILE, PREFS_FILE, STATE_DIR } from './common.ts'
+import { logDecision } from './delivery-log.ts'
 import { _accessFileCache } from './state.ts'
 import { getGroupChatId } from './topics.ts'
 import type { Access } from './types.ts'
@@ -192,24 +193,29 @@ export function gate(ctx: Context): GateResult {
   const access = loadAccess()
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
-  if (access.dmPolicy === 'disabled') return { action: 'drop' }
+  // A dropped update is the "the bridge ignored me" class — nobody is told, so the only record is
+  // this line. Two classes stay deliberately SILENT: an un-mentioned group message (the fire-hose)
+  // and a chat type nobody asked the bridge to carry (unit2-design-note.md §3.3).
+  const what = ctx.msg?.message_id ? `inbound msg ${ctx.msg.message_id}` : 'inbound update'
+  const chat = String(ctx.chat?.id ?? '-')
+  if (access.dmPolicy === 'disabled') { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: dm-disabled' }); return { action: 'drop' } }
   const from = ctx.from
-  if (!from) return { action: 'drop' }
+  if (!from) { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: no-from' }); return { action: 'drop' } }
   const senderId = String(from.id)
   const chatType = ctx.chat?.type
 
   if (chatType === 'private') {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    if (access.dmPolicy === 'allowlist') { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: dm-not-allowlisted' }); return { action: 'drop' } }
     for (const [code, p] of Object.entries(access.pending)) {
       if (p.senderId === senderId) {
-        if ((p.replies ?? 1) >= 2) return { action: 'drop' }
+        if ((p.replies ?? 1) >= 2) { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: pairing-replied-twice' }); return { action: 'drop' } }
         p.replies = (p.replies ?? 1) + 1
         saveAccess(access)
         return { action: 'pair', code, isResend: true }
       }
     }
-    if (Object.keys(access.pending).length >= 3) return { action: 'drop' }
+    if (Object.keys(access.pending).length >= 3) { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: pairing-table-full' }); return { action: 'drop' } }
     const code = randomBytes(3).toString('hex')
     const now = Date.now()
     access.pending[code] = { senderId, chatId: String(ctx.chat!.id), createdAt: now, expiresAt: now + 60 * 60 * 1000, replies: 1 }
@@ -220,10 +226,10 @@ export function gate(ctx: Context): GateResult {
   if (chatType === 'group' || chatType === 'supergroup') {
     const groupId = String(ctx.chat!.id)
     const policy = access.groups[groupId]
-    if (!policy) return { action: 'drop' }
+    if (!policy) { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: group-unconfigured' }); return { action: 'drop' } }
     const groupAllowFrom = policy.allowFrom ?? []
     const requireMention = policy.requireMention ?? true
-    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) return { action: 'drop' }
+    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) { logDecision({ family: 'human', what, target: chat, pane: null, decision: 'DROPPED', predicate: 'access: group-sender-not-allowed' }); return { action: 'drop' } }
     if (requireMention && !isMentioned(ctx, access.mentionPatterns)) return { action: 'drop' }
     return { action: 'deliver', access }
   }

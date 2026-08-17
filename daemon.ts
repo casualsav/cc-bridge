@@ -1330,8 +1330,10 @@ async function recoverStrandedPastes(): Promise<void> {
     const cap = alive ? await capturePane(paneId).catch(() => '') : ''
     const state = { alive, idle: !!cap && onNormalPrompt(cap) && !detectWorking(cap), occupant: inputBoxOccupant(styled) }
     const plan = planPasteRecovery(rec, state, now)
-    if (plan.action === 'wait') continue
-    if (plan.action === 'drop') { clearPasteInFlight(paneId); continue }
+    // The sweep re-decides the same record every 25s, so the hold is keyed and the drop is not: a drop
+    // clears the record, which ends the subject.
+    if (plan.action === 'wait') { logDecision({ key: `paste:${paneId}:${rec.chat}`, family: 'human', what: 'stranded paste', target: rec.chat, pane: paneId, decision: 'HELD', predicate: plan.why }); continue }
+    if (plan.action === 'drop') { logDecision({ family: 'human', what: 'stranded paste', target: rec.chat, pane: paneId, decision: 'DROPPED', predicate: plan.why, hint: 'in-flight record cleared' }); forgetDecision(`paste:${paneId}:${rec.chat}`); clearPasteInFlight(paneId); continue }
     // The owed Enter. Through the same delivery lock as every other write to this pane, and it never
     // pastes — the text is already in the box, so a re-paste would be the duplicate class.
     const keys = agentSubmitKeys(await paneAgentKind(paneId))
@@ -1339,7 +1341,7 @@ async function recoverStrandedPastes(): Promise<void> {
       () => resubmitVerified(paneId, keys, submitLanded),
       () => 'failed' as PasteOutcome)
     process.stderr.write(`daemon: stranded paste in ${paneId} (chat ${rec.chat}, ${Math.round((now - rec.at) / 1000)}s old) — pressed the owed Enter: ${outcome}\n`)
-    if (outcome === 'landed') clearPasteInFlight(paneId)
+    if (outcome === 'landed') { forgetDecision(`paste:${paneId}:${rec.chat}`); clearPasteInFlight(paneId) }
   }
 }
 
@@ -1353,7 +1355,12 @@ async function offerStrandedPasteCard(paneId: string, cap: string, styled: strin
     return
   }
   const targets = await outboundTargetsFor(paneId).catch(() => [])
-  if (!targets.length) return              // no surface to ask on; the bus escalation covers blockers, not drafts
+  if (!targets.length) {
+    // Keyed: pasteCardSent is only stamped once a card goes out, so with no surface `needsSubmitCard`
+    // keeps saying yes on every sweep.
+    logDecision({ key: `paste-card:${paneId}`, family: 'human', what: 'stranded paste card', target: 'owner', pane: paneId, decision: 'DROPPED', predicate: 'no outbound targets for the pane' })
+    return              // no surface to ask on; the bus escalation covers blockers, not drafts
+  }
   pasteCardSent.set(paneId, state.occupant!)
   for (const { chat, thread } of targets) {
     await channel.sendText(chat,
@@ -1798,7 +1805,9 @@ async function transcriptForPane(pane: string | null, cwd: string | null, requir
     requireOwned,
   })
   if (!d.use) {
-    if (claimant) process.stderr.write(`daemon: transcript ${basename(fb)} belongs to session ${claimant.sessionId} (${claimant.name}) — not relaying it for pane ${pane ?? '-'}\n`)
+    // Keyed: every relay tick re-derives this fallback, so the same refusal was written four times a
+    // minute for as long as the sibling stayed stamped.
+    if (claimant) logDecision({ key: `transcript:${pane ?? '-'}`, family: 'relay', what: `transcript ${basename(fb)}`, target: 'owner', pane, decision: 'DROPPED', predicate: `claimed by session ${claimant.sessionId} (${claimant.name})` })
     return null
   }
   // EVERY accepted fallback says so, with everything needed to judge it after the fact: which pane,
@@ -2580,6 +2589,7 @@ async function relayLoopTick(gen: number): Promise<void> {
             await deliverOwnerDirectReply(paneId, file, r, ownerRoutes)
             if (r.busAnchored) void checkConcludedTurnObligations(paneId).catch(() => {})   // did this turn do what its ask required?
           } else {
+            logDecision({ family: 'relay', what: `reply ${r.uuid.slice(0, 8)} of ${basename(file).slice(0, 8)}`, target: 'owner', pane: paneId, decision: 'DROPPED', predicate: 'banner regex' })
             lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
             lastRelayedByFile.set(file, r.uuid)
           }
@@ -2757,6 +2767,7 @@ async function auxRelayTick(): Promise<void> {
           // injection attempted while frozen — relaying each spammed the topic. The ⛔ handler already
           // sends one deduped notice.
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) {
+            logDecision({ family: 'relay', what: `reply ${r.uuid.slice(0, 8)} of ${basename(file).slice(0, 8)}`, target: 'owner', pane, decision: 'DROPPED', predicate: 'banner regex' })
             if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)
             continue
           }
@@ -3336,6 +3347,7 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
     noteDelivered(params.meta)
     focus.activeShim.write({ t: 'inbound', params })
   } else {
+    logDecision({ family: 'human', what: `msg ${params.meta.message_id ?? '?'}`, target: String(params.meta.chat_id ?? '?'), pane: null, decision: 'BUFFERED', predicate: 'nothing focused (no pane, no shim)', hint: 'replays when a session next appears' })
     bufferEvent(params)
     void hintNoSession(params)
   }
@@ -5801,6 +5813,7 @@ function clearLoginHoldIfDone(paneId: string | null, cap: string): void {
   if (!paneId || !loginHeldPanes.has(paneId)) return
   if (detectLoginPrompt(cap) || !onNormalPrompt(cap)) return   // still signing in / mid-screen
   loginHeldPanes.delete(paneId)
+  forgetDecision(`login:${paneId}`)   // a later login episode on this pane is a new story
   process.stderr.write(`daemon: login finished on ${paneId} — delivering ${editorHeld.get(paneId)?.length ?? 0} held message(s)\n`)
   void flushEditorHeld(paneId)
 }
@@ -5843,7 +5856,9 @@ function bufferEvent(params: InboundParams): void {
     if (existing.length > MAX) existing = existing.slice(-MAX)
     writeFileSync(PENDING_EVENTS_FILE, existing.join('\n') + '\n', { mode: 0o600 })
   } catch (err) {
-    process.stderr.write(`daemon: buffer write failed: ${err}\n`)
+    // The one branch in here that loses the message outright — the buffer is what every other refusal
+    // hands it to, so a failed write is the end of the line.
+    logDecision({ family: 'human', what: `msg ${params.meta.message_id ?? '?'}`, target: String(params.meta.chat_id ?? '?'), pane: null, decision: 'DROPPED', predicate: `buffer write failed: ${err}` })
   }
 }
 
@@ -6821,7 +6836,10 @@ async function flushPendingText(): Promise<void> {
     lastRelayedUuid = r.uuid
     lastRelayedByFile.set(file, r.uuid)
     if (r.suppressed) { logSuppressedReply('pre-flush', file, r); continue }
-    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
+    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) {
+      logDecision({ family: 'relay', what: `reply ${r.uuid.slice(0, 8)} of ${basename(file).slice(0, 8)}`, target: 'owner', pane: focus.activePaneId, decision: 'DROPPED', predicate: 'banner regex' })
+      continue   // daemon sends its own ⛔
+    }
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       const preSid = await sessionForPane(focus.activePaneId!).catch(() => null)
@@ -6857,14 +6875,20 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
   if (!TRANSCRIPT_OUTBOUND || !pane) return false
   const cwd = await paneCwd(pane).catch(() => null)
   const file = await transcriptForPane(pane, cwd)
-  if (!file || !lastRelayedByFile.has(file)) return false   // unprimed cursor → don't dump backlog
+  if (!file || !lastRelayedByFile.has(file)) {
+    logDecision({ family: 'relay', what: 'pre-flush preamble', target: 'owner', pane, decision: 'DROPPED', predicate: file ? 'unprimed relay cursor' : 'no transcript for pane' })
+    return false   // unprimed cursor → don't dump backlog
+  }
   const targets = await outboundTargetsFor(pane)
   let sent = false
   for (const r of finalRepliesAfter(file, lastRelayedByFile.get(file) ?? '', { includeSuppressed: true })) {
     if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
     lastRelayedByFile.set(file, r.uuid)   // advance before the await so the conclude-relay can't double-send
     if (r.suppressed) { logSuppressedReply('aux pre-flush', file, r); continue }
-    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
+    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) {
+      logDecision({ family: 'relay', what: `reply ${r.uuid.slice(0, 8)} of ${basename(file).slice(0, 8)}`, target: 'owner', pane, decision: 'DROPPED', predicate: 'banner regex' })
+      continue   // daemon sends its own ⛔
+    }
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       const auxSid = await sessionForPane(pane).catch(() => null)
@@ -7733,7 +7757,7 @@ async function handleCall(
           // outcome is the answer to "did that land?". A dispatch that failed is reported as a failure
           // here and leaves no row behind; only past this point does "running" mean a live process.
           const start = await dispatchHermesAsk(p, cfg)
-          if (!start.ok) { write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
+          if (!start.ok) { logDecision({ family: 'bus', what: `${verb} ${p.id}`, target: toName, pane: null, decision: 'REFUSED', predicate: `dispatchHermesAsk failed: ${start.error}`, hint: 'row closed, nothing is running' }); write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
           void notifyAskSent(fromSid, toName, askText, 'ask', null)   // hermes: acks are refused above, so this is always an ask
           // Name the TOOL that is running, not the endpoint class: `hermes` was the only external
           // driver when this line was written, and telling a reader that an openclaw agent's "hermes
@@ -8407,7 +8431,7 @@ async function handleCall(
           const repoRoot = await repoBriefRoot(dir)
           if (repoRoot) {
             const preflight = await repoDispatchPreflight(fromSid, repoRoot)
-            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
+            if (preflight) { logDecision({ family: 'bus', what: `spawn ${topicName}`, target: topicName, pane: null, decision: 'REFUSED', predicate: `repoDispatchPreflight (${repoRoot})` }); write({ t: 'result', id, ok: false, text: preflight }); return }
           }
         }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
@@ -8734,6 +8758,7 @@ const BANG_BUFFER = 'tg-bang'
 // Warns once per incident with tap-to-recover buttons; callers just abort their relay.
 async function guardArmedBashBox(paneId: string, chat_id: string, thread?: number): Promise<boolean> {
   if (!bashModeArmed(await capturePane(paneId).catch(() => ''))) return false
+  logDecision({ family: 'human', what: 'inbound message', target: chat_id, pane: paneId, decision: 'REFUSED', predicate: 'bashModeArmed=true (unsubmitted ! command in the box)' })
   await channel.sendText(chat_id,
     '⚠️ The session\'s input box holds an unsubmitted <code>!</code> bash command — anything sent now would corrupt it. Submit or discard it first, then resend your message.',
     { ...(thread ? { threadId: String(thread) } : {}), buttons: [[{ text: '⏎ Submit it', data: 'bangbox:submit' }, { text: '✖️ Discard it', data: 'bangbox:discard' }]] }).catch(() => {})
@@ -17855,14 +17880,15 @@ async function ownerDirectDispatch(
   const toName = nameForEndpoint(toSid, busEndpoints())
   const chat = chatIdForDmChatSession(laneSid)
   const pane = await paneForSession(toSid).catch(() => null)
-  if (!pane) { await reply(`@${toName} isn't running any more — nothing was delivered.`); return 'no-session' }
+  if (!pane) { logDecision({ family: 'owner', what: `msg ${msgId ?? '?'}`, target: toName, pane: null, decision: 'REFUSED', predicate: 'no pane (paneForSession)' }); await reply(`@${toName} isn't running any more — nothing was delivered.`); return 'no-session' }
   const cap = await capturePane(pane).catch(() => '')
-  if (!cap) { await reply(`@${toName}'s session couldn't be read — nothing was delivered.`); return 'no-session' }
+  if (!cap) { logDecision({ family: 'owner', what: `msg ${msgId ?? '?'}`, target: toName, pane, decision: 'REFUSED', predicate: 'capture empty' }); await reply(`@${toName}'s session couldn't be read — nothing was delivered.`); return 'no-session' }
   // The permissive gate, exactly as a human message takes: MID-TURN IS FINE (the CLI queues it, which
   // is the whole point of delivering his words as human text), a dialog holding the box is not. There
   // is no queue behind this one — a refusal is told to him now, because he is right there and can
   // resend, and a message silently waiting on a modal is the failure this reports instead.
   if (!paneAcceptsText(cap)) {
+    logDecision({ family: 'owner', what: `msg ${msgId ?? '?'}`, target: toName, pane, decision: 'REFUSED', predicate: 'paneAcceptsText=false' })
     await reply(`@${toName} is showing a dialog it has to answer first — nothing was delivered. Send it again once it's clear.`)
     return 'blocked'
   }
@@ -17872,6 +17898,7 @@ async function ownerDirectDispatch(
   // a later drain would replay into the lane — his message, delivered to the wrong session, hours late.
   const outcome = await busDeliverOutcome(pane, block).catch(() => 'failed' as PasteOutcome)
   if (outcome !== 'landed') {
+    logDecision({ family: 'owner', what: `msg ${msgId ?? '?'}`, target: toName, pane, decision: 'REFUSED', predicate: `busDeliverOutcome=${outcome}` })
     await reply(outcome === 'occupied'
       ? `@${toName} already has typed text sitting in its input box — nothing was delivered.`
       : `Couldn't type it into @${toName}'s session — nothing was delivered. Try again.`)
@@ -17908,12 +17935,12 @@ async function ownerDirectDispatch(
 type OwnerAskOutcome = { ok: true; id: number } | { ok: false; error: string }
 async function ownerHermesAskCore(laneSid: string, name: string, text: string, refs: string[] = []): Promise<OwnerAskOutcome> {
   const cfg = hermesEndpoints.get(normalizeEndpointName(name))
-  if (!cfg) return { ok: false, error: `@${name} isn't a configured agent — nothing was sent.` }
-  if (hermesInFlight.size >= HERMES_MAX_CONCURRENT) return { ok: false, error: `Too many agent tasks are running (${hermesInFlight.size}) — try again shortly. Nothing was sent.` }
+  if (!cfg) { logDecision({ family: 'owner', what: 'ask', target: name, pane: null, decision: 'REFUSED', predicate: 'not a configured hermes endpoint' }); return { ok: false, error: `@${name} isn't a configured agent — nothing was sent.` } }
+  if (hermesInFlight.size >= HERMES_MAX_CONCURRENT) { logDecision({ family: 'owner', what: 'ask', target: cfg.name, pane: null, decision: 'REFUSED', predicate: `hermesInFlight=${hermesInFlight.size} >= HERMES_MAX_CONCURRENT` }); return { ok: false, error: `Too many agent tasks are running (${hermesInFlight.size}) — try again shortly. Nothing was sent.` } }
   const fromName = nameForEndpoint(laneSid, busEndpoints())
   let p: BusPending
   try { p = createPending({ fromSid: laneSid, toSid: cfg.name, toKind: 'hermes', fromName, toName: cfg.name, text, refs, ownerDirect: true }, Date.now()) }
-  catch (e) { return { ok: false, error: `${e instanceof Error ? e.message : e} — nothing was sent.` } }
+  catch (e) { logDecision({ family: 'owner', what: 'ask', target: cfg.name, pane: null, decision: 'REFUSED', predicate: `createPending threw: ${e instanceof Error ? e.message : e}` }); return { ok: false, error: `${e instanceof Error ? e.message : e} — nothing was sent.` } }
   // LEDGER ONLY, and no `recordOutbound`: that feed is what a session SAID, rendered in its own
   // drill-in, and the lane said none of this — he did. The row exists so `tg history` can account for
   // the run; putting it in the lane's mouth is the third-person narration the direct gestures exist to
@@ -17924,7 +17951,7 @@ async function ownerHermesAskCore(laneSid: string, name: string, text: string, r
   // has to reach its prompt. A dispatch that never started is reported as a failure rather than as a
   // task he is waiting on; past this point "running" means it is really running.
   const start = await dispatchHermesAsk(p, cfg)
-  if (!start.ok) return { ok: false, error: `@${cfg.name} couldn't be started — ${start.error}. Nothing is running.` }
+  if (!start.ok) { logDecision({ family: 'owner', what: `ask ${p.id}`, target: cfg.name, pane: null, decision: 'REFUSED', predicate: `dispatchHermesAsk failed: ${start.error}`, hint: 'row minted, nothing is running' }); return { ok: false, error: `@${cfg.name} couldn't be started — ${start.error}. Nothing is running.` } }
   process.stderr.write(`daemon: owner-direct ask ${p.id} → @${cfg.name} (hermes, ${text.length} chars)\n`)
   return { ok: true, id: p.id }
 }
@@ -18403,6 +18430,7 @@ async function handleInbound(
       if (resume) {
         void relayResumeChoice(effPane, resume.options)
         editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+        logDecision({ family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: 'resume picker on screen', hint: 'held in editorHeld until the picker is answered' })
         return
       }
     }
@@ -18413,9 +18441,12 @@ async function handleInbound(
     // prompt. The notice is once per login episode, not per message.
     if (cap && detectLoginPrompt(cap)) {
       editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+      // Keyed, and OUTSIDE the loginHeldPanes latch on purpose: the latch is what makes the user-facing
+      // notice once-per-episode, and it would otherwise make the LOG silent for the whole episode too.
+      // The guard gives the same first line plus a 5-minute reminder while the hold stands.
+      logDecision({ key: `login:${effPane}`, family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: 'login menu on screen (detectLoginPrompt)', hint: 'held in editorHeld until the session is signed in' })
       if (!loginHeldPanes.has(effPane)) {
         loginHeldPanes.add(effPane)
-        process.stderr.write(`daemon: ${effPane} is on the login menu — holding inbound until it's signed in\n`)
         await ctx.reply('🔑 The session is waiting on a login — finish that first; your message is held and delivers as soon as it\'s in.',
           { parse_mode: 'HTML' }).catch(() => {})
       }
@@ -18429,6 +18460,7 @@ async function handleInbound(
       if (cap && !recognizedScreen(cap)) {
         const ed = detectEditorState(cap)
         editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+        logDecision({ family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: `recognizedScreen=false (${ed ? ed.kind : 'unrecognised screen'})`, hint: 'held in editorHeld until the pane is back at a prompt' })
         if (!editorCardPane.has(effPane)) {
           editorCardPane.add(effPane)
           const kb = new InlineKeyboard().text('🔙 Quit to Claude', `edq:${effPane}`)
@@ -18495,7 +18527,7 @@ async function reviveDmSession(ctx: Context, params: InboundParams): Promise<voi
     await discoverPanes().catch(() => {})
     if (focus.activePaneId) { drain(emitInbound); return }
     const dir = lastSessionCwd()
-    if (!dir) { drain(bufferEvent); void hintNoSession(params); return }
+    if (!dir) { logDecision({ family: 'human', what: `msg ${params.meta.message_id ?? '?'}`, target: String(params.meta.chat_id ?? '?'), pane: null, decision: 'BUFFERED', predicate: 'no last session cwd (lastSessionCwd)' }); drain(bufferEvent); void hintNoSession(params); return }
     const notice = await ctx.reply('💤 The session was down — reviving it; your message will be delivered.', { parse_mode: 'HTML' }).catch(() => null)
     const edit = async (text: string) => {
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
@@ -18507,6 +18539,7 @@ async function reviveDmSession(ctx: Context, params: InboundParams): Promise<voi
     const kind: AgentKind = tf && basename(tf).startsWith('rollout-') ? 'codex' : 'claude'
     const pane = await spawnSession(dir, '-c', undefined, MAIN_ACCOUNT, kind)
     if (!pane) {
+      logDecision({ family: 'human', what: `msg ${params.meta.message_id ?? '?'}`, target: String(params.meta.chat_id ?? '?'), pane: null, decision: 'BUFFERED', predicate: `spawnSession returned no pane (${dir})` })
       drain(bufferEvent)   // keep the messages — they replay when a session next appears
       await edit(`❌ Couldn't revive the session in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
       return
@@ -18531,6 +18564,9 @@ async function reviveDmSession(ctx: Context, params: InboundParams): Promise<voi
         if (stage) await driveAuxOnboarding(pane, stage).catch(() => {})
       }
     }
+    // The queue is discarded with the revival key in `finally`, so this deadline is where the messages
+    // go — the user is told to resend, and until now nothing in the log said what he was resending.
+    logDecision({ family: 'human', what: `${(revivalQueues.get(DM_REVIVAL_KEY) ?? []).length} queued msg(s)`, target: String(params.meta.chat_id ?? '?'), pane, decision: 'DROPPED', predicate: 'revived pane never reached a prompt within 90s', hint: 'the user was asked to resend' })
     await edit('⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.')
   } finally { revivalQueues.delete(DM_REVIVAL_KEY) }
 }
