@@ -130,6 +130,27 @@ daemon needs respawning. Before concluding "duplicate" at all:
 too: two pollers on one token log `409 Conflict` every ~5s, so zero 409s means no conflict. ~8
 unrelated bots share this box's Telegram IP — attribute connections before concluding anything.
 
+**A deploy's build is UNSELECTABLE until its gates pass, its stop WAITS for exit, and it holds
+`<stateDir>/deploy.lock` from stop to health-check — every supervisor honours the lock and logs that it
+did** (unit 5, v0.5.148, 2026-08-17). The class it closes: `pickVersion` picked the clone ~60s before the
+deploy's own stop, so the 60s keepalive ran the NEW build's `ensure-daemon`, which read the running pair as
+FOREIGN and SIGKILLed it (prod AND canary, on every deploy since 07-27 — its lines sat in the canary's log)
+and launched a second pair; the deploy then stopped THAT pair. Load-bearing and each the thing to be
+"tidied" away: the build lives under `<ver>.cloning-<pid>` (filtered by every selector's semver regex) and
+`renameSync` to `<ver>` happens only in step 6 immediately before the stop; `stopSupervisors` is async
+and unlinks pid files only after the killed pids are gone and the socket answers nothing (a socket still
+served is NEVER unlinked; SIGKILL escalation is logged); the deploy's OWN launch chain is exempt from
+exactly its lock generation via `DEPLOY_LOCK_EXEMPT=<pid>:<ts>` (without it nothing comes up inside the
+window and the rollback is deferred too), so a long-lived watchdog defers on every LATER deploy's lock;
+a stale lock (>10 min) is ignored out loud, never honoured. `reapForeignBridges` spares a configured
+instance's RECORDED pair on an older build (the upgrade guard replaces it in its own instance, logged in
+its own log), and a shutting-down daemon never spawns a watchdog (`ensureWatchdog` fired 29ms into the
+drain on the third watched deploy). Proof: `scripts/deploy-bounce-watch.ts` beside every deploy — four
+consecutive watched deploys 0.5.148–151 each show one `shutting down`, one `launched watchdog`, one
+`listening on`, no duplicate pair (`$(tg shared)/deploy-bounce-0.5.1{45..51}.txt`; 145/147 are the
+before); controls `deploy-clone-window.test.ts`, `upgrade-core.test.ts` (fake kill), `deploy-lock.test.ts`,
+`watchdog-spawn.test.ts` (fresh / stale / own-token lock).
+
 **A failed tmux read is not evidence of absence, and only positive evidence may destroy state.**
 `findOffMcpPanes` returns `null` for a failed scan (an empty array means an empty machine);
 `paneLiveness` returns `'unknown'` when tmux is unreachable, and every path that closes a topic,
