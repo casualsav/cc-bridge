@@ -105,7 +105,13 @@ test('gateNoop: a corrupt state file is a first reading, not a crash', () => {
 const REPO = import.meta.dir
 const src = (f: string) => readFileSync(join(REPO, f), 'utf8')
 
-/** Every claim D makes about a file, as a predicate over its source. */
+/** One top-level function's source, from its `function` line to the closing brace in column 0. */
+const bodyOf = (s: string, fn: string): string => {
+  const start = s.indexOf(`function ${fn}(`)
+  return start < 0 ? '' : s.slice(start, s.indexOf('\n}', start))
+}
+
+/** Every claim D (and fix C, which rides the same files) makes about a file, as a source predicate. */
 const CLAIMS: Record<string, ((s: string) => boolean)[]> = {
   'ensure-daemon.ts': [
     s => s.includes("from './ensure-attribution.ts'"),
@@ -115,9 +121,21 @@ const CLAIMS: Record<string, ((s: string) => boolean)[]> = {
     s => s.includes('gateNoop({') && s.includes('did nothing — daemon up'),
     s => (s.match(/; \$\{read\}`\)/g) ?? []).length >= 4,   // replaced×2, launched, nudged carry the reading
     s => s.includes('SIGKILLed watchdog ${wdKilled}'),
+    // fix C: a fresh deploy.lock stands this file down, a stale one is ignored out loud
+    s => s.includes('deployInProgress(') && s.includes('deferred — ${dep.why}'),
+    s => s.includes('ignoring STALE deploy.lock'),
+    // and the REAP consults the lock before it kills anything — a sweep racing a deploy's own
+    // relaunch is the second-pair mechanism, not a tidy-up
+    s => bodyOf(s, 'reapForeignBridges').includes('deployInProgress('),
+    // each reap line goes to the log of the instance the process belongs to, read from its environ
+    s => bodyOf(s, 'reapForeignBridges').includes('logFor(') && s.includes("kv.startsWith('TELEGRAM_STATE_DIR=')"),
+
+    // the reap spares a configured instance's RECORDED pair on an older build (the canary died on every deploy)
+    s => s.includes('recorded.has(p.pid) && dir.startsWith(MY_CACHE_ROOT)'),
   ],
   'watchdog.ts': [
     s => s.includes('watchdog: SIGTERM — exiting (pid ${process.pid})'),
+    s => s.includes('watchdog: deferred (${why})'),
     s => s.includes("tick('SIGUSR1 nudge')") && s.includes("tick('boot')") && s.includes("tick('tick')"),
     s => s.includes('[${why}, watchdog pid ${process.pid}]'),
   ],

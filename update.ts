@@ -112,8 +112,8 @@ function newestSemverDir(): string | null {
 // because its pattern cannot be rooted anywhere: /update runs in production by definition and takes
 // it; deploy and any sandboxed run never do. The cache-path patterns are now ABSOLUTE, which is the
 // fix — the old ones matched every install on the box, including from a sandbox.
-function killBridge(): void {
-  stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE, sweepStrayCheckouts: true })
+async function killBridge(): Promise<void> {
+  await stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE, sweepStrayCheckouts: true })
 }
 
 function launchBridge(dir: string): void {
@@ -319,7 +319,7 @@ async function main(): Promise<void> {
   await progress(`♻️ Restarting on <b>v${newVer}</b>…`)
   const offset = logSize()
   try { writeFileSync(PENDING_EVENTS, '') } catch {}   // don't replay buffered inbound across the restart
-  killBridge()
+  await killBridge()
   await sleep(1200)
   launchBridge(target)
 
@@ -337,7 +337,7 @@ async function main(): Promise<void> {
 
   // 6. Rollback.
   await progress('⚠️ New build didn’t come up — rolling back…')
-  killBridge()
+  await killBridge()
   await sleep(1000)
   try { rmSync(target, { recursive: true, force: true }) } catch {}
   if (preBackup) { try { renameSync(preBackup, target) } catch {} }   // restore same-version predecessor

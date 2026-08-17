@@ -93,26 +93,89 @@ export function readHealthy(dir: string): Healthy | null {
 //   3. the rogue-checkout patterns (`cc-bridge/daemon.ts` — a daemon someone ran by hand from a
 //      source tree), which cannot be rooted at all and are therefore OPT-IN. /update passes true,
 //      preserving its behaviour exactly; deploy and every sandboxed run leave it off.
+//
+// AND THEN IT WAITS, which is the 2026-08-16 fix. A signal is a request, not an event: the old stop
+// SIGTERMed and IMMEDIATELY unlinked daemon.sock/daemon.pid/watchdog.pid, so the caller's respawn ran
+// while the old daemon was still draining (≤8s, SHUTDOWN_HARD_MS) on a socket path already unlinked
+// from under it — the shape ensure-daemon blames for "two daemons on one socket", and a duplicate
+// watchdog+daemon pair was observed live after the 0.5.144 deploy. "Stop" now means the pids are gone
+// AND nothing answers on the socket. Two rules the wait must keep:
+//   - the SIGKILL escalation is the one legitimate hard kill in this file, and it is WRITTEN DOWN
+//     (unit 5 D: every kill the bridge performs names itself);
+//   - a socket something still SERVES is never unlinked — unlinking it strands a live process on a
+//     path no client can reach. It is reported instead (`socketStillServed`).
 export type StopOptions = {
   stateDir: string
   cacheBase: string
   sweepStrayCheckouts?: boolean
+  /** how long to wait for the signalled pids and the socket to go quiet before escalating */
+  waitMs?: number
   /** injected in tests */
   kill?: (pid: number, sig: NodeJS.Signals | 0) => void
   run?: (cmd: string, args: string[]) => void
   cmdlineOf?: (pid: number) => string
+  alive?: (pid: number) => boolean
+  sleep?: (ms: number) => Promise<void>
+  socketAlive?: (path: string) => Promise<boolean>
+  now?: () => number
+  log?: (s: string) => void
 }
-export type StopResult = { killed: number[]; skipped: { pid: number; why: string }[]; sweeps: string[] }
+export type StopResult = {
+  killed: number[]
+  skipped: { pid: number; why: string }[]
+  sweeps: string[]
+  waitedMs: number
+  stillAlive: number[]
+  escalated: number[]
+  socketStillServed: boolean
+}
+
+export const STOP_WAIT_MS = 10_000
+/** after SIGKILL: the kernel reaps promptly or the pid is unkillable (D state) and no wait helps. */
+const STOP_HARD_WAIT_MS = 2_000
+const STOP_POLL_MS = 100
 
 const defaultCmdline = (pid: number): string => {
   try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch { return '' }
 }
 
-export function stopSupervisors(o: StopOptions): StopResult {
+const defaultAlive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+// Local, and deliberately not `socketAlive` below: this one runs on a 100ms poll and answers "is
+// anyone still serving", where a fast negative is the whole point (500ms, not 1500ms). Same reason
+// it imports nothing from common.ts — every path in this module comes from an explicit root.
+//
+// Every failure means "nobody is serving it": a missing path, a plain file, a refused connect. Two
+// shapes are load-bearing, both learned from this probe throwing out of a stop halfway through: the
+// stat SHORT-CIRCUITS the common cases without touching net at all (an unlinked path is what a
+// finished stop leaves behind), and the handlers are attached BEFORE `connect`, because bun raises
+// the connect error before `createConnection` has returned — an 'error' with no listener yet is an
+// uncaught throw, not a rejected promise.
+const stopProbeSocket = (path: string): Promise<boolean> => {
+  try { if (!statSync(path).isSocket()) return Promise.resolve(false) } catch { return Promise.resolve(false) }
+  return new Promise(resolve => {
+    let done = false
+    const s = new net.Socket()
+    const finish = (v: boolean) => { if (!done) { done = true; try { s.destroy() } catch {}; resolve(v) } }
+    s.on('connect', () => finish(true))
+    s.on('error', () => finish(false))
+    setTimeout(() => finish(false), 500).unref?.()
+    try { s.connect(path) } catch { finish(false) }
+  })
+}
+
+export async function stopSupervisors(o: StopOptions): Promise<StopResult> {
   const kill = o.kill ?? ((pid, sig) => process.kill(pid, sig))
   const run = o.run ?? ((cmd, args) => { try { execFileSync(cmd, args, { stdio: 'ignore' }) } catch {} })
   const cmdlineOf = o.cmdlineOf ?? defaultCmdline
-  const res: StopResult = { killed: [], skipped: [], sweeps: [] }
+  const alive = o.alive ?? defaultAlive
+  const nap = o.sleep ?? sleep
+  const probe = o.socketAlive ?? stopProbeSocket
+  const now = o.now ?? Date.now
+  const log = o.log ?? (s => { process.stderr.write(s) })
+  const res: StopResult = { killed: [], skipped: [], sweeps: [], waitedMs: 0, stillAlive: [], escalated: [], socketStillServed: false }
 
   for (const name of ['daemon.pid', 'watchdog.pid']) {
     let pid = 0
@@ -135,9 +198,39 @@ export function stopSupervisors(o: StopOptions): StopResult {
   if (o.sweepStrayCheckouts) {
     for (const pat of ['cc-bridge/daemon\\.ts', 'cc-bridge/watchdog\\.ts']) { run('pkill', ['-f', pat]); res.sweeps.push(pat) }
   }
-  for (const f of ['daemon.sock', 'daemon.pid', 'watchdog.pid']) {
+
+  // The wait. Both halves matter: a pid that is gone does not prove the socket is free (the pkill
+  // sweeps signal processes we never recorded), and a quiet socket does not prove a pid is gone.
+  const sock = join(o.stateDir, 'daemon.sock')
+  const started = now()
+  const deadline = started + (o.waitMs ?? STOP_WAIT_MS)
+  let left = res.killed.filter(alive)
+  let served = await probe(sock)
+  while ((left.length || served) && now() < deadline) {
+    await nap(STOP_POLL_MS)
+    left = res.killed.filter(alive)
+    served = await probe(sock)
+  }
+  res.waitedMs = now() - started
+
+  if (left.length) {
+    for (const pid of left) {
+      try { kill(pid, 'SIGKILL'); res.escalated.push(pid) } catch { res.skipped.push({ pid, why: 'SIGKILL failed' }) }
+    }
+    const hardDeadline = now() + STOP_HARD_WAIT_MS
+    while (left.some(alive) && now() < hardDeadline) await nap(STOP_POLL_MS)
+    res.stillAlive = left.filter(alive)
+    log(`upgrade-core: stop — SIGKILL escalated for pid(s) ${res.escalated.join(', ')} after ` +
+      `${Math.round(res.waitedMs / 1000)}s; still alive: [${res.stillAlive.join(', ')}]\n`)
+  }
+
+  for (const f of ['daemon.pid', 'watchdog.pid']) {
     try { rmSync(join(o.stateDir, f)) } catch {}
   }
+  // Probed once more rather than trusting `served` from the loop: the SIGKILL above may be exactly
+  // what freed it. Still answering means somebody we could not stop owns this path.
+  res.socketStillServed = await probe(sock)
+  if (!res.socketStillServed) { try { rmSync(sock) } catch {} }
   return res
 }
 

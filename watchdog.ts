@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE, anchorCwd, cwdFaultHint, stableCwd } from './common.ts'
 import { tokenHeldByOther, readTokenFromEnv } from './token-lock.ts'
 import { pickVersion } from './upgrade-core.ts'
+import { deployInProgress, DEPLOY_LOCK_EXEMPT_ENV } from './deploy-lock.ts'
 
 // FIRST thing, before anything can spawn: leave whatever cwd we inherited. ensure-daemon runs from a
 // SessionStart hook, so the cwd here is some *other* project's session dir — twice on 2026-07-30 a
@@ -24,6 +25,8 @@ anchorCwd('watchdog')
 // spawning. Null when unreadable → the guard is simply skipped (spawn as before).
 const TOKEN = readTokenFromEnv(STATE_DIR)
 let warnedBusy = false
+let ownLockLogged: number | null = null
+let staleLockLogged = 0   // the ts of the stale deploy.lock this process has already named
 
 const CHECK_MS = 20_000
 const REAP_MS = 5_000
@@ -160,6 +163,21 @@ async function tick(why: string): Promise<void> {
 
 async function tickOnce(why: string): Promise<void> {
   rotateLog()
+  // Unit 5 fix C: while a deploy holds the lock the socket is MEANT to be dead — it stopped the pair
+  // and is bringing up its own. A tick that spawns into that window is a second daemon. Unguarded on
+  // purpose: a tick is 20s and a deploy window ~30s, so this costs two lines at most, and a repeat
+  // says the window is still open rather than that the log is stuck.
+  // Exempt for exactly the lock this watchdog was launched under (the deploy's own chain — see
+  // deploy-lock.ts); a later deploy's lock has a different token and defers this watchdog like any other.
+  const dep = deployInProgress(STATE_DIR, Date.now(), process.env[DEPLOY_LOCK_EXEMPT_ENV] ?? null)
+  if (dep.held) { process.stderr.write(`watchdog: deferred (${why}) — ${dep.why}\n`); return }
+  if (dep.own && dep.own.ts !== ownLockLogged) { ownLockLogged = dep.own.ts; process.stderr.write(`watchdog: proceeding under its own deploy.lock (pid ${dep.own.pid}, ${dep.own.ver})\n`) }
+  // Once per stale LOCK, not once per tick: nothing removes a dead deploy's file, and this loop runs
+  // every 20s forever. A newer stale lock (different ts) says it again.
+  if (dep.stale && dep.stale.ts !== staleLockLogged) {
+    staleLockLogged = dep.stale.ts
+    process.stderr.write(`watchdog: ignoring STALE deploy.lock (pid ${dep.stale.pid}, ${dep.stale.ver}, ${Math.round((Date.now() - dep.stale.ts) / 60_000)}m old) — a deploy died holding it\n`)
+  }
   if (await socketAlive()) return
   // Daemon is down. Before spawning, make sure another live daemon (different state dir / HOME, same
   // token) isn't already bridging this bot — spawning a second poller would just refuse and we'd

@@ -15,8 +15,11 @@ import { homedir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
 import { pickVersion } from './upgrade-core.ts'
 import { inferTrigger, readProcDefault, readingText, gateNoop } from './ensure-attribution.ts'
+import { deployInProgress, readDeployLock, lockToken, DEPLOY_LOCK_EXEMPT_ENV } from './deploy-lock.ts'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
+// Slot 1 — the instance a bridge process belongs to when its environment names none.
+const DEFAULT_INSTANCE_DIR = join(CHANNELS_DIR, 'telegram')
 // Whose plugin cache is ours. Used by the foreign-process reap to tell "a bridge run from a source
 // checkout" (reap it) from "another install's bridge, under its own $HOME" (never touch it).
 const MY_CACHE_ROOT = join(homedir(), '.claude', 'plugins', 'cache')
@@ -97,6 +100,13 @@ const CURRENT_VER = basename(daemonDir)   // the newest cache version — what T
 // daemon.log names its author on line one. Nothing else about the run changes.
 const TRIGGER = inferTrigger(process.pid, readProcDefault)
 const TAG = `ensure-daemon[${TRIGGER.trigger}]`
+// Unit 5 fix C: the deploy's OWN relaunch runs under the lock it wrote — exempt for that lock generation
+// only (deploy-lock.ts). The token is read per instance dir at the moment of the check and handed down to
+// the watchdog this run spawns, so the chain it starts is exempt from the same lock and nothing else.
+const exemptTokenFor = (stateDir: string): string | null => {
+  if (TRIGGER.trigger !== 'deploy') return process.env[DEPLOY_LOCK_EXEMPT_ENV] ?? null
+  const l = readDeployLock(stateDir); return l ? lockToken(l) : null
+}
 
 // ---- Foreign-process reap ----
 // The plugin cache is the ONLY sanctioned home for a running bridge. A daemon/watchdog launched by
@@ -150,14 +160,60 @@ function note(log: number, msg: string): void {
   try { writeSync(log, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
 }
 
-function reapForeignBridges(log: number): void {
+// Which instance a bridge process belongs to, read from its own environment (every daemon and
+// watchdog is spawned with TELEGRAM_STATE_DIR set — instanceEnv below). Absent or unreadable → the
+// default instance: a process launched by hand from a checkout inherits nobody's scoping, and slot 1
+// is what common.ts would have given it. Linux-only, like the cwd read in bridgeProcesses().
+function stateDirOf(pid: number): string {
+  try {
+    for (const kv of readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0')) {
+      if (kv.startsWith('TELEGRAM_STATE_DIR=')) return kv.slice('TELEGRAM_STATE_DIR='.length)
+    }
+  } catch {}
+  return DEFAULT_INSTANCE_DIR
+}
+
+// A reap line goes to the log of the INSTANCE the reaped process belongs to, not to whichever dir
+// readdir happened to name first: for three weeks every `reaped foreign bridge` line landed in
+// telegram-test's daemon.log while prod's showed nothing at all, so the sweep read as never having
+// run. Unrecognised state dir → this run's own log, which is still better than silence.
+function reapForeignBridges(log: number, dirs: string[]): void {
+  // A deploy owns the process table while it holds the lock: it stops the pair itself and relaunches
+  // from the new version dir, and a reap racing that window is exactly the second-pair mechanism this
+  // unit closes. Any instance's lock defers the whole sweep — the reap is fleet-wide, not per-instance.
+  for (const dir of dirs) {
+    const dep = deployInProgress(dir, Date.now(), exemptTokenFor(dir))
+    if (dep.held) { note(log, `${TAG}: skipped the foreign-bridge reap — ${dep.why} (${dir})`); return }
+  }
+  const fds = new Map<string, number>()
+  const logFor = (pid: number): number => {
+    const dir = stateDirOf(pid)
+    if (!dirs.includes(dir)) return log
+    let fd = fds.get(dir)
+    if (fd === undefined) {
+      try { fd = openSync(join(dir, 'daemon.log'), 'a') } catch { fd = log }
+      fds.set(dir, fd)
+    }
+    return fd
+  }
   const procs = bridgeProcesses()
+  // A configured instance's RECORDED pair (its own pid files) is never "foreign", whatever version it
+  // runs: an older build there is a version drift, and ensureInstance's upgrade guard replaces it in its
+  // own instance, logged in its own log. The reap is for strays — checkout-run bridges and unrecorded
+  // leftovers. Reaping the recorded pair here is what killed the canary on every deploy since 07-27.
+  const recorded = new Set<number>()
+  for (const d of dirs) for (const f of ['daemon.pid', 'watchdog.pid']) {
+    try { const n = parseInt(readFileSync(join(d, f), 'utf8'), 10); if (n > 1) recorded.add(n) } catch {}
+  }
   for (const kind of ['watchdog', 'daemon'] as const) {
     for (const p of procs) {
       if (p.kind !== kind) continue
       const dir = dirname(p.script)
       if (dir === daemonDir) continue                                            // the canonical build — keep
+      if (recorded.has(p.pid) && dir.startsWith(MY_CACHE_ROOT)) continue         // an instance's own pair on an older build — ensureInstance's job
       if (!existsSync(join(dir, '.claude-plugin', 'plugin.json'))) continue      // not a bridge tree — leave unrelated software alone
+      // Resolved BEFORE the kill: /proc/<pid>/environ is gone the moment the process is.
+      const plog = logFor(p.pid)
       // ANOTHER INSTALL'S CACHE IS NOT OURS TO REAP. This test used to be "not my daemonDir ⇒ foreign",
       // which is true for a daemon someone ran from a source checkout (the case this exists for) and
       // catastrophically false for one running out of a DIFFERENT $HOME's plugin cache: on 2026-08-06 a
@@ -166,12 +222,12 @@ function reapForeignBridges(log: number): void {
       // already refused those same pids by name — the relaunch let them back in through this door.
       // A checkout-run bridge sits under no cache root at all and is still reaped, so nothing is lost.
       if (dir.includes(CACHE_SEGMENT) && !dir.startsWith(MY_CACHE_ROOT)) {
-        note(log, `${TAG}: left another install's ${kind} alone (pid ${p.pid}, ${p.script}) — not under ${MY_CACHE_ROOT}`)
+        note(plog, `${TAG}: left another install's ${kind} alone (pid ${p.pid}, ${p.script}) — not under ${MY_CACHE_ROOT}`)
         continue
       }
       try {
         process.kill(p.pid, 'SIGKILL')
-        note(log, `${TAG}: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
+        note(plog, `${TAG}: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
       } catch {}
     }
   }
@@ -238,6 +294,15 @@ function ensureDeps(log: number): void {
 // "check now". A watchdog whose pid file lacks the `usr1` capability marker predates that handler
 // (an unhandled SIGUSR1 would kill it) — replace it with the current build instead of signaling.
 async function ensureInstance(stateDir: string, log: number): Promise<void> {
+  // Unit 5 fix C: a deploy stops this instance's pair and brings up its own, and between those two
+  // moments the pid files are gone — which is precisely the reading that sends this file down the
+  // fresh-spawn path. Two watchdogs and two daemons coexisted that way at 16:26:06Z 2026-08-16. Stand
+  // down while the lock is fresh; a stale one is ignored out loud, because a deploy that died holding
+  // it must never wedge supervision shut.
+  const dep = deployInProgress(stateDir, Date.now(), exemptTokenFor(stateDir))
+  if (dep.held) { note(log, `${TAG}: ${stateDir} deferred — ${dep.why}`); return }
+  if (dep.own) note(log, `${TAG}: ${stateDir} proceeding under its own deploy.lock (pid ${dep.own.pid}, ${dep.own.ver})`)
+  if (dep.stale) note(log, `${TAG}: ${stateDir} ignoring STALE deploy.lock (pid ${dep.stale.pid}, ${dep.stale.ver}, ${Math.round((Date.now() - dep.stale.ts) / 60_000)}m old) — a deploy died holding it`)
   const env = instanceEnv(stateDir)
   const daemonDown = !(await socketAlive(join(stateDir, 'daemon.sock')))
   if (existsSync(watchdogPath)) {
@@ -350,13 +415,18 @@ function instanceEnv(stateDir: string): NodeJS.ProcessEnv {
   const env = { ...process.env }
   for (const key of instanceEnvKeys) delete env[key]
   env.TELEGRAM_STATE_DIR = stateDir
+  // The exemption travels down the deploy's own chain (watchdog → daemon) and nowhere else: a keepalive
+  // or hook run carries no token, so a watchdog it spawns honours every lock.
+  const tok = exemptTokenFor(stateDir)
+  if (tok) env[DEPLOY_LOCK_EXEMPT_ENV] = tok; else delete env[DEPLOY_LOCK_EXEMPT_ENV]
   return env
 }
 
 // One log fd for this run's own narration, opened before the reap so the kills are recorded too. Same
-// file the children get; see note() for why process.stderr was the wrong destination.
-const runLog = openSync(join(dirs[0], 'daemon.log'), 'a')
-reapForeignBridges(runLog)   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
+// file the children get; see note() for why process.stderr was the wrong destination. The DEFAULT
+// instance's log, never readdir's first hit: slot 1 is the log a human tails.
+const runLog = openSync(join(dirs.includes(DEFAULT_INSTANCE_DIR) ? DEFAULT_INSTANCE_DIR : dirs[0], 'daemon.log'), 'a')
+reapForeignBridges(runLog, dirs)   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
 ensureDeps(runLog)   // deps are shared (cache dir) — bootstrap once
 for (const dir of dirs) {
   await ensureInstance(dir, openSync(join(dir, 'daemon.log'), 'a'))   // per-instance log in its state dir

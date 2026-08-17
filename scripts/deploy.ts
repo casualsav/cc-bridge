@@ -43,6 +43,7 @@ import { strandedVersion } from '../stranded-version.ts'
 import { provenanceGate, dirtyPayloadPaths, materializePayload, prunePayloadDir } from '../payload-provenance.ts'
 import { syncConventionBlock } from '../installed-copies.ts'
 import { stopSupervisors, healthCheck, rollback, markHealthy, stampGitref, pruneOldVersions } from '../upgrade-core.ts'
+import { writeDeployLock, clearDeployLock } from '../deploy-lock.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
 // slack-daemon.ts, common.ts, channel-ctl.ts, the slk/dsc ctls, …) — that is the single source of
@@ -455,30 +456,35 @@ if (materializeOnly) {
 // ---- 1. prepare the new cache dir (clone deps from the newest existing version, if any) ----
 const newCache = join(CACHE_BASE, next)
 const freshCache = !existsSync(newCache)
+// THE BUILD WINDOW IS UNSELECTABLE. Everything steps 1–5 write goes into `buildDir`, and for a fresh
+// version that is `<ver>.cloning-<pid>` — a name that fails the /^\d+\.\d+\.\d+$/ filter every
+// selector uses (pickVersion, findDaemon, the keepalive's `ls -d | sort -V | tail -1`, watchdog's
+// spawnDaemon), so nothing can launch this build until step 6 renames it. Until v0.5.148 the rename
+// happened HERE, ~60s and four gates before the deploy's own stop: the keepalive's 60s ensure-daemon
+// tick ran from the half-built dir and SIGKILLed the serving pair as "foreign" (0.5.145/0.5.147 —
+// §3.1 of `$(tg shared)/unit5-deploy-double-bounce-diagnosis.md`).
+// RE-DEPLOYING an existing version has no such shelter — the dir already carries that name and the
+// live daemon is running out of it — so it builds in place; the `.pre-<ts>` backup below is what
+// covers that case.
+const buildDir = freshCache ? `${newCache}.cloning-${process.pid}` : newCache
 if (freshCache) {
   const versions = (() => {
     try { return readdirSync(CACHE_BASE).filter(v => /^\d+\.\d+\.\d+$/.test(v)) } catch { return [] }
   })().sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   const seed = versions.at(-1)
   if (seed) {
-    step(`cloning cache ${seed} → ${next} (carries node_modules/bun.lock)`)
-    // Clone to a TEMP path and rename into place, never straight to the version name. What is being
-    // copied is the PREVIOUS version's tree, and for as long as it sits under <next>'s name it is
-    // indistinguishable from a release — ensure-daemon's "highest version wins" will launch it. A
-    // deploy that died in this window on 2026-07-26 left 0.4.76 holding 0.4.75's bytes and the fleet
-    // respawned into it. rename(2) is atomic within a filesystem, so the version name never exists
-    // in a half-populated state, and an abort now leaves a `.cloning-<pid>` dir that neither this
-    // script's seed scan nor findDaemon will look at (both filter on /^\d+\.\d+\.\d+$/).
-    // This does NOT make the guard redundant: the renamed dir still carries the SEED's manifest
-    // until the sync below stamps it, so there remains a window the manifest check covers.
-    const tmp = `${newCache}.cloning-${process.pid}`
-    rmSync(tmp, { recursive: true, force: true })
-    const r = sh('cp', ['-a', join(CACHE_BASE, seed), tmp])
-    if (r.status !== 0) { rmSync(tmp, { recursive: true, force: true }); die(`cloning cache dir failed: ${r.stderr}`) }
-    renameSync(tmp, newCache)
+    step(`cloning cache ${seed} → ${basename(buildDir)} (carries node_modules/bun.lock)`)
+    // What is being copied is the PREVIOUS version's tree, and for as long as it sat under <next>'s
+    // name it was indistinguishable from a release: a deploy that died in this window on 2026-07-26
+    // left 0.4.76 holding 0.4.75's bytes and the fleet respawned into it. Under `.cloning-<pid>` an
+    // abort leaves a dir nothing will look at, and rename(2) is atomic within a filesystem, so the
+    // version name never exists in a half-populated state.
+    rmSync(buildDir, { recursive: true, force: true })
+    const r = sh('cp', ['-a', join(CACHE_BASE, seed), buildDir])
+    if (r.status !== 0) { rmSync(buildDir, { recursive: true, force: true }); die(`cloning cache dir failed: ${r.stderr}`) }
   } else {
-    step(`no existing cache version to clone — creating ${next} from scratch`)
-    mkdirSync(newCache, { recursive: true })
+    step(`no existing cache version to clone — creating ${basename(buildDir)} from scratch`)
+    mkdirSync(buildDir, { recursive: true })
   }
 }
 // Re-deploying a version that already exists overwrites it in place, so the bytes that were serving
@@ -493,32 +499,32 @@ if (backupDir) {
 }
 
 // ---- 2. sync the payload into the cache copy (flat), then stamp its manifests to the new version ----
-step(`syncing ${payload.length} files → cache/${cfg.cacheName}/${next}`)
-syncPayloadInto(newCache, 'cacheDest')
+step(`syncing ${payload.length} files → cache/${cfg.cacheName}/${basename(buildDir)}`)
+syncPayloadInto(buildDir, 'cacheDest')
 // Before the gates below, not after: a stale file is loadable by name (the cache's `bun test` globs
 // `*.test.ts`), and a gate that fails should fail on the payload, not on last version's leftovers.
-pruneInto(newCache, newCache, 'cacheDest')
-patchVersion(join(newCache, '.claude-plugin', 'plugin.json'), next)
+pruneInto(buildDir, buildDir, 'cacheDest')
+patchVersion(join(buildDir, '.claude-plugin', 'plugin.json'), next)
 // The shared marketplace.json ships in the cache ONLY for tg (source "./"); slack/discord caches
 // carry just their plugin.json. Stamp this plugin's entry where it exists.
-const cacheMarket = join(newCache, MARKET_JSON)
+const cacheMarket = join(buildDir, MARKET_JSON)
 if (existsSync(cacheMarket)) patchMarketVersion(cacheMarket, cfg.mktName, next)
 
 // ---- 3. make sure deps are present in the cache (mirror ensure-daemon's self-heal) ----
-const pkgPath = join(newCache, 'package.json')
-if (!existsSync(pkgPath)) writePkgStub(newCache)
+const pkgPath = join(buildDir, 'package.json')
+if (!existsSync(pkgPath)) writePkgStub(buildDir)
 const probeDep = Object.keys(cfg.deps)[0]   // 'grammy' | '@slack/bolt' | 'discord.js'
-if (!existsSync(join(newCache, 'node_modules', ...probeDep.split('/')))) {
+if (!existsSync(join(buildDir, 'node_modules', ...probeDep.split('/')))) {
   step('installing daemon deps in the cache (' + Object.entries(cfg.deps).map(([n, v]) => `${n}@${v}`).join(', ') + ')')
-  const r = sh('bun', ['install', '--no-summary'], newCache)
+  const r = sh('bun', ['install', '--no-summary'], buildDir)
   if (r.status !== 0) die(`bun install in cache failed:\n${r.stderr}`)
 }
 
 // ---- 4. type-check in the cache (deps resolve there). Failure here never touches the checkout ----
 step(`type-checking (bun build ${cfg.daemonEntry} --target=bun)`)
-const build = sh('bun', ['build', cfg.daemonEntry, '--target=bun'], newCache)
+const build = sh('bun', ['build', cfg.daemonEntry, '--target=bun'], buildDir)
 if (build.status !== 0) {
-  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  if (freshCache) rmSync(buildDir, { recursive: true, force: true })
   die(`type-check failed — checkout left untouched:\n${build.stderr || build.stdout}`)
 }
 // bun build only transpiles — it has shipped unimported identifiers before. The real typecheck
@@ -534,7 +540,7 @@ if (!existsSync(join(REPO, 'node_modules', 'typescript'))) {
 step('type-checking (tsc --noEmit)')
 const tsc = sh('bun', ['x', 'tsc', '--noEmit'], REPO)   // `bun x`, not `bunx` (the latter isn't always on PATH)
 if (tsc.status !== 0) {
-  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  if (freshCache) rmSync(buildDir, { recursive: true, force: true })
   die(`tsc failed — checkout left untouched:\n${(tsc.stdout || tsc.stderr || '(tsc produced no output)').slice(0, 4000)}`)
 }
 step('type-check OK')
@@ -542,7 +548,7 @@ step('type-check OK')
 step('running unit tests (bun test)')
 const tests = sh('bun', ['test'], REPO)
 if (tests.status !== 0) {
-  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  if (freshCache) rmSync(buildDir, { recursive: true, force: true })
   die(`tests failed — checkout left untouched:\n${(tests.stderr || tests.stdout || '(no output)').slice(-4000)}`)
 }
 step('tests OK')
@@ -552,17 +558,17 @@ step('tests OK')
 // thing, so neither catches a top-level eval failure, and a build that cannot boot is exactly the
 // class the rollback below exists for. Dummy token + throwaway state dir so it needs no real config.
 step('self-test (executing the built module)')
-const selftest = sh('bun', [cfg.daemonEntry, '--selftest'], newCache, {
-  TELEGRAM_BOT_TOKEN: 'SELFTEST:0', TELEGRAM_STATE_DIR: join(newCache, '.selftest-state'),
+const selftest = sh('bun', [cfg.daemonEntry, '--selftest'], buildDir, {
+  TELEGRAM_BOT_TOKEN: 'SELFTEST:0', TELEGRAM_STATE_DIR: join(buildDir, '.selftest-state'),
 })
 if (selftest.status !== 0) {
-  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  if (freshCache) rmSync(buildDir, { recursive: true, force: true })
   die(`self-test failed — checkout left untouched:\n${(selftest.stderr || selftest.stdout || '(no output)').slice(-4000)}`)
 }
 step('self-test OK')
 // IDENTITY of these bytes, for whoever reads this dir later and for /update, which otherwise falls
 // back to "dir name == clone version" when deciding whether a cache is current.
-stampGitref(newCache, gitOut(['rev-parse', payloadRef]) || 'unknown')
+stampGitref(buildDir, gitOut(['rev-parse', payloadRef]) || 'unknown')
 
 // ---- 5. build passed: materialize the self-contained plugin dir, stamp the checkout + mirror ----
 // slack/discord: regenerate the committed runtime copies + pinned package.json so the plugin dir
@@ -591,6 +597,16 @@ if (existsSync(MKT)) {
 }
 
 // ---- 6. restart the live daemon (telegram only; slack/discord come up via their SessionStart hook) ----
+// PUBLISH: the one moment the build becomes selectable, and it is adjacent to the stop below on
+// purpose — every branch of step 6 calls it exactly once before it can return. A branch that exits
+// without publishing ships nothing (the bytes stay under `.cloning-<pid>` and the next deploy's
+// prune is the only thing that ever looks at them). No-op on a re-deploy, where buildDir IS newCache.
+function publishBuild() {
+  if (buildDir === newCache) return
+  renameSync(buildDir, newCache)
+  step(`published cache/${cfg.cacheName}/${next} (built as ${basename(buildDir)})`)
+}
+
 function cmdlineOf(pid: number): string {
   try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch {}
   const r = sh('ps', ['-p', String(pid), '-o', 'args=']); return r.status === 0 ? r.stdout.trim() : ''
@@ -602,10 +618,10 @@ function cmdlineOf(pid: number): string {
 // The checkout's version files are reverted too, which is a deploy-only concern (/update never
 // touches a checkout): leaving them bumped would claim a version installed nowhere, which is exactly
 // what the stranded-version gate trips over on the NEXT deploy.
-function rollbackAndDie(why: string, detail: string, failedCheck: string): never {
+async function rollbackAndDie(why: string, detail: string, failedCheck: string): Promise<never> {
   console.error(`\n✗ ${why}\n  ${detail}`)
   step('rolling back')
-  stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
+  await stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
   const plan = rollback({ cacheBase: CACHE_BASE, failedVersion: next, backupDir })
   if (plan.renamedTo) step(`failed build renamed → ${basename(plan.renamedTo)} (bytes kept for diagnosis)`)
   if (plan.restoredBackup) step(`restored the pre-deploy ${next}`)
@@ -619,6 +635,9 @@ function rollbackAndDie(why: string, detail: string, failedCheck: string): never
   step(`relaunching ${plan.target} (${plan.targetBasis})`)
   const ed = join(CACHE_BASE, plan.target, 'ensure-daemon.ts')
   if (existsSync(ed)) sh('bun', [ed], join(CACHE_BASE, plan.target), { ENSURE_TRIGGER: 'deploy' })   // unit 5 D: the relaunch names its author in daemon.log
+  // The old pair is back: the supervisors are needed again, so the lock goes now and not at exit.
+  clearDeployLock(STATE_DIR)
+  step('deploy.lock released')
   // The record. Written where the failure happened, in the words the checks themselves produced.
   const record = [
     `deploy of ${next} FAILED and was rolled back`,
@@ -633,20 +652,37 @@ function rollbackAndDie(why: string, detail: string, failedCheck: string): never
 }
 
 if (!cfg.restartTelegram) {
+  publishBuild()
   step(`[${cfg.id}] cache shipped — its daemon comes up via the plugin's SessionStart hook (telegram daemon untouched)`)
 } else if (noRestart) {
+  publishBuild()
   step('--no-restart: leaving the running daemon as-is')
 } else {
   const logOffset = (() => { try { return statSync(DAEMON_LOG).size } catch { return 0 } })()
+  // THE LOCK COMES FIRST, before the build is selectable and before anything is stopped: from here
+  // to the health check the pid files and socket are being unlinked and replaced, and any
+  // ensure-daemon that runs meanwhile (the 60s keepalive, either SessionStart hook) reads that as
+  // "nothing is up" and launches a second pair. Cleared on both outcomes; the exit guard is the
+  // backstop for a die() in between, since a leaked lock defers supervision for ten minutes.
+  writeDeployLock(STATE_DIR, { pid: process.pid, ts: Date.now(), ver: next })
+  process.on('exit', () => clearDeployLock(STATE_DIR))
+  step('deploy.lock held — supervisors defer until the health check')
+  publishBuild()
   step('stopping daemon + watchdog (pid-first)')
   // PID-FIRST, and the stray-checkout sweep stays OFF here. The pattern it uses cannot be rooted at a
   // cache path, so it matches any bridge-shaped process on the box — /update opts into it because it
   // runs in production by definition; a deploy (which is also how this mechanism gets TESTED under a
   // sandbox $HOME) must never fire it.
-  const stopped = stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
-  step(`stopped ${stopped.killed.length ? `pid(s) ${stopped.killed.join(', ')}` : 'nothing by pid'}` +
-    (stopped.skipped.length ? ` · skipped ${stopped.skipped.map(s => `${s.pid} (${s.why})`).join(', ')}` : ''))
-  for (let i = 0; i < 20; i++) { Bun.sleepSync(250); if (!existsSync(DAEMON_PID)) break }
+  const stopped = await stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
+  // Every field of the wait is printed: a stop that escalated, or left something alive, or left the
+  // socket answering, is the shape the respawn below races — and it was invisible until unit 5 B.
+  // No pid-file poll follows this any more; stopSupervisors waits for the PROCESSES and unlinks the
+  // files after, so polling for an already-deleted file was a wait that always returned instantly.
+  step(`stopped ${stopped.killed.length ? `pid(s) ${stopped.killed.join(', ')}` : 'nothing by pid'} in ${(stopped.waitedMs / 1000).toFixed(1)}s` +
+    (stopped.skipped.length ? ` · skipped ${stopped.skipped.map(s => `${s.pid} (${s.why})`).join(', ')}` : '') +
+    (stopped.escalated.length ? ` · SIGKILL escalated: ${stopped.escalated.join(', ')}` : '') +
+    (stopped.stillAlive.length ? ` · STILL ALIVE: ${stopped.stillAlive.join(', ')}` : '') +
+    (stopped.socketStillServed ? ' · socket still served' : ''))
   const ed = join(newCache, 'ensure-daemon.ts')
   if (!existsSync(ed)) die(`no ensure-daemon.ts in cache/${next} — cannot restart`)
   step('respawning via ensure-daemon')
@@ -655,7 +691,9 @@ if (!cfg.restartTelegram) {
   const health = await healthCheck({
     socketPath: SOCKET, logFile: DAEMON_LOG, logOffset, pidFile: DAEMON_PID, expectVersion: next,
   })
-  if (!health.ok) rollbackAndDie(`the new build did not come up healthy`, health.detail, health.failed ?? 'unknown')
+  if (!health.ok) await rollbackAndDie(`the new build did not come up healthy`, health.detail, health.failed ?? 'unknown')
+  clearDeployLock(STATE_DIR)
+  step('deploy.lock released')
   step(`daemon up on cache/${next} — ${health.detail}`)
   // Positive evidence of goodness, and the only thing a later rollback can aim at with confidence.
   markHealthy(newCache, { version: next, gitref: gitOut(['rev-parse', payloadRef]) || 'unknown', at: Date.now() })

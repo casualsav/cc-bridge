@@ -152,6 +152,96 @@ test('a launch that cannot succeed leaves the watchdog running to retry', async 
   rmSync(home, { recursive: true, force: true })   // no daemon was launched here — only the dir to drop
 })
 
+// ---- Unit 5 fix C: the deploy lock ----
+// A deploy stops the pair and relaunches it itself; a watchdog tick inside that window spawns the
+// SECOND daemon (two watchdogs + two daemons coexisted at 16:26:06Z 2026-08-16). Same machinery as
+// above: the real watchdog.ts in a child, a fake HOME whose cache holds the marker-touching stub — so
+// "it spawned nothing" is the marker's ABSENCE, and "it proceeded" is the marker appearing.
+
+/** Wait for the watchdog to reach its own pid file — module load done, boot tick imminent. */
+async function waitForBoot(stateDir: string, proc: { exitCode: number | null }): Promise<void> {
+  const deadline = Date.now() + 20_000
+  while (!existsSync(join(stateDir, 'watchdog.pid')) && proc.exitCode === null && Date.now() < deadline) await Bun.sleep(50)
+  await Bun.sleep(600)   // the boot tick, plus its stderr flush
+}
+
+test('a FRESH deploy.lock defers the tick — the watchdog spawns nothing and says why', async () => {
+  const { home, stateDir, marker } = sandbox()
+  try {
+    writeFileSync(join(stateDir, 'deploy.lock'), JSON.stringify({ pid: 4242, ts: Date.now(), ver: '9.9.9' }))
+    const proc = Bun.spawn([process.execPath, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: process.env.PATH! },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    await waitForBoot(stateDir, proc)
+    const aliveAfter = proc.exitCode === null
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
+
+    expect(err).toContain('watchdog: up')
+    expect(err).toContain('watchdog: deferred (boot) — deploy.lock held by pid 4242 (9.9.9,')
+    expect(existsSync(marker)).toBe(false)   // unfixed: the socket is dead, so it launches a second daemon
+    expect(aliveAfter).toBe(true)            // deferring is not exiting — the next tick still has the post
+  } finally { cleanup(home, marker) }
+})
+
+test('a STALE deploy.lock is ignored out loud — supervision resumes, it does not wedge', async () => {
+  const { home, stateDir, marker } = sandbox()
+  try {
+    const ts = Date.now() - 11 * 60_000   // past DEPLOY_LOCK_MAX_AGE_MS: a deploy that died holding it
+    writeFileSync(join(stateDir, 'deploy.lock'), JSON.stringify({ pid: 4242, ts, ver: '9.9.9' }))
+    const proc = Bun.spawn([process.execPath, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: process.env.PATH! },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const deadline = Date.now() + 20_000
+    while (!existsSync(marker) && proc.exitCode === null && Date.now() < deadline) await Bun.sleep(100)
+    await Bun.sleep(200)
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
+
+    expect(err).toContain('ignoring STALE deploy.lock (pid 4242, 9.9.9, 11m old) — a deploy died holding it')
+    expect(err).not.toContain('watchdog: deferred')
+    expect(existsSync(marker)).toBe(true)   // and the daemon came up
+  } finally { cleanup(home, marker) }
+})
+
+test('the deploy\'s OWN chain is exempt for exactly its lock generation — a matching DEPLOY_LOCK_EXEMPT proceeds, a stale token defers', async () => {
+  // Without this the deploy relaunches through ensure-daemon → watchdog inside its own lock window and
+  // nothing comes up (the health check would fail into a rollback that is deferred too).
+  const { home, stateDir, marker } = sandbox()
+  try {
+    const ts = Date.now()
+    writeFileSync(join(stateDir, 'deploy.lock'), JSON.stringify({ pid: 4242, ts, ver: '9.9.9' }))
+    const proc = Bun.spawn([process.execPath, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: process.env.PATH!, DEPLOY_LOCK_EXEMPT: `4242:${ts}` },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const deadline = Date.now() + 20_000
+    while (!existsSync(marker) && proc.exitCode === null && Date.now() < deadline) await Bun.sleep(100)
+    await Bun.sleep(200)
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
+    expect(err).toContain('watchdog: proceeding under its own deploy.lock (pid 4242, 9.9.9)')
+    expect(err).not.toContain('watchdog: deferred')
+    expect(existsSync(marker)).toBe(true)
+  } finally { cleanup(home, marker) }
+  // A token from an EARLIER lock generation (a long-lived watchdog meeting the next deploy) defers.
+  const s2 = sandbox()
+  try {
+    writeFileSync(join(s2.stateDir, 'deploy.lock'), JSON.stringify({ pid: 4243, ts: Date.now(), ver: '9.9.10' }))
+    const proc = Bun.spawn([process.execPath, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: s2.stateDir, HOME: s2.home, PATH: process.env.PATH!, DEPLOY_LOCK_EXEMPT: '4242:1' },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    await waitForBoot(s2.stateDir, proc)
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
+    expect(err).toContain('watchdog: deferred (boot) — deploy.lock held by pid 4243')
+    expect(existsSync(s2.marker)).toBe(false)
+  } finally { cleanup(s2.home, s2.marker) }
+})
+
 test('the daemon is launched via an absolute interpreter, never a bare name', () => {
   // Comments are stripped first: this file's own header quotes the old bad call on purpose.
   const code = readFileSync(WATCHDOG, 'utf8')

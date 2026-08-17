@@ -5,6 +5,7 @@
 //    bad read of /proc — that is the risk this change introduces and the reason for the retry.
 import { test, expect } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -51,23 +52,25 @@ test('a dir with no daemon.ts and a non-semver name are both invisible', () => {
 
 // ---- the stop: the safety fix ----
 
-function stopFixture(cacheBase: string, pids: Record<string, number>, cmdlines: Record<number, string>) {
+async function stopFixture(cacheBase: string, pids: Record<string, number>, cmdlines: Record<number, string>) {
   const stateDir = mkdtempSync(join(tmpdir(), 'upgrade-state-'))
   for (const [f, pid] of Object.entries(pids)) writeFileSync(join(stateDir, f), String(pid))
   const killed: number[] = []
   const sweeps: string[][] = []
-  const res = stopSupervisors({
+  const res = await stopSupervisors({
     stateDir, cacheBase,
     kill: pid => { killed.push(pid) },
     run: (cmd, args) => { sweeps.push([cmd, ...args]) },
     cmdlineOf: pid => cmdlines[pid] ?? '',
+    alive: () => false,                       // the signalled pid exits at once
+    socketAlive: async () => false,
   })
   return { res, killed, sweeps, stateDir }
 }
 
-test('THE PRODUCTION-KILL BUG: every sweep pattern is rooted at this cacheBase', () => {
+test('THE PRODUCTION-KILL BUG: every sweep pattern is rooted at this cacheBase', async () => {
   const base = '/tmp/sbx/.claude/plugins/cache/cc-bridge/telegram'
-  const { sweeps } = stopFixture(base, {}, {})
+  const { sweeps } = await stopFixture(base, {}, {})
   expect(sweeps.length).toBe(2)
   for (const [, , pat] of sweeps) {
     expect(pat.startsWith(base)).toBe(true)
@@ -76,18 +79,18 @@ test('THE PRODUCTION-KILL BUG: every sweep pattern is rooted at this cacheBase',
   }
 })
 
-test('the rootless stray-checkout sweep is OPT-IN, so a sandbox run can never fire it', () => {
+test('the rootless stray-checkout sweep is OPT-IN, so a sandbox run can never fire it', async () => {
   const base = '/tmp/sbx/cache/telegram'
-  expect(stopFixture(base, {}, {}).sweeps.some(s => s[2].includes('cc-bridge/daemon'))).toBe(false)
+  expect((await stopFixture(base, {}, {})).sweeps.some(s => s[2].includes('cc-bridge/daemon'))).toBe(false)
   const stateDir = mkdtempSync(join(tmpdir(), 'upgrade-state-'))
   const sweeps: string[][] = []
-  stopSupervisors({ stateDir, cacheBase: base, sweepStrayCheckouts: true, run: (c, a) => sweeps.push([c, ...a]), kill: () => {}, cmdlineOf: () => '' })
+  await stopSupervisors({ stateDir, cacheBase: base, sweepStrayCheckouts: true, run: (c, a) => sweeps.push([c, ...a]), kill: () => {}, cmdlineOf: () => '', alive: () => false, socketAlive: async () => false })
   expect(sweeps.some(s => s[2].includes('cc-bridge/daemon'))).toBe(true)   // /update keeps its behaviour
 })
 
-test('a pid is signalled only when its cmdline names OUR cache tree', () => {
+test('a pid is signalled only when its cmdline names OUR cache tree', async () => {
   const base = '/tmp/sbx/cache/telegram'
-  const { killed, res } = stopFixture(base, { 'daemon.pid': 4242, 'watchdog.pid': 4243 }, {
+  const { killed, res } = await stopFixture(base, { 'daemon.pid': 4242, 'watchdog.pid': 4243 }, {
     4242: `bun ${base}/0.1.0/daemon.ts`,
     4243: 'bun /home/ubuntu/.claude/plugins/cache/cc-bridge/telegram/0.4.381/watchdog.ts',
   })
@@ -96,17 +99,118 @@ test('a pid is signalled only when its cmdline names OUR cache tree', () => {
   expect(res.skipped[0].why).toContain('does not name')
 })
 
-test('a stale pid file naming a recycled pid is skipped, not killed', () => {
+test('a stale pid file naming a recycled pid is skipped, not killed', async () => {
   const base = '/tmp/sbx/cache/telegram'
-  const { killed, res } = stopFixture(base, { 'daemon.pid': 99 }, { 99: '/usr/bin/postgres -D /var/lib/pg' })
+  const { killed, res } = await stopFixture(base, { 'daemon.pid': 99 }, { 99: '/usr/bin/postgres -D /var/lib/pg' })
   expect(killed).toEqual([])
   expect(res.skipped).toHaveLength(1)
 })
 
-test('a pid that is already gone is skipped quietly', () => {
-  const { killed, res } = stopFixture('/tmp/sbx/cache/telegram', { 'daemon.pid': 5 }, {})
+test('a pid that is already gone is skipped quietly', async () => {
+  const { killed, res } = await stopFixture('/tmp/sbx/cache/telegram', { 'daemon.pid': 5 }, {})
   expect(killed).toEqual([])
   expect(res.skipped[0].why).toContain('already gone')
+})
+
+// ---- the stop WAITS: the 2026-08-16 double-bounce fix ----
+// What the broken version did: SIGTERM, then unlink the socket and both pid files in the same tick.
+// So each of these asks a question the old code could not even be posed.
+
+/** A real state dir with both pid files present, and a clock the test drives. */
+function waitFixture(over: Partial<Parameters<typeof stopSupervisors>[0]> = {}) {
+  const cacheBase = '/tmp/sbx/cache/telegram'
+  const stateDir = mkdtempSync(join(tmpdir(), 'upgrade-wait-'))
+  writeFileSync(join(stateDir, 'daemon.pid'), '4242')
+  writeFileSync(join(stateDir, 'watchdog.pid'), '4243')
+  writeFileSync(join(stateDir, 'daemon.sock'), '')          // a plain file stands in for the socket node
+  let t = 0
+  const logs: string[] = []
+  const opts = {
+    stateDir, cacheBase,
+    run: () => {},
+    cmdlineOf: (pid: number) => `bun ${cacheBase}/0.1.0/${pid === 4242 ? 'daemon' : 'watchdog'}.ts`,
+    now: () => t,
+    sleep: async (ms: number) => { t += ms },
+    log: (s: string) => { logs.push(s) },
+    socketAlive: async () => false,
+    ...over,
+  }
+  return { opts, stateDir, logs }
+}
+
+test('the pid files outlive the SIGTERM — they are removed only once the pids are gone', async () => {
+  let polls = 0
+  const seen: { pidFileGone: boolean }[] = []
+  const { opts, stateDir } = waitFixture({
+    kill: () => {},
+    // The pid exits between the first poll and the second, and the pid file must still be there
+    // while we are still asking.
+    alive: () => { seen.push({ pidFileGone: !existsSync(join(stateDir, 'daemon.pid')) }); return polls++ < 2 },
+  })
+  const res = await stopSupervisors(opts)
+  expect(res.killed).toEqual([4242, 4243])
+  expect(res.stillAlive).toEqual([])
+  expect(res.escalated).toEqual([])
+  expect(res.waitedMs).toBeGreaterThan(0)                   // it DID wait…
+  expect(res.waitedMs).toBeLessThanOrEqual(300)             // …one or two 100ms polls, not the 10s budget
+  expect(seen.length).toBeGreaterThanOrEqual(3)             // re-polled after sleeping, not asked once
+  expect(seen.every(s => !s.pidFileGone)).toBe(true)        // nothing was unlinked while we waited
+  expect(existsSync(join(stateDir, 'daemon.pid'))).toBe(false)
+  expect(existsSync(join(stateDir, 'watchdog.pid'))).toBe(false)
+})
+
+test('A KILL THE PID IGNORES: the wait expires, SIGKILL escalates, and the escalation is WRITTEN DOWN', async () => {
+  const signals: [number, string][] = []
+  const { opts, stateDir, logs } = waitFixture({
+    waitMs: 10_000,
+    kill: (pid: number, sig: NodeJS.Signals | 0) => { signals.push([pid, String(sig)]) },
+    alive: () => true,                                       // nothing ever exits
+  })
+  const res = await stopSupervisors(opts)
+  expect(res.waitedMs).toBe(10_000)                          // the full budget, on the fake clock
+  expect(res.escalated).toEqual([4242, 4243])
+  expect(res.stillAlive).toEqual([4242, 4243])
+  expect(signals.filter(([, s]) => s === 'SIGKILL').map(([p]) => p)).toEqual([4242, 4243])
+  expect(logs).toHaveLength(1)
+  expect(logs[0]).toBe('upgrade-core: stop — SIGKILL escalated for pid(s) 4242, 4243 after 10s; still alive: [4242, 4243]\n')
+  // Still unlinked afterwards: the pid files are stale by then either way, and leaving them makes
+  // the next supervisor adopt a pid it cannot manage.
+  expect(existsSync(join(stateDir, 'daemon.pid'))).toBe(false)
+})
+
+test('A SOCKET SOMEBODY STILL SERVES IS NEVER UNLINKED — it is reported instead', async () => {
+  const { opts, stateDir } = waitFixture({ waitMs: 1_000, kill: () => {}, alive: () => false, socketAlive: async () => true })
+  const res = await stopSupervisors(opts)
+  expect(res.socketStillServed).toBe(true)
+  expect(res.waitedMs).toBe(1_000)                           // it waited the whole budget for silence
+  expect(existsSync(join(stateDir, 'daemon.sock'))).toBe(true)
+})
+
+test('a socket nobody answers on is unlinked, as before', async () => {
+  const { opts, stateDir } = waitFixture({ kill: () => {}, alive: () => false })
+  const res = await stopSupervisors(opts)
+  expect(res.socketStillServed).toBe(false)
+  expect(res.waitedMs).toBe(0)
+  expect(existsSync(join(stateDir, 'daemon.sock'))).toBe(false)
+})
+
+// The default probe, against a REAL unix socket — the injected `socketAlive` above proves the
+// branching, this proves the instrument the branching runs on.
+test('THE REAL PROBE: a live unix socket reads as served and survives the stop; a dead path does not', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'upgrade-probe-'))
+  const sock = join(stateDir, 'daemon.sock')
+  const srv = net.createServer(c => c.end())
+  await new Promise<void>(r => srv.listen(sock, () => r()))
+  const base = { stateDir, cacheBase: '/tmp/sbx/cache/telegram', waitMs: 300, run: () => {}, kill: () => {}, cmdlineOf: () => '', alive: () => false }
+  try {
+    const res = await stopSupervisors(base)
+    expect(res.socketStillServed).toBe(true)
+    expect(existsSync(sock)).toBe(true)
+  } finally { await new Promise<void>(r => srv.close(() => r())) }
+  writeFileSync(sock, '')                                    // a leftover node nobody listens on
+  const res = await stopSupervisors(base)
+  expect(res.socketStillServed).toBe(false)
+  expect(existsSync(sock)).toBe(false)
 })
 
 // ---- health check: the risk this change introduces ----
