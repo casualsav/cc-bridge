@@ -11589,7 +11589,10 @@ async function updateClaude(chat: string): Promise<void> {
 // null means UNKNOWN, never "stale" — every caller treats it as a skip.
 function claudeExeVersion(pid: number): string | null {
   try {
-    const base = basename(readlinkSync(`/proc/${pid}/exe`))
+    // A binary unlinked under a running process reads back as `…/2.1.227 (deleted)` — the case where
+    // this reading matters MOST (nothing else will tell you the pane is on a build that is gone), and
+    // the one the bare regex dropped to null, silently falling through to the transcript fallback.
+    const base = basename(readlinkSync(`/proc/${pid}/exe`)).replace(/ \(deleted\)$/, '')
     return /^\d+\.\d+\.\d+$/.test(base) ? base : null
   } catch { return null }
 }

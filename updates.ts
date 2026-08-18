@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { readFileSync, existsSync, openSync, copyFileSync, mkdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { STATE_DIR, DAEMON_LOG_FILE, readJsonFile, writeJsonFile } from './common.ts'
+import { STATE_DIR, DAEMON_LOG_FILE, PREFS_FILE, readJsonFile, writeJsonFile } from './common.ts'
+import { logDecision } from './delivery-log.ts'
 import { exec } from './proc.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
@@ -211,7 +212,13 @@ const CLAUDE_INSTALL_STAMP = join(STATE_DIR, 'claude-install-check.json')
 const CLAUDE_INSTALL_EVERY_MS = 6 * 3600_000
 export async function sweepClaudeInstall(): Promise<void> {
   const access = loadAccess()
-  if (access.autoUpdate !== true) return
+  // The pref vanished from prefs.json in a config incident on 2026-07-30 and this branch returned in
+  // silence for 19 days: the CLI stopped auto-installing and no line anywhere said why. It speaks now.
+  if (access.autoUpdate !== true) {
+    logDecision({ key: 'claude-install-sweep', family: 'ctl', what: 'claude install sweep', target: 'fleet', pane: null,
+      decision: 'REFUSED', predicate: `autoUpdate=${access.autoUpdate === undefined ? 'unset' : String(access.autoUpdate)}`, hint: PREFS_FILE })
+    return
+  }
   const lastAt = readJsonFile<{ at?: number }>(CLAUDE_INSTALL_STAMP, {}).at ?? 0
   if (Date.now() - lastAt < CLAUDE_INSTALL_EVERY_MS) return
   // Stamped up front and again after the attempt: a registry outage or a failing install must cost

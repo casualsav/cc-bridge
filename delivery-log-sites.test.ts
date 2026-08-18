@@ -105,3 +105,13 @@ test('the four modules: access gate 7 of 9, pane-io lock give-up, owner-reply 5,
   expect(count(tr, /logDecision\(\{/g)).toBe(1)   // the reader must not log per tick — one keyed line, lost cursor only
   expect(tr).toContain('key: `cursor:${file}`')
 })
+
+// The auto-install gate returned in silence for 19 days after `autoUpdate` was wiped out of prefs.json
+// on 2026-07-30 (ask 769, 2026-08-18): the CLI stopped updating itself and daemon.log said nothing.
+test('ctl family (updates.ts): the claude auto-install gate names the pref it refused on', () => {
+  const u = other('updates.ts')
+  expect(count(u, /logDecision\(\{/g)).toBe(1)                      // the autoUpdate gate — the sweep's other exits all log already
+  expect(u).toContain("key: 'claude-install-sweep'")                // spawn-time calls repeat — guarded
+  expect(u).toContain('predicate: `autoUpdate=${access.autoUpdate === undefined ? \'unset\' : String(access.autoUpdate)}`')
+  expect(u).toContain('hint: PREFS_FILE')                           // an absent pref is only actionable with the file named
+})
