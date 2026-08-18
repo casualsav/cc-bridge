@@ -154,8 +154,6 @@ const SHIPPED: [string, (src: string) => boolean][] = [
     s => bodyOf(s, 'awaitPaneReady').includes("=== 'timeout'")],
   ['every adopted pane death is logged, not only the focused one',
     s => bodyOf(s, 'discoverPanes').includes("what: 'pane death'")],
-]
-const PENDING: [string, (src: string) => boolean][] = [
   ["the dial read refuses a pane that isn't running typed input",
     s => bodyOf(s, 'readCurrentModel').includes('paneRunsTypedInput(before)')],
   ['the dial read clears its own /model afterwards — Esc dismisses the picker, it does not empty the box',
@@ -164,6 +162,17 @@ const PENDING: [string, (src: string) => boolean][] = [
     s => bodyOf(s, 'awaitPaneReady').includes('paneReadyForFirstDelivery')],
   ['an occupied box on a pane that has taken no delivery is CLEARED and retried, never buffered',
     s => ordered(bodyOf(s, 'enqueueInboundInject'), "outcome === 'occupied'", 'clearPaneBox(paneId')],
+]
+const PENDING: [string, (src: string) => boolean][] = [
+  // The rest of class 1: the two remaining sites that type CONTENT into a pane on the daemon's own
+  // initiative. Enumerated by `sendKeys(`/`sendKeysLiteral(`/`paste-buffer` per enclosing function,
+  // filtered to arguments that are not key names — everything else that reaches a pane is either
+  // control keys or driven by a human tap or a bus verb.
+  ['the cross-engine brief waits for a pane that RUNS typed input, not merely one showing a prompt',
+    s => bodyOf(s, 'typeBriefIntoPane').includes('paneReadyForFirstDelivery(')
+      && !bodyOf(s, 'typeBriefIntoPane').includes('onNormalPrompt(')],
+  ['the unattended refresh will not type /exit onto a busy pane or somebody\'s draft',
+    s => ordered(bodyOf(s, 'relaunchFreshSession'), 'paneReadyForFirstDelivery(preCap)', "agentExitKeys('claude')")],
 ]
 
 test('daemon.ts carries the founding-delivery wiring', () => {

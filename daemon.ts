@@ -11041,9 +11041,13 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 const CROSS_ENGINE_COMPOSER_TIMEOUT_MS = 20_000
 const CROSS_ENGINE_REBIND_TIMEOUT_MS = 20_000
 
-// Type the takeover brief into a freshly cross-engine-launched pane, once its composer is
-// confirmed up (onNormalPrompt — NOT just waitForSettle, which only means the screen stopped
-// redrawing, not that input is accepted yet). Bracket-pastes it (paste-buffer, like injectPaste)
+// Type the takeover brief into a freshly cross-engine-launched pane, once that pane will actually
+// RUN typed input — `paneReadyForFirstDelivery`, not `onNormalPrompt` (which is only "there is an
+// input box": true for the whole of a running turn, and true over a box holding somebody's text) and
+// not `waitForSettle` (only "the screen stopped redrawing"). This is a founding delivery into a pane
+// the daemon launched seconds earlier, so it is the same class as the inbound gate and the same
+// reading answers it: the box must also be EMPTY, or the brief pastes on top of whatever the launch
+// left and one Enter submits both as one turn. Bracket-pastes it (paste-buffer, like injectPaste)
 // rather than plain keystrokes: a literal multi-line send would have every embedded newline in
 // the brief submit early instead of landing as one message. One retry if the composer never came
 // up in time — a slow boot racing the first poll.
@@ -11052,7 +11056,7 @@ async function typeBriefIntoPane(pane: string, agent: AgentKind, brief: string):
     const deadline = Date.now() + CROSS_ENGINE_COMPOSER_TIMEOUT_MS
     while (Date.now() < deadline) {
       if (!(await paneAlive(pane))) return false
-      if (onNormalPrompt(await capturePane(pane).catch(() => ''))) {
+      if (paneReadyForFirstDelivery(await capturePane(pane).catch(() => ''))) {
         // The lock goes around the paste→submit window ONLY, not the poll loop above it: this
         // function can spend CROSS_ENGINE_COMPOSER_TIMEOUT_MS waiting for a composer to come up, and
         // holding a pane's delivery queue for that long would be a self-inflicted wedge.
@@ -11826,6 +11830,14 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   // Checked BEFORE the exit: a provider we can't launch against would leave the session exited with
   // nothing to relaunch it into.
   if (!(await harnessProviderReady(harness))) return 'untouched'
+  // The `/exit` below is CONTENT typed into a live session's composer, and this path is unattended —
+  // nobody is there to notice it landing on top of something. `preCap` is the read this function
+  // already took, so the gate costs nothing: refuse unless the pane will RUN what is typed and its
+  // box is empty. A busy pane is not a zero-turn session to refresh, and a box with text in it turns
+  // `/exit` into a suffix on somebody's draft that one Enter then submits as a message. 'untouched'
+  // rather than a failure, so the next sweep tries again — the same answer the shell-backed branch
+  // below gives when the agent never left.
+  if (!paneReadyForFirstDelivery(preCap)) return 'untouched'
   if (t.sid) { recordSessionMode(t.sid, mode); recordSessionEffort(t.sid, effort) }
   // Floor chain only — see refreshSpawnModel for why a remembered alias can never be about this
   // launch. That also retires the old "never Haiku" guard here: the floor can't produce haiku.
