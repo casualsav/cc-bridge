@@ -403,12 +403,20 @@ export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed' | 'occupied'
 // next message in the box itself, and refusing on that would brick the bus's main verb on text nobody
 // typed. The read is taken here, inside the caller's delivery lock, so it cannot go stale before the
 // paste — a pre-lock gate would be a TOCTOU.
+//
+// `onOccupied` reports WHAT was in the box. 'occupied' on its own names a refusal without naming its
+// cause, which is how a 42-minute-silent chat lane needed forensics instead of a grep (2026-08-18):
+// the log said "already holds typed text" about a pane the daemon had launched two seconds earlier,
+// where the only possible occupant was boot chrome. Reporting rather than returning it keeps the
+// outcome a plain string for every caller that only branches on it.
 export async function pasteVerified(
   paneId: string, text: string, keys: string[], landed: (cap: string) => boolean,
   occupant: (styledCap: string) => string | null,
+  onOccupied?: (who: string) => void,
 ): Promise<PasteOutcome> {
   const before = await capturePaneStyled(paneId).catch(() => '')
-  if (before && occupant(before)) return 'occupied'
+  const who = before ? occupant(before) : null
+  if (who) { onOccupied?.(who); return 'occupied' }
   const buf = injectBuffer(paneId)
   try {
     await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
@@ -418,6 +426,25 @@ export async function pasteVerified(
     await waitForSettle(paneId, 200, 4000)
     return (await submitVerified(paneId, keys, landed)) ? 'landed' : 'unsubmitted'
   } catch { return 'unsubmitted' }
+}
+
+// Wait until a pane will actually RUN what is typed into it. tmux hands back a pane id the instant
+// the process is exec'd, seconds before the CLI has painted a prompt — and `inputBoxOccupant` reads
+// that boot chrome as somebody's draft, so a delivery attempted too early is refused rather than
+// delayed (2026-08-18: the chat lane the owner's own "hello" spawned refused it, and the one after
+// it, for 42s). Bounded by ATTEMPTS rather than a clock so the loop is testable without one, and so
+// a mocked `sleep` cannot spin it forever.
+export async function waitForPaneReady(
+  paneId: string, ready: (cap: string) => boolean,
+  opts: { attempts: number; pollMs: number; onWait?: (attempt: number) => void },
+): Promise<'ready' | 'timeout'> {
+  for (let i = 0; i < opts.attempts; i++) {
+    const cap = await capturePane(paneId).catch(() => '')
+    if (cap && ready(cap)) return 'ready'
+    opts.onWait?.(i + 1)
+    await sleep(opts.pollMs)
+  }
+  return 'timeout'
 }
 
 // The recovery for 'unsubmitted': press Enter again at a box that already holds the block. Never

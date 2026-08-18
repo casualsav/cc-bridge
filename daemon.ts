@@ -92,7 +92,7 @@ import {
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
   submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
   paneDeliveriesInFlight, drainPaneDeliveries,
-  pasteVerified, resubmitVerified, type PasteOutcome,
+  pasteVerified, resubmitVerified, waitForPaneReady, type PasteOutcome,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -576,11 +576,57 @@ async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): 
   return (await injectPasteOutcome(paneId, watcher, text)) === 'landed'
 }
 
-async function injectPasteOutcome(paneId: string, watcher: PaneWatcher, text: string): Promise<PasteOutcome> {
+async function injectPasteOutcome(
+  paneId: string, watcher: PaneWatcher, text: string, onOccupied?: (who: string) => void,
+): Promise<PasteOutcome> {
   return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(async () => {
     if (!(await paneAlive(paneId))) return 'failed' as PasteOutcome
-    return pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded, inputBoxOccupant)
+    return pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded, inputBoxOccupant, onOccupied)
   }), () => 'failed' as PasteOutcome)   // never got our turn at the lock: nothing was pasted
+}
+
+// ---- A pane the daemon just launched is not ready for a delivery ---------------------------------
+//
+// tmux hands back a pane id the instant the process is exec'd; the CLI is still painting its boot
+// screen for seconds after that, and `inputBoxOccupant` reads that chrome as a draft. On 2026-08-18
+// the chat lane the owner's own "hello" auto-spawned refused that hello — and the one after it — as
+// `occupied` for 42 seconds; his DM was silent while the mini app, which pastes down a different
+// path, got through. So: a pane the daemon created waits for `paneRunsTypedInput` before its FIRST
+// delivery, and while it is in this set an `occupied` reading cannot be somebody's draft, because
+// nothing of anyone's has ever been delivered into it.
+//
+// Membership is the whole "no recorded human paste" test — no second store. A pane leaves the set
+// when it is seen running typed input, or when the boot window expires (a pane that never reaches a
+// prompt is a launch failure, and holding inbound for it forever is worse than pasting blind).
+const PANE_BOOT_WINDOW_MS = 60_000
+const PANE_BOOT_POLL_MS = 500
+const paneBooting = new Map<string, number>()   // paneId → launch time
+function markPaneBooting(paneId: string): void { paneBooting.set(paneId, Date.now()) }
+function paneBootAge(paneId: string): number | null {
+  const at = paneBooting.get(paneId)
+  return at == null ? null : Date.now() - at
+}
+// Resolves once the pane runs typed input, or when its boot window is spent — after which the
+// delivery goes in blind, because a launch that never reaches a prompt must not hold inbound
+// forever. A pane nobody marked returns immediately: this gate exists for the founding delivery and
+// nothing else. The entry itself survives until a delivery LANDS (see the 'landed' branch), because
+// "has this pane ever taken a delivery" is what the occupied branch reads to tell chrome from a draft.
+async function awaitPaneReady(paneId: string, target: string): Promise<'ready' | 'not-booting' | 'timeout'> {
+  const age = paneBootAge(paneId)
+  if (age == null) return 'not-booting'
+  if (age >= PANE_BOOT_WINDOW_MS) return 'timeout'
+  const r = await waitForPaneReady(paneId, paneRunsTypedInput, {
+    attempts: Math.max(1, Math.ceil((PANE_BOOT_WINDOW_MS - age) / PANE_BOOT_POLL_MS)),
+    pollMs: PANE_BOOT_POLL_MS,
+    onWait: n => { logDecision({ key: `boot:${paneId}`, family: 'human', what: 'founding inbound', target, pane: paneId,
+      decision: 'HELD', predicate: 'pane is still booting (does not run typed input yet)', hint: `waited ${Math.round(n * PANE_BOOT_POLL_MS / 1000)}s` }) },
+  })
+  if (r === 'timeout') {
+    logDecision({ family: 'human', what: 'founding inbound', target, pane: paneId, decision: 'DROPPED',
+      predicate: `pane never ran typed input within ${Math.round(PANE_BOOT_WINDOW_MS / 1000)}s of launch`,
+      hint: 'delivering anyway rather than holding his message on a launch that never came up' })
+  }
+  return r
 }
 
 // Send keys one at a time with a gap. A batched `send-keys k1 k2 k3` can outrun the TUI
@@ -1416,16 +1462,26 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
   const block = flush ? `${flush.block}\n${formatChannelBlock(params)}` : formatChannelBlock(params)
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
+  let occupant: string | null = null
   const run = () => dismissPendingEffortConfirm(paneId)
+    // A pane the daemon launched for THIS message is still booting; wait for it to run typed input
+    // rather than pasting into its boot screen and reading that screen back as somebody's draft.
+    // No-op for every pane the daemon did not just spawn.
+    .then(() => awaitPaneReady(paneId, String(params.meta.chat_id)))
+    // The end-of-turn survey eats pasted keystrokes with its own key handler. Both mini-app delivery
+    // paths have dismissed it since the survey cost a voice transcript; inbound never did, which made
+    // a survey-held pane reachable from the app and unreachable from his DM.
+    .then(() => dismissFeedbackSurvey(paneId))
     // PROVENANCE, WRITTEN BEFORE THE PASTE. If the daemon dies between the paste and its Enter, this
     // record is the only thing that can tell a stranded message of OURS from a draft somebody typed
     // — and it has to be on disk before the paste, because the death we are covering happens inside
     // the next line.
     .then(() => markPasteInFlight(paneId, block, String(params.meta.chat_id), params.meta.thread ? Number(params.meta.thread) : undefined))
-    .then(() => injectPasteOutcome(paneId, watcher, block))
+    .then(() => injectPasteOutcome(paneId, watcher, block, who => { occupant = who }))
     .then(async outcome => {
       if (outcome === 'landed') {
         clearPasteInFlight(paneId)
+        paneBooting.delete(paneId)   // it took a delivery: from here on an occupied box may be a draft
         // Stamped HERE, against the outcome, and nowhere earlier — see markableOutcome.
         if (markableOutcome(outcome)) noteDelivered(params.meta)
         // The watermark moves only now, for the same reason tryDeliverAsk moves it only on `ok`: it
@@ -1465,7 +1521,15 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
         // Nothing of ours went in, so the record must go: leaving it would point the recovery at
         // somebody else's draft, which is the one thing this design promises never to submit.
         clearPasteInFlight(paneId)
-        process.stderr.write(`daemon: inbound not delivered to pane ${paneId} chat=${params.meta.chat_id} — its input box already holds typed text; buffering\n`)
+        // A pane still in the boot set has never had a delivery of anyone's land in it, so what the
+        // box holds cannot be a draft — it is chrome the readiness gate did not outlast. Say which
+        // of the two this is, and NAME the occupant either way: "already holds typed text" with no
+        // subject is what made the 2026-08-18 silence a forensics job instead of a grep.
+        const booting = paneBootAge(paneId)
+        logDecision({ family: 'human', what: 'inbound', target: String(params.meta.chat_id), pane: paneId, decision: 'BUFFERED',
+          predicate: booting == null
+            ? `input box already holds typed text ${JSON.stringify((occupant ?? '').slice(0, 60))}`
+            : `pane is ${Math.round(booting / 1000)}s old and has taken no delivery — its box holds boot chrome ${JSON.stringify((occupant ?? '').slice(0, 60))}, not a draft` })
         bufferEvent(params)
         return
       }
@@ -3197,6 +3261,7 @@ async function noteDiscoveredPane(paneId: string, why: AdoptWhy, initialScan = f
 function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
+  markPaneBooting(paneId)   // the founding delivery waits for its CLI — see awaitPaneReady
   void sampleAccountTier(paneId, true)   // daemon-spawned = fresh by construction, so it may feed drift state
   if (!focus.activePaneId) adoptPane(paneId, 'spawn')
   else void noteDiscoveredPane(paneId, 'spawn')   // topic-mode sibling: gets its topic, no focus steal
@@ -3247,7 +3312,22 @@ async function discoverPanes(): Promise<void> {
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) {
     if (isPaneRestarting(p)) continue   // planned bounce (claude update) — not a death, keep it registered
-    if (!live.has(p)) { offMcpPanes.delete(p); void closeTopicForPane(p) }
+    if (!live.has(p)) {
+      // EVERY adopted pane's death is named here, not just the focused one's. Until 2026-08-18 only
+      // the PaneWatcher's `pane %N died` existed, and it watches exactly one pane — so when the chat
+      // lane and a coding session died in the same second, the log recorded one of them and the
+      // owner's "it closed all my sessions" could not be checked against anything. This line is the
+      // only record the next occurrence will leave, so it carries the session and its last cwd.
+      // `sessionForPane(p, false)` reads paneSessionCache, which is KEPT after a pane dies — the one
+      // lookup that still answers here. Never stamps (the pane is gone), never throws outward.
+      const sid = await sessionForPane(p, false).catch(() => null)
+      const row = sid ? getTopicBySession(sid) : null
+      logDecision({ family: 'ctl', what: 'pane death', target: row?.name || sessionNames.get(p) || 'session', pane: p, decision: 'DROPPED',
+        predicate: 'gone from a conclusive pane scan (its process exited or its pane was killed)',
+        hint: [sid && `sid ${sid}`, row?.cwd && `cwd ${row.cwd}`, p === focus.activePaneId && 'was the focused pane'].filter(Boolean).join('; ') || undefined })
+      offMcpPanes.delete(p)
+      void closeTopicForPane(p)
+    }
   }
 
   // A single `paneAlive` miss is usually a transient tmux timeout under load, not a dead pane —
