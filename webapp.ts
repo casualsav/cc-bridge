@@ -168,8 +168,9 @@ export interface AgentRow {
   // freshly closed one is every render, since its next conversation does not exist yet. So it has to
   // name the tool honestly: a card reading "hermes" over an openclaw agent is what the owner saw.
   name: string; kind: 'hermes' | 'openclaw'; profile: string; busy: boolean
-  // `model` is what the agent is running on, or — closed — what its next conversation opens on.
-  pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null
+  // `model` is what the agent is running on, or — closed — what its next conversation opens on;
+  // `task` is its last reply's snippet, the idle line a coding session's card carries.
+  pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null; task?: string | null
 }
 // `close` ENDS the agent's conversation (every kind — the next task starts fresh) and is what `/clear`
 // in its drill-in does; `remove` closes and unregisters it, which is the list's ✕; `reopen` starts it.

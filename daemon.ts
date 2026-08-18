@@ -15670,7 +15670,7 @@ bot.on('callback_query:data', async ctx => {
   // options come from `hermes profile list` itself, so a typo'd profile (which would mint an
   // endpoint that can never answer) is not expressible. A box where that command won't run can only
   // produce dead endpoints, so failing to enumerate and failing to register are the same state here.
-  const hzMatch = /^hz:(add|prof:([a-z0-9][a-z0-9_-]{0,31})|mode:([a-z0-9][a-z0-9_-]{0,31}):([01])|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
+  const hzMatch = /^hz:(add|prof:([a-z0-9][a-z0-9_-]{0,31})|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
   if (hzMatch) {
     if (!(await cbAuth(ctx))) return
     const thread = ctx.callbackQuery?.message?.message_thread_id
@@ -15699,30 +15699,22 @@ bot.on('callback_query:data', async ctx => {
         kb.text('‹ Back', 'hz:panel'))
       return
     }
-    if (hzMatch[2]) {   // profile chosen → the one choice that changes what the agent IS
-      await ctx.answerCallbackQuery().catch(() => {})
-      await showHtmlPanel(ctx, 'edit',
-        `🤖 <b>${escapeHtml(hzMatch[2])}</b> — how should it handle a conversation?\n\n` +
-        `💬 <b>Chat</b> keeps a session open, so it remembers what you said before.\n` +
-        `⚡ <b>One-shot</b> answers each message from scratch and forgets it — cheaper, and right for a tool you ask isolated questions.`,
-        new InlineKeyboard()
-          .text('💬 Chat', `hz:mode:${hzMatch[2]}:1`).text('⚡ One-shot', `hz:mode:${hzMatch[2]}:0`).row()
-          .text('‹ Back', 'hz:add'))
-      return
-    }
-    if (hzMatch[3]) {   // mode chosen → ask for the bus name
+    if (hzMatch[2]) {   // profile chosen → ask for the bus name
+      // Always a CHAT agent (`pane: true`) — the 💬/⚡ choice was retired at the owner's ask
+      // (2026-08-18): every agent keeps a session, and closing/`/clear` is what starts it fresh. A
+      // one-shot endpoint is still honoured if written into hermes-endpoints.json by hand.
       await ctx.answerCallbackQuery().catch(() => {})
       const sent = await channel.sendText(String(ctx.chat!.id),
         `🤖 <b>Name it</b> — reply with the name you'll address it by (<code>@name</code>).\n\n` +
-        `Profile <code>${escapeHtml(hzMatch[3])}</code> · ${hzMatch[4] === '1' ? '💬 remembers' : '⚡ forgets each message'}.`,
+        `Profile <code>${escapeHtml(hzMatch[2])}</code>.`,
         { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'agent name' } }).catch(() => null)
-      if (sent) replyTargets.set(refKey(sent), { kind: 'hermesname', profile: hzMatch[3], pane: hzMatch[4] === '1', panelMsgId: ctx.callbackQuery?.message?.message_id })
+      if (sent) replyTargets.set(refKey(sent), { kind: 'hermesname', profile: hzMatch[2], pane: true, panelMsgId: ctx.callbackQuery?.message?.message_id })
       return
     }
     // ✖ remove. The PANE is killed with the row because it is the only half that costs anything to
     // leave running; hermes keeps the session id, so re-registering the same name resumes the same
     // conversation (killHermesPane's asymmetry, and the reason a remove here is not destructive).
-    const name = hzMatch[5]!
+    const name = hzMatch[3]!
     const had = hermesEndpoints.get(name)
     if (!removeHermesEndpoint(HERMES_ENDPOINTS_FILE, name)) {
       await ctx.answerCallbackQuery({ text: 'Could not remove that agent.' }).catch(() => {})
@@ -21889,9 +21881,16 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
     // has no index row to read a model off, so the card names the CONFIGURED one — the model its
     // next conversation opens on (owner's ask, 2026-08-18: a closed agent is a one-line card with its
     // model and kind, like a cleared coding session).
+    // `task` is the last reply's first 140 chars, the same snippet a coding session's card carries
+    // while idle (owner, 2026-08-18: congruency) — read from the conversation store each kind already
+    // reads for its drill-in, never the pane.
     if (isOpenclaw(h)) {
       const s = openclawIndex(h)
-      return { ...row, pane: true, live: !openclawClosed(h.name), busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? openclawConfiguredModel(h.profile) }
+      let task: string | null = null
+      if (s?.sessionFile && existsSync(s.sessionFile)) {
+        try { task = lastReplySnippet(openclawFeedItems(readFileSync(s.sessionFile, 'utf8'), { limit: 40 })) } catch {}
+      }
+      return { ...row, pane: true, live: !openclawClosed(h.name), busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? openclawConfiguredModel(h.profile), task }
     }
     if (!h.pane) return row
     // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
@@ -21901,8 +21900,19 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
     const pane = await hermesPaneOf(h.name)
     const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
     const st = cap ? parseHermesStatus(cap) : null
-    return { ...row, pane: true, live: !!pane, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? hermesConfiguredModel(h.profile) }
+    const rec = hermesPaneStates()[h.name]
+    const task = rec?.sessionId ? lastReplySnippet(hermesFeedItems(hermesStoreMessages(h, rec.sessionId, 40), rec.sessionId)) : null
+    return { ...row, pane: true, live: !!pane, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? hermesConfiguredModel(h.profile), task }
   }))
+}
+// The newest assistant row, flattened to one line and clamped like webappSessionCard's snippet.
+function lastReplySnippet(items: readonly { role: string; text: string }[]): string | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i]!.role !== 'assistant') continue
+    const t = items[i]!.text.replace(/\s+/g, ' ').trim().slice(0, 140)
+    return t || null
+  }
+  return null
 }
 // The model a card names when the agent has no live conversation to read one off — see
 // webappListAgents. Both are file reads on the 4s poll; a miss is null and the card shows the kind.

@@ -3071,7 +3071,9 @@ function renderAgents(el, agents) {
       // that applies to a row that has no session.
       '<button class="cardx" title="Remove agent" aria-label="Remove agent ' + esc(a.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      (a.pane && !closed ? '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : "✅ ready") + "</div>" : "") +
+      // The session card's own idle line: ✅ + the last reply's snippet, or nothing — "ready" said less
+      // than the reply does (owner, 2026-08-18).
+      (a.pane && !closed && (a.busy || a.task) ? '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : "✅ " + esc(a.task)) + "</div>" : "") +
       foot;
     // The same drill-in a coding session opens, on a pseudo sid the daemon resolves back to the
     // endpoint (`agent:<name>`). A CLOSED agent opens too, and the composer reopens it on its own
