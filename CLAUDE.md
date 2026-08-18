@@ -387,9 +387,12 @@ each was a separate live loss: `injected` is stamped only on transcript proof, n
 that was DELIVERED, because a held row that expires becomes permanently undeliverable while its asker
 is told a late answer will still arrive (caught mid-flight on ask 523, owner ruling 2026-08-15: the
 TTL arms at delivery, and the hour-mark notice for a held row says which of mid-turn/wedged/gone it
-is); and the reap's suppression is DELIVERED-ONLY — killing a stalled worker is the orchestrator's
-standard recovery, so silencing its never-delivered rows discards the queued units without telling
-the one session that could re-issue them. Proof: `ask-parity.test.ts` (source-bound),
+is); and the reap's suppression is DELIVERED-ONLY **for asks** — killing a stalled worker is the
+orchestrator's standard recovery, so silencing its never-delivered rows discards the queued units
+without telling the one session that could re-issue them, while **an ack is silent whatever its
+state** (nothing awaits one; v0.5.165, after two sign-off acks reached the owner as "❌ Ask N … never
+delivered" on 2026-08-18) and a PASTED row is never called never-delivered (`reapReasonText`). Proof:
+`ask-parity.test.ts` (source-bound),
 `bus-held-ttl.test.ts` (simulated clock, watched failing against a pre-fix build),
 `bus-reap.test.ts`.
 
