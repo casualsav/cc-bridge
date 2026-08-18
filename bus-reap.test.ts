@@ -9,7 +9,8 @@
 // in that window would fail every open ask at once and tell every asker their target had ended — a
 // worse bug than the one being fixed. The reap must not run until discovery has landed.
 import { test, expect } from 'bun:test'
-import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, reapNoticeSuppressed, groupClosuresByAskerAndTarget, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { readFileSync } from 'node:fs'
+import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, reapNoticeSuppressed, reapReasonText, groupClosuresByAskerAndTarget, type BusPending, type LedgerEntry } from './agent-bus.ts'
 import { closureNoticeText } from './agent-bus-block.ts'
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({
@@ -272,4 +273,100 @@ test('THE CONTROL: a third party\'s ask still hears about the same kill', () => 
   expect(reapNoticeSuppressed(ask({ createdAt: 50 }), [killRow({ ts: 10 })])).toBe(false)
   // And with no kill at all, nothing changes for a delivered-and-unanswered ask.
   expect(reapNoticeSuppressed(ask({ createdAt: 5, injected: true }), [])).toBe(false)
+})
+
+// ---- an ack has nothing waiting on it (asks 767 & 772, 2026-08-18) ----
+//
+// The same fixture pattern as the twice-fired card above, and this time it fired a third and fourth
+// time — with the ack now reaching surfaces the earlier fix had closed only for delivered rows. The
+// chat lane signed off two workers it was about to retire: ack 767 to @bridgecheck queued behind a
+// busy pane and was never pasted; ack 772 to @sweepfix was PASTED and landed, 6s before the kill,
+// and was reaped 64s into its 120s confirmation window. Both came back as "(@X ended with your ask N
+// unanswered)" in the lane's pane, as a ⌛ digest line, and — because the chat lane's own outbound
+// surface IS the owner's DM — as "❌ Ask 772 … was never delivered" on his phone.
+//
+// `noReply` was written on the premise that "no reaper and no TTL ever sees it": delivery removes the
+// row. Two windows reopened it — a busy target queues the row, and R-4 moved the `injected` stamp to
+// transcript proof, so a landed paste is un-delivered for up to CONFIRM_WINDOW_MS. Every reporter
+// downstream reads a bare pending row and renders ask semantics.
+const sysAck = (over: Partial<BusPending> = {}): BusPending => ask({ noReply: true, ...over })
+
+test('an ack reaped after its target is killed says NOTHING on any surface', () => {
+  // reapDeadAsk returns null on a suppression, and the pane block, the ❌ card and the digest line all
+  // key off that one return — so this single predicate is what closes all three.
+  expect(reapNoticeSuppressed(sysAck({ createdAt: 5 }), [killRow()])).toBe(true)
+  // Case A's shape exactly: queued behind a busy pane, never pasted, killed by its own asker.
+  expect(reapNoticeSuppressed(sysAck({ id: 767, createdAt: 5, toName: 'bridgecheck' }), [killRow({ to: 'bridgecheck' })])).toBe(true)
+  // Case B's: pasted, landed, killed inside the confirmation window.
+  expect(reapNoticeSuppressed(sysAck({ id: 772, createdAt: 5, pastedAt: 8 }), [killRow()])).toBe(true)
+})
+
+test('an ack is silent WITHOUT a kill, and whatever the ledger holds', () => {
+  // The kill is not the reason — nothing awaits an ack, so no ledger evidence is needed or read. A
+  // third party's kill and a crash (no kill row at all) reach the same answer, which is the half a
+  // fix built on askerKilledTarget would have missed.
+  expect(reapNoticeSuppressed(sysAck({ createdAt: 5 }), [])).toBe(true)
+  expect(reapNoticeSuppressed(sysAck({ createdAt: 5, fromName: 'other', fromSid: 'sidOther' }), [killRow()])).toBe(true)
+  expect(reapNoticeSuppressed(sysAck({ createdAt: 5, injected: true }), [])).toBe(true)
+})
+
+// THE CONTROL THAT MUST NOT MOVE. Silence is `noReply`'s alone: an ASK queued behind the same worker,
+// killed the same way, still wakes its asker — that is R-1 (ask 535), and the orchestrator that kills
+// a stalled worker cannot re-issue what it was never told it lost.
+test('THE CONTROL: a never-delivered ASK still speaks, killed or not', () => {
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow()])).toBe(false)
+  expect(reapNoticeSuppressed(ask({ createdAt: 5, pastedAt: 8 }), [killRow()])).toBe(false)
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [])).toBe(false)
+})
+
+// Silence is not a leak: bug 11c's actual correction is the removePending, and an unreaped ack row
+// would sit in agent-bus.json collecting the 60-minute "a late answer will still be delivered" notice
+// for a message no answer was ever coming for.
+test('a silenced ack is still REAPED — the queue cleanup is the half 11c needed', () => {
+  expect(planAskReap([sysAck()], gone, true).map(p => p.id)).toEqual([95])
+})
+
+// ---- a pasted row is not a never-delivered row (F2) ----
+//
+// The reaper was the one place that read `injected` without also reading `pastedAt`, so since R-4 it
+// has reported every row killed inside the confirmation window as though nothing of ours had ever
+// reached the target's box. The asker's next move is what differs: only a genuinely never-pasted row
+// is safe to re-issue blind.
+test('a pasted-but-unconfirmed row reaped after a kill does not claim it was never delivered', () => {
+  const text = reapReasonText({ injected: false, pastedAt: 8 })
+  expect(text).not.toContain('never delivered')
+  expect(text).toBe('pasted into its pane but never confirmed — the target session ended inside the confirmation window')
+})
+
+test('THE CONTROLS: the two rows either side of it keep their existing wording, byte for byte', () => {
+  expect(reapReasonText({ injected: false })).toBe('never delivered — target session ended')
+  expect(reapReasonText({ injected: true })).toBe('delivered but the target session ended before answering')
+  // Proof beats a paste record: a row confirmed in the target's transcript reads as delivered even
+  // though `pastedAt` is still set on it — markInjected clears the field, but the order must not be
+  // what this depends on.
+  expect(reapReasonText({ injected: true, pastedAt: 8 })).toBe('delivered but the target session ended before answering')
+})
+
+// ---- source-bound control: the shipped reaper actually asks these two questions ------------------
+//
+// The predicates above are pure and the call site is 1.5MB away in daemon.ts. A green suite proves
+// nothing if reapDeadAsk keeps its own copy of the sentence — which is exactly what it had. Run
+// against a deployed cache copy or `git archive HEAD` with REAP_SRC to watch it fail there.
+const reaperSrc = readFileSync(new URL(process.env.REAP_SRC ?? './daemon.ts', import.meta.url), 'utf8')
+const reaper = (() => {
+  const a = reaperSrc.indexOf('async function reapDeadAsk')
+  expect(a).toBeGreaterThan(-1)
+  const b = reaperSrc.indexOf('async function notifyAskClosures', a)
+  expect(b).toBeGreaterThan(a)
+  return reaperSrc.slice(a, b)
+})()
+
+test('reapDeadAsk takes its wording from reapReasonText and keeps no copy of the sentence', () => {
+  expect(reaper).toContain('reapReasonText(p)')
+  expect(reaper).not.toContain("'never delivered — target session ended'")
+})
+
+test('the reap log names the verb and attributes an ack suppression to the ack', () => {
+  expect(reaper).toContain("p.noReply ? 'ack' : 'ask'")
+  expect(reaper).toContain("'nothing awaits an ack'")
 })

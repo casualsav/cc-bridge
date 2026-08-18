@@ -175,7 +175,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, stillQueued, markRunnable, markStuckPaged, heartbeatPagedFor, markHeartbeatPaged, lastLedgerEventAt, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
-  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, reapReasonText, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
   isOwnerAddress,
   answerRouteFor,
@@ -4738,7 +4738,6 @@ const LEDGER_SCAN = 200
 // asks open used to wake that asker once per ask.
 async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | null> {
   removePending(p.id)
-  const delivered = !!p.injected   // the two sweep passes below already split on exactly this
   // Say nothing about an ask its asker has already been answered about. This reaper fires on every way
   // a session can end — a manual close, `tg kill`, a crash — and it used to notify unconditionally, so
   // a row whose TTL notice had been deliberately withheld got woken back up hours later as "ended
@@ -4750,13 +4749,17 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | nu
   // Name WHICH silence this is. One log line covering two predicates said "asker already answered"
   // about a session that had answered nothing and had simply killed its own worker — a log that
   // misattributes a suppression is worse than none, because it is the only record either leaves.
-  const quietWhy = askerKilledTarget(p, ledger) ? 'asker killed the target' : 'asker already answered'
-  const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
+  // The ack reason comes first for the same reason it does in the predicate: it is true whatever the
+  // ledger says, and reporting a silenced ack as "asker killed the target" would misattribute both.
+  const quietWhy = p.noReply ? 'nothing awaits an ack' : askerKilledTarget(p, ledger) ? 'asker killed the target' : 'asker already answered'
+  const why = reapReasonText(p)
   // Same contract as the suppressed TTL expiry: the reap is true history and is always recorded, and
   // `suppressed` carries the fact that nothing was sent, so `tg history` shows it marked while the
   // ambient digest omits it. Two surfaces, one answer.
   appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why, ...(stale ? { suppressed: true } : {}) })
-  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ` (no notice sent — ${quietWhy})` : ''}\n`)
+  // Names the VERB, as every delivery line does: "ask 772 reaped" for a row nothing was waiting on is
+  // the same mislabel on the log that the notice made on three surfaces.
+  process.stderr.write(`daemon: ${p.noReply ? 'ack' : 'ask'} ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ` (no notice sent — ${quietWhy})` : ''}\n`)
   return stale ? null : p
 }
 

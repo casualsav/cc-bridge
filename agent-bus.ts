@@ -80,9 +80,11 @@ export const LATE_ANSWER_GRACE_MS = 24 * 3600_000
 // escalation reached him described as a context nudge (owner-reported, 2026-08-03). The kind rides on
 // the row because that summary is written where the mint site is long gone.
 //
-// Five of these are `noReply` acks — delivery removes the row, so they can never be answered and can
-// never reach the card. They still name their kind: the row is what `tg history` and a debugging read
-// see, and a site that later drops `noReply` must not silently start lying again.
+// Six of these are `noReply` acks — delivery removes the row, so they can never be answered. Nor can
+// they reach the card, but the reason is reapNoticeSuppressed, not that removal: an ack whose target
+// dies before it lands DOES outlive delivery and DOES reach the reaper (2026-08-18). They still name
+// their kind: the row is what `tg history` and a debugging read see, and a site that later drops
+// `noReply` must not silently start lying again.
 export type SystemAskKind =
   | 'ctx-nudge'          // a session crossed a context step and is idle — the lane decides compact/clear
   | 'fleet-alert'        // fleet control: a paused chain, an unusually wide fan-out
@@ -185,9 +187,11 @@ export type BusPending = {
                       // pre-depth entries, which load as 1 — the safe reading, since an unknown chain
                       // has at least been through one hop.
   noReply?: true      // `tg ack`: an acknowledgment/FYI. The row exists ONLY to reach a busy target
-                      // through the same retry queue; delivery removes it (see tryDeliverAsk), so no
-                      // reaper and no TTL ever sees it. Nothing downstream had to learn about acks —
-                      // their rows simply stop existing at the moment they'd start being a problem.
+                      // through the same retry queue; delivery removes it (see tryDeliverAsk). This
+                      // read "so no reaper and no TTL ever sees it. Nothing downstream had to learn
+                      // about acks" — false for an ack whose target ends before it lands, which is
+                      // how one reached the owner as "❌ Ask 772 … never delivered" (2026-08-18).
+                      // What downstream has to know is in reapNoticeSuppressed, and nowhere else.
   quiet?: true        // deliver into the target's CONTEXT, mirror nothing onto its human surface. For a
                       // daemon notice whose content a card on that same chat already carries — the held
                       // spawn's "it started" is the whole set today. The row still lands, still logs to
@@ -998,8 +1002,35 @@ export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { re
 // ordinary condition of a unit queued behind a HEALTHY busy worker, and killing a stalled worker is
 // the orchestrator's standard recovery move — so the old reading discarded every unit queued behind
 // that worker with no notice on any surface. Watched live at 23:08:04Z that day on a scratch probe.
+//
+// AN ACK IS SILENT WHATEVER ELSE IS TRUE, and it is the first question asked, because none of the
+// reasoning above applies to a row nothing is waiting on. `noReply` was designed never to reach a
+// reaper at all — delivery removes the row — and two windows reopened it: a busy target queues the
+// row, and R-4 (2026-08-15) moved the `injected` stamp from the landed paste to transcript proof, so
+// every row is formally un-delivered for up to CONFIRM_WINDOW_MS after a paste that worked. On
+// 2026-08-18 the chat lane's two sign-off acks (767 to @bridgecheck, queued behind a busy pane; 772
+// to @sweepfix, pasted 6s before the kill and reaped 64s into its confirmation window) were each
+// rendered as "your ask N unanswered" into the asker's pane, as a ⌛ digest line, and as a ❌ card in
+// the owner's DM. Suppressing here closes all three at once: reapDeadAsk returns null, and the pane
+// block, the card and the digest omission all key off that one return.
 export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boolean {
+  if (p.noReply) return true
   return p.injected && (askerKilledTarget(p, entries) || askerAlreadyResolved(p, entries))
+}
+
+// What the reap SAYS happened — the text of the `expire` ledger row (so: the ⌛ digest line), and of
+// the daemon log line beside it.
+//
+// A PASTED row is not a never-delivered row. Since R-4 (2026-08-15) `injected` means transcript
+// proof, so every row pasted inside the 120s confirmation window is formally un-delivered — and the
+// reaper races confirmInjections for them. Ack 772 was reaped 64s into that window, 6s after a paste
+// that landed, and reported as "never delivered" (2026-08-18). `pastedAt` is what separates "nothing
+// of ours ever reached its box" from "it went in and we never got to prove it was read", and the
+// asker's next move differs: only the first is safe to re-issue blind.
+export function reapReasonText(p: Pick<BusPending, 'injected' | 'pastedAt'>): string {
+  if (p.injected) return 'delivered but the target session ended before answering'
+  if (p.pastedAt != null) return 'pasted into its pane but never confirmed — the target session ended inside the confirmation window'
+  return 'never delivered — target session ended'
 }
 
 // The asker ENDED the target itself, so "@X ended with your ask N unanswered" is telling a session
