@@ -119,3 +119,16 @@ test('no case in the force-reply switch exits with a bare break', () => {
     .filter(l => /\bbreak\b/.test(l))
   expect(offenders).toEqual([])
 })
+
+test('driver: openclaw is written, and a hermes re-registration clears it', () => {
+  withFile(LIVE, file => {
+    expect(upsertHermesEndpoint(file, { name: 'claw', profile: 'main', pane: true, driver: 'openclaw' })).toEqual({ ok: true })
+    expect(JSON.parse(readFileSync(file, 'utf8')).claw).toEqual({ profile: 'main', pane: true, driver: 'openclaw' })
+    expect(upsertHermesEndpoint(file, { name: 'claw', profile: 'mimo', pane: true, driver: 'hermes' })).toEqual({ ok: true })
+    expect(JSON.parse(readFileSync(file, 'utf8')).claw).toEqual({ profile: 'mimo', pane: true })
+    // No driver named → untouched, the pre-existing contract for the Telegram panel's writes.
+    expect(upsertHermesEndpoint(file, { name: 'claw', profile: 'main', pane: true, driver: 'openclaw' })).toEqual({ ok: true })
+    expect(upsertHermesEndpoint(file, { name: 'claw', profile: 'main', pane: true })).toEqual({ ok: true })
+    expect(JSON.parse(readFileSync(file, 'utf8')).claw.driver).toBe('openclaw')
+  })
+})

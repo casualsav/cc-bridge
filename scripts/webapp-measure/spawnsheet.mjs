@@ -47,7 +47,9 @@ const open = async (path, settings = SETTINGS, opts = {}) => {
   await p.goto("file://" + path, { waitUntil: "domcontentloaded" });
   await p.evaluate(({ s, feed }) => {
     window.__posts = [];
-    window.api = async u => u.includes("/api/settings") ? s : u.includes("feed") ? feed : { sessions: [] };
+    window.api = async u => u.includes("/api/settings") ? s : u.includes("feed") ? feed
+      : u.includes("/api/agent/catalog") ? { options: [{ kind: "hermes", profile: "mimo", model: "mimo-v2.5-pro", taken: ["mimo"] }, { kind: "openclaw", profile: "main", model: "anthropic/claude-opus-4-8", taken: [] }] }
+      : { sessions: [] };
     // The spawn goes through writeOp, which uses fetch directly — stubbing `api` alone records nothing.
     window.fetch = async (u, o) => {
       window.__posts.push({ u: String(u), body: JSON.parse(o?.body || "{}") });
@@ -144,7 +146,8 @@ const drill = await p.evaluate(async () => { try {
   // page" check below would compare a stale number with itself.
   document.getElementById("spback").click();
   await new Promise(r => setTimeout(r, 300));
-  out.rowsOnP1 = [...document.querySelectorAll("#spp1 .dialrow[data-drill]")].map(r => ({
+  // VISIBLE rows only: the Agent row sits on the page hidden until the fork picks it (2026-08-18).
+  out.rowsOnP1 = [...document.querySelectorAll("#spp1 .dialrow[data-drill]")].filter(r => r.offsetParent !== null).map(r => ({
     k: r.dataset.drill, n: r.querySelector(".nm .n").textContent.trim(), d: r.querySelector(".nm .d").textContent.trim(),
     chev: !!r.querySelector(".chev"), card: r.closest(".diallist").querySelectorAll(".dialrow").length }));
   const h0 = document.querySelector("#spawn .dialpages").style.height;
@@ -181,10 +184,10 @@ check(gaps !== null && Math.abs(gaps.above - gaps.below) < 0.2,
 check(gaps !== null && Math.abs(gaps.above - gaps.name) < 0.2,
   `and the name field takes it too, under Mode (${gaps?.name} vs ${gaps?.above})`);
 check((gaps?.above ?? 0) > 0, `and neither is zero — a shared card would read 0 (${gaps?.above})`);
-check(drill.rowsOnP1.length === 3 && drill.rowsOnP1.every(r => r.chev),
-  `Model, Effort and Mode are all drill rows (${JSON.stringify(drill.rowsOnP1.map(r => r.n))})`);
-check(drill.rowsOnP1.map(r => r.n).join(",") === "Model,Effort,Mode", "in that order");
-check(drill.rowsOnP1.map(r => r.d).join(",") === "Opus 5,High,Bypass",
+check(drill.rowsOnP1.length === 4 && drill.rowsOnP1.every(r => r.chev),
+  `Create, Model, Effort and Mode are all drill rows (${JSON.stringify(drill.rowsOnP1.map(r => r.n))})`);
+check(drill.rowsOnP1.map(r => r.n).join(",") === "Create,Model,Effort,Mode", "in that order — the fork FIRST (the owner, 2026-08-18)");
+check(drill.rowsOnP1.map(r => r.d).join(",") === "Coding session,Opus 5,High,Bypass",
   `each showing its RESOLVED value inline, never the word "Default" (${drill.rowsOnP1.map(r => r.d).join(",") || "no rows"})`);
 check(drill.rowsOnP1.every(r => r.card === 1),
   `and each sits in its own card, which is what keeps one gap rhythm (rows per card: ${drill.rowsOnP1.map(r => r.card).join(",")})`);
@@ -257,6 +260,43 @@ for (const k of ["model", "effort", "mode"]) {
 }
 check((was?.surface ?? []).includes("headless"),
   "HEAD did offer a headless surface — which the API keeps and the live test spawns through");
+
+// ---- 5b. The fork: Create → Agent swaps the rows, lists the catalogue, posts /api/agent/add ------
+const pA = await open(PAGE);
+const fork = await pA.evaluate(async () => {
+  const out = {};
+  const vis = id => document.getElementById(id).offsetParent !== null;
+  out.agentHiddenAtRest = !vis("spagent") && vis("spcode");
+  document.querySelector('#spp1 .dialrow[data-drill="type"]').click();
+  await new Promise(r => setTimeout(r, 350));
+  out.forkTitle = document.getElementById("spdetailt").textContent;
+  out.forkRows = [...document.querySelectorAll("#spdetail .dialrow")].map(r => r.dataset.v);
+  document.querySelector('#spdetail .dialrow[data-v="agent"]').click();
+  await new Promise(r => setTimeout(r, 350));
+  out.swapped = vis("spagent") && !vis("spcode");
+  out.placeholder = document.getElementById("spname").placeholder;
+  document.querySelector('#spp1 .dialrow[data-drill="agent"]').click();
+  await new Promise(r => setTimeout(r, 350));
+  out.agentTitle = document.getElementById("spdetailt").textContent;
+  out.agentRows = [...document.querySelectorAll("#spdetail .dialrow")].map(r => r.dataset.v + "|" + r.querySelector(".d").textContent);
+  document.querySelector('#spdetail .dialrow[data-v="openclaw:main"]').click();
+  await new Promise(r => setTimeout(r, 350));
+  out.agentNow = document.getElementById("spagentnow").textContent;
+  document.getElementById("spname").value = "clawtwo";
+  document.getElementById("spgo").click();
+  await new Promise(r => setTimeout(r, 400));
+  out.posts = window.__posts;
+  return out;
+});
+check(fork.agentHiddenAtRest, "at rest the Agent row is hidden and the three session rows show");
+check(fork.forkTitle === "Create" && fork.forkRows.join(",") === "session,agent", `the fork's page lists session, agent (${fork.forkRows})`);
+check(fork.swapped, "picking Agent hides Model/Effort/Mode and shows the Agent row");
+check(/@name/.test(fork.placeholder), `and the name field says it is an @handle (${fork.placeholder})`);
+check(fork.agentTitle === "Agent" && fork.agentRows.length === 2 && fork.agentRows[0].startsWith("hermes:mimo|hermes · mimo-v2.5-pro · already @mimo") && fork.agentRows[1].startsWith("openclaw:main|openclaw · anthropic/claude-opus-4-8"),
+  `the Agent page lists the catalogue with kind, model and who already uses it (${JSON.stringify(fork.agentRows)})`);
+check(fork.agentNow === "main · openclaw", `the row shows the pick (${fork.agentNow})`);
+check(fork.posts.length === 1 && fork.posts[0].u.endsWith("/api/agent/add") && JSON.stringify(fork.posts[0].body) === JSON.stringify({ name: "clawtwo", kind: "openclaw", profile: "main" }),
+  `Create posts /api/agent/add with name, kind, profile — and NOT a session spawn (${JSON.stringify(fork.posts)})`);
 
 // ---- 6. Kept verbatim from the approved plan: ring, attributes, pills, slide ----------------------
 const ringOf = async pg => {

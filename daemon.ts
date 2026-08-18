@@ -148,7 +148,7 @@ import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { parkVerdict, existingPark, alreadyParkedText, parkedText, parkNoticeText, type ParkedSlash, type ParkResult } from './slash-park.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
-import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView, type AgentRow as WebappAgentRow } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView, type AgentRow as WebappAgentRow, type AgentCatalog as WebappAgentCatalog, type AgentKind as WebappAgentKind } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, richHtmlBreaks, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { repliedSpeakable, messageShape } from './tts-shapes.ts'
@@ -21941,6 +21941,45 @@ async function webappAgentAct(_userId: string, name: string, action: 'close' | '
   process.stderr.write(`daemon: webapp removed agent ${cfg.name}\n`)
   return null
 }
+// What the "+" sheet's Agent picker offers — the same catalogue the /agent panel's ➕ shows, plus
+// openclaw (owner's ask, 2026-08-18): every hermes profile (`hermes profile list`) and every openclaw
+// agent id (`agents.list` in openclaw.json, plus openclaw's own default `main`), each with its
+// configured model and the names already on it. A source that cannot be listed is reported in `error`
+// rather than hiding the whole sheet — hermes down must not take the openclaw rows with it. No grok:
+// there is no grok agent runtime on this box or in the bridge (grok is a coding-session harness).
+async function webappAgentCatalog(): Promise<WebappAgentCatalog> {
+  const options: WebappAgentCatalog['options'] = []
+  const errs: string[] = []
+  const takenOn = (kind: WebappAgentKind, profile: string) =>
+    [...hermesEndpoints.values()].filter(h => !h.hidden && h.profile === profile && (isOpenclaw(h) ? 'openclaw' : 'hermes') === kind).map(h => h.name)
+  try {
+    const { stdout } = await exec('hermes', ['profile', 'list'], { timeout: 10_000, env: hermesEnv() })
+    for (const p of parseHermesProfileList(stdout)) options.push({ kind: 'hermes', profile: p, model: hermesConfiguredModel(p), taken: takenOn('hermes', p) })
+  } catch (e) { errs.push(`hermes profiles: ${e instanceof Error ? e.message : e}`.slice(0, 200)) }
+  const ocFile = join(OPENCLAW_STATE_DIR, 'openclaw.json')
+  if (existsSync(ocFile)) {
+    try {
+      const d = JSON.parse(readFileSync(ocFile, 'utf8')) as { agents?: { list?: { id?: unknown }[] } }
+      const ids = new Set<string>(['main'])
+      for (const a of d.agents?.list ?? []) if (typeof a?.id === 'string' && a.id) ids.add(a.id)
+      for (const id of ids) options.push({ kind: 'openclaw', profile: id, model: openclawConfiguredModel(id), taken: takenOn('openclaw', id) })
+    } catch (e) { errs.push(`openclaw agents: ${e instanceof Error ? e.message : e}`.slice(0, 200)) }
+  }
+  return { options, ...(errs.length ? { error: errs.join(' · ') } : {}) }
+}
+// Register one from the sheet — the same checks the /agent panel's name reply makes (charset, a
+// clash against EVERY bus endpoint), the same upsert, the same hot reload. Always a chat agent.
+async function webappAgentAdd(_userId: string, rawName: string, kind: WebappAgentKind, profile: string): Promise<string | null> {
+  const name = normalizeEndpointName(rawName.split(/\s+/)[0] ?? '')
+  if (!HERMES_NAME_RE.test(name)) return 'Names are letters, digits, - and _ (max 32, starting with a letter or digit).'
+  const clash = busEndpoints().find(e => normalizeEndpointName(e.name) === name)
+  if (clash) return `"${name}" is already taken by ${clash.kind === 'hermes' ? 'an agent' : 'a session'}.`
+  const r = upsertHermesEndpoint(HERMES_ENDPOINTS_FILE, { name, profile, pane: true, driver: kind })
+  if (!r.ok) return r.error
+  loadHermesEndpoints()
+  process.stderr.write(`daemon: webapp registered agent ${name} (${kind} ${profile})\n`)
+  return null
+}
 // The close half. `remove` on a closed or one-shot agent has nothing to end and is not an error;
 // `close` on one says so.
 async function webappAgentEndConversation(cfg: HermesEndpoint, action: 'close' | 'reopen' | 'remove'): Promise<string | null> {
@@ -22990,7 +23029,7 @@ async function startFilesWebapp(): Promise<void> {
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       readProviderAccounts: webappReadProviderAccounts, providerAccountAction: webappProviderAccountAction,
       readGithub: webappReadGithub, githubAction: webappGithubAction,
-      listSessions: webappListSessions, listAgents: webappListAgents, agentAct: webappAgentAct, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
+      listSessions: webappListSessions, listAgents: webappListAgents, agentAct: webappAgentAct, agentCatalog: webappAgentCatalog, agentAdd: webappAgentAdd, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       sessionTerminal: webappSessionTerminal,
       readUsage: webappReadUsage,

@@ -48,7 +48,7 @@ function readRaw(file: string): { ok: true; raw: RawHermesEndpoints } | { ok: fa
 
 // Add or update ONE key, leaving every other entry — and every unknown field on this entry — exactly
 // as it was. `pane` is written only when true, matching the file's existing style (absent = one-shot).
-export function upsertHermesEndpoint(file: string, entry: { name: string; profile: string; pane: boolean }): RegistryResult {
+export function upsertHermesEndpoint(file: string, entry: { name: string; profile: string; pane: boolean; driver?: 'hermes' | 'openclaw' }): RegistryResult {
   if (!entry.name) return { ok: false, error: 'that name is empty' }
   if (!entry.profile) return { ok: false, error: 'that profile is empty' }
   const read = readRaw(file)
@@ -56,9 +56,12 @@ export function upsertHermesEndpoint(file: string, entry: { name: string; profil
   const existing = read.raw[entry.name] ?? {}
   const next: Record<string, unknown> = { ...existing, profile: entry.profile }
   // Explicitly delete rather than omit: a re-registration that switches an agent to one-shot has to
-  // clear a `pane: true` already on disk, and a spread would keep it.
+  // clear a `pane: true` already on disk, and a spread would keep it. Same for the driver: hermes is
+  // the default and is stored as absence, so a re-registration from openclaw back to hermes clears it.
   if (entry.pane) next.pane = true
   else delete next.pane
+  if (entry.driver === 'openclaw') next.driver = 'openclaw'
+  else if (entry.driver) delete next.driver
   read.raw[entry.name] = next
   try { writeJsonFile(file, read.raw) } catch (e) { return { ok: false, error: `couldn't write hermes-endpoints.json — ${e instanceof Error ? e.message : e}` } }
   return { ok: true }

@@ -54,6 +54,8 @@ export interface WebappDeps {
   // Close / reopen a pane-backed agent. Same auth stance as the ask: it is the lifecycle of a session
   // this user already drives from chat, not a filesystem write.
   agentAct?: (userId: string, name: string, action: AgentAct) => Promise<string | null> | string | null   // error string, or null on success
+  agentCatalog?: () => Promise<AgentCatalog>                          // what the "+" sheet can add: hermes profiles + openclaw agents
+  agentAdd?: (userId: string, name: string, kind: AgentKind, profile: string) => Promise<string | null>   // register one; error string, or null
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
   // stop/compact/send → error string, or null on success, or `{ confirm }` when the action needs the
@@ -175,6 +177,14 @@ export interface AgentRow {
 // `close` ENDS the agent's conversation (every kind — the next task starts fresh) and is what `/clear`
 // in its drill-in does; `remove` closes and unregisters it, which is the list's ✕; `reopen` starts it.
 export type AgentAct = 'close' | 'reopen' | 'remove'
+export type AgentKind = 'hermes' | 'openclaw'
+// One addable agent: a hermes profile or an openclaw agent id, its configured model, and the names
+// already registered on it (sharing is allowed; the row just says so). `error` names a source that
+// could not be listed — the sheet shows the ones that could and says why the rest are missing.
+export interface AgentCatalog {
+  options: { kind: AgentKind; profile: string; model: string | null; taken: string[] }[]
+  error?: string
+}
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
 // the session's own pane by the same /model and /effort injections the chat-side pickers use.
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
@@ -561,6 +571,19 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (r && typeof r === 'object' && 'card' in r) return json({ card: r.card })
     if (r && typeof r === 'object') return json({ confirm: r.confirm })
     return r ? json({ error: r }, 400) : json({ ok: true })
+  }
+  if (url.pathname === '/api/agent/catalog') {
+    if (!deps.agentCatalog) return json({ error: 'unavailable' }, 404)
+    return json(await deps.agentCatalog())
+  }
+  if (url.pathname === '/api/agent/add') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.agentAdd) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { name?: unknown; kind?: unknown; profile?: unknown } | null
+    if (!body || typeof body.name !== 'string' || !body.name.trim() || typeof body.profile !== 'string' || !body.profile.trim() || (body.kind !== 'hermes' && body.kind !== 'openclaw')) return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: agent add name=${body.name} kind=${body.kind} profile=${body.profile} user=${userId}`)
+    const err = await deps.agentAdd(userId, body.name.trim(), body.kind, body.profile.trim())
+    return err ? json({ error: err }, 400) : json({ ok: true, name: body.name.trim() })
   }
   if (url.pathname === '/api/agent/act') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)

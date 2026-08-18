@@ -2015,6 +2015,22 @@
              for the gap between these rows to EQUAL the gap between cards. Rows sharing a card sit 0px
              apart, which would undo that. Three cards keep one gap everywhere, including down to the
              name field, and keep the equality assertion meaningful instead of vacuous. -->
+        <!-- FIRST: what to create — a coding session or an agent (the owner, 2026-08-18). A drill row
+             like the three under it, so the fork wears the sheet's own idiom; the rows below swap on
+             the pick (#spcode / #spagent), and the name field and Create serve both. -->
+        <div class="diallist">
+          <button class="dialrow" data-drill="type">
+            <span class="nm"><span class="n">Create</span><span class="d" id="sptypenow"></span></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div id="spagent" class="diallist" hidden>
+          <button class="dialrow" data-drill="agent">
+            <span class="nm"><span class="n">Agent</span><span class="d" id="spagentnow"></span></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div id="spcode">
         <div class="diallist">
           <button class="dialrow" data-drill="model">
             <span class="nm"><span class="n">Model</span><span class="d" id="spmodelnow"></span></span>
@@ -2037,6 +2053,7 @@
             <span class="nm"><span class="n">Mode</span><span class="d" id="spmodenow"></span></span>
             <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
+        </div>
         </div>
       </div>
       <div class="dialpage" id="spp2">
@@ -4345,8 +4362,8 @@ function dialHeight(host) {
 // The detail page is GENERIC — it was hard-wired to efforts, which is why a second drill row could
 // not exist. It is repainted for whichever row you tapped, so Effort and Mode share one page and the
 // overlay keeps working unchanged with the single row it has.
-const DIAL_LISTS = { model: () => DIAL_MODELS, effort: () => DIAL_EFFORTS, mode: () => DIAL_MODES };
-const DIAL_TITLE = { model: "Model", effort: "Effort", mode: "Mode" };
+const DIAL_LISTS = { model: () => DIAL_MODELS, effort: () => DIAL_EFFORTS, mode: () => DIAL_MODES, type: () => DIAL_TYPES, agent: () => spawnAgentRows() };
+const DIAL_TITLE = { model: "Model", effort: "Effort", mode: "Mode", type: "Create", agent: "Agent" };
 function paintDetail(host, kind) {
   host.detailKind = kind;
   $(host.detailTitle).textContent = DIAL_TITLE[kind];
@@ -4936,7 +4953,21 @@ const DIAL_MODES = [
 // DIAL_MODES, so the two hosts cannot disagree about which options exist.
 // No surface here either — every session created from this sheet gets a topic, by the owner's
 // ruling. `headless` remains an API-only option for the throwaways agents spawn over the bus.
-const spawnSel = { model: "", effort: "", mode: "", account: "" };
+const spawnSel = { model: "", effort: "", mode: "", account: "", type: "session", agent: "" };
+// The sheet's first fork. Same [value, name, description] shape as the dial lists it sits beside.
+const DIAL_TYPES = [
+  ["session", "Coding session", "A Claude Code session in its own topic and folder"],
+  ["agent", "Agent", "A Hermes or openclaw agent you address as @name"],
+];
+// The addable agents, fetched at sheet open (/api/agent/catalog): hermes profiles and openclaw agent
+// ids, each a row keyed `kind:profile`. Empty until the fetch lands — the Agent row says so.
+let spawnCatalog = null;
+const agentKey = o => o.kind + ":" + o.profile;
+function spawnAgentRows() {
+  if (!spawnCatalog) return [];
+  return spawnCatalog.options.map(o => [agentKey(o), o.profile,
+    o.kind + (o.model ? " · " + o.model : "") + (o.taken.length ? " · already @" + o.taken.join(", @") : "")]);
+}
 // What each Default row resolves to, read once per sheet open. A DISPLAY of the setting, never a
 // promise: resolution happens daemon-side when Create is pressed, so a /settings change while the
 // sheet sits open leaves the description stale by seconds and the spawn correct.
@@ -4957,12 +4988,14 @@ const SPAWN_HOST = {
   root: "spawn", p1: "spp1", p2: "spp2", detail: "spdetail", detailTitle: "spdetailt",
   detailKind: "effort",
   // "" (follow) DISPLAYS as the configured default, so the tick and the badge land on one row.
-  cur: k => spawnSel[k] || spawnDefaults[k],
-  def: k => spawnDefaults[k],
+  cur: k => spawnSel[k] || spawnDefaults[k] || "",
+  // No Default badge on the fork or the agent list — neither has a configured default to follow.
+  def: k => spawnDefaults[k] || "",
   rows: k => DIAL_LISTS[k](),
   pick: (k, v) => {
-    // Picking the configured default IS "follow it" — see above.
-    spawnSel[k] = v === spawnDefaults[k] ? "" : v;
+    // Picking the configured default IS "follow it" — see above. The fork and the agent pick are
+    // plain values.
+    spawnSel[k] = k === "type" || k === "agent" ? v : (v === spawnDefaults[k] ? "" : v);
     if ($("spawn").classList.contains("p2")) $("spawn").classList.remove("p2");   // a pick closes the detail page
     paintSpawn();
   },
@@ -4985,6 +5018,15 @@ function paintSpawn() {
   $("spmodelnow").textContent = spawnLabel("model");
   $("speffnow").textContent = spawnLabel("effort");
   $("spmodenow").textContent = spawnLabel("mode");
+  // The fork swaps the rows under it and what the name field means: a session's name is a topic and
+  // a folder, an agent's is the @handle it answers to. Create keeps its label — both create.
+  const agent = spawnSel.type === "agent";
+  $("sptypenow").textContent = dialLabel("type", spawnSel.type);
+  const picked = spawnCatalog && spawnCatalog.options.find(o => agentKey(o) === spawnSel.agent);
+  $("spagentnow").textContent = picked ? picked.profile + " · " + picked.kind : spawnCatalog ? (spawnCatalog.options.length ? "pick one" : "none available") : "loading…";
+  $("spcode").hidden = agent;
+  $("spagent").hidden = !agent;
+  $("spname").placeholder = agent ? "Name (you'll address it as @name)" : "Name (topic + folder under the base dir)";
   bindDialRows(SPAWN_HOST);
   $("spawn").querySelectorAll("[data-drill]").forEach(b => b.onclick = () => {
     paintDetail(SPAWN_HOST, b.dataset.drill);
@@ -5029,6 +5071,15 @@ async function openSpawnSheet(on) {
     spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.spawnMode?.raw || "" };
     paintSpawn();
   } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
+  // The agent catalogue, same stance: after the sheet is up, and a failure costs the agent rows only.
+  // Re-fetched per open — a profile added on the box between two opens should be offered.
+  spawnCatalog = null;
+  try {
+    spawnCatalog = await api("/api/agent/catalog");
+    if (spawnCatalog.error) showErr("Some agents couldn't be listed — " + spawnCatalog.error);
+    if (spawnSel.agent && !spawnCatalog.options.some(o => agentKey(o) === spawnSel.agent)) spawnSel.agent = "";
+    paintSpawn();
+  } catch { spawnCatalog = { options: [] }; paintSpawn(); }
 }
 $("spback").onclick = () => { $("spawn").classList.remove("p2"); dialHeight(SPAWN_HOST); };
 $("spcancel").onclick = () => closeSheet("spawn");
@@ -5036,6 +5087,19 @@ $("spawn").onclick = e => { if (e.target.id === "spawn") closeSheet("spawn"); };
 $("spgo").onclick = async () => {
   const name = $("spname").value.trim();
   if (!name) { showErr("Name required"); return; }
+  if (spawnSel.type === "agent") {
+    const o = spawnCatalog && spawnCatalog.options.find(x => agentKey(x) === spawnSel.agent);
+    if (!o) { showErr("Pick an agent"); return; }
+    $("spgo").disabled = true;
+    const d = await writeOp("/api/agent/add", { name, kind: o.kind, profile: o.profile });
+    $("spgo").disabled = false;
+    if (!d) return;
+    closeSheet("spawn"); $("spname").value = "";
+    showDone("Added @" + d.name);
+    renderSessions();
+    setTimeout(() => openDrill(AGENT_SID + d.name, d.name), 500);
+    return;
+  }
   $("spgo").disabled = true;
   const d = await writeOp("/api/session/spawn", {
     name,
