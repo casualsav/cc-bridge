@@ -139,8 +139,6 @@ const SHIPPED: [string, (src: string) => boolean][] = [
     s => bodyOf(s, 'transcriptForPane').includes('decideFallbackTranscript(')],
   ['the refusal log is keyed — every relay tick re-derives this fallback',
     s => bodyOf(s, 'transcriptForPane').includes('key: `transcript:${pane ?? \'-\'}`')],
-]
-const PENDING: [string, (src: string) => boolean][] = [
   ["the pane's own session record is consulted BEFORE the newest-in-dir guess",
     s => ordered(bodyOf(s, 'transcriptForPane'), 'recordedTranscript(', 'resolveAgentTranscript(')],
   ['a record that names a file records it as the identity, exactly as a stamp does',
@@ -152,6 +150,7 @@ const PENDING: [string, (src: string) => boolean][] = [
   ['the guess refuses a folder holding more than one conversation touched this hour',
     s => bodyOf(s, 'transcriptForPane').includes('fallbackIsCrowded(siblingTranscriptMtimes(fb)')],
 ]
+const PENDING: [string, (src: string) => boolean][] = []
 
 test('daemon.ts resolves a pane by identity before it guesses', () => {
   const src = readFileSync(`${DIR}daemon.ts`, 'utf8')
