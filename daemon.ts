@@ -113,10 +113,10 @@ import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror,
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
 import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
-import { decideFallbackTranscript } from './transcript-owner.ts'
+import { decideFallbackTranscript, recordedTranscript, fallbackIsCrowded } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, CONFIRM_WINDOW_MS } from './ask-parity.ts'
-import { paneFreedom } from './session-freedom.ts'
+import { paneFreedom, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
@@ -1846,6 +1846,16 @@ async function rememberPaneAgentTranscript(pane: string, path: string): Promise<
     catch (error) { process.stderr.write(`daemon: could not persist harness for ${conversation}: ${error instanceof Error ? error.message : String(error)}\n`) }
   }
 }
+// The mtimes of every conversation file sitting beside `file` — the input to the crowded-folder
+// refusal. Only reached on the fallback path (no stamp AND no session record), so the readdir is
+// rare rather than per-tick.
+function siblingTranscriptMtimes(file: string): number[] {
+  const dir = dirname(file)
+  try {
+    return readdirSync(dir).filter(n => n.endsWith('.jsonl'))
+      .map(n => { try { return statSync(join(dir, n)).mtimeMs } catch { return 0 } })
+  } catch { return [] }
+}
 // `requireOwned` is the drill-in's ask: serve a file only when it is this session's OWN — the pane's
 // stamped file, or a fallback whose conversation id matches the session's recorded one. A session
 // that has not spoken yet matches neither and gets nothing, which renders as an empty transcript,
@@ -1864,6 +1874,22 @@ async function transcriptForPane(pane: string | null, cwd: string | null, requir
       paneTranscriptCache.set(pane, { at: Date.now(), path })
     }
     if (path && existsSync(path)) { await rememberPaneAgentTranscript(pane, path); return path }
+  }
+  // STEP 2 — the CLI's OWN session record for this pane (transcript-owner.ts explains why): an
+  // identity, and the only one of the three that is correct across bridge instances. The guards
+  // below this are scoped to one daemon process and one instance's topics.json, while the project
+  // dir is shared — which is how the canary relayed the prod chat lane's replies into the test chat
+  // (2026-08-18). A record whose file does not exist yet is a session that has SAID nothing, and it
+  // refuses rather than falling through: that boot window is exactly where the adoption happened.
+  const registryRows = pane ? readRegistryRows(listAccounts().map(a => a.configDir)) : []
+  if (pane) {
+    const row = rowForPane(pane, registryRows)
+    const rec = recordedTranscript(row && rowIsLive(row) ? row : null, existsSync)
+    if (rec.kind === 'file') { await rememberPaneAgentTranscript(pane, rec.file); return rec.file }
+    if (rec.kind === 'unwritten') {
+      logDecision({ key: `transcript:${pane}`, family: 'relay', what: 'transcript', target: 'owner', pane, decision: 'DROPPED', predicate: rec.why })
+      return null
+    }
   }
   let fallbackAgent: AgentKind = 'claude'
   if (pane) {
@@ -1895,6 +1921,20 @@ async function transcriptForPane(pane: string | null, cwd: string | null, requir
   // permanent identity: the guard could never fire for it again and `tg reopen` would resume the
   // dead conversation.
   const owner = agentSessionId(fb)
+  // The sibling-stamp loop above, seen from the CLI's records instead of this process's cache: a
+  // conversation another LIVE session owns is not this pane's, whichever daemon — or instance —
+  // launched it. This is the guard the shared project dir needs and neither of the two below can be.
+  const liveOwner = owner ? registryRows.find(r => r.sessionId === owner && paneIdOf(r) !== pane && rowIsLive(r)) : undefined
+  if (liveOwner) {
+    logDecision({ key: `transcript:${pane ?? '-'}`, family: 'relay', what: `transcript ${basename(fb)}`, target: 'owner', pane, decision: 'DROPPED', predicate: `live session pid ${liveOwner.pid} (${liveOwner.tmux ?? '-'}) owns this conversation` })
+    return null
+  }
+  // And the guess refuses itself when it cannot be one: more than one conversation touched in this
+  // folder inside the hour is the state in which newest-in-dir is a coin flip.
+  if (fallbackIsCrowded(siblingTranscriptMtimes(fb), Date.now())) {
+    logDecision({ key: `transcript:${pane ?? '-'}`, family: 'relay', what: `transcript ${basename(fb)}`, target: 'owner', pane, decision: 'DROPPED', predicate: `${dirname(fb)} holds more than one conversation touched this hour` })
+    return null
+  }
   const sid = pane ? await sessionForPane(pane, false).catch(() => null) : null
   const claimant = owner ? listTopics().find(t => t.agentSessionId === owner && t.sessionId !== sid) : undefined
   const d = decideFallbackTranscript({

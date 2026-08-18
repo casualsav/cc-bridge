@@ -162,18 +162,18 @@ const SHIPPED: [string, (src: string) => boolean][] = [
     s => bodyOf(s, 'awaitPaneReady').includes('paneReadyForFirstDelivery')],
   ['an occupied box on a pane that has taken no delivery is CLEARED and retried, never buffered',
     s => ordered(bodyOf(s, 'enqueueInboundInject'), "outcome === 'occupied'", 'clearPaneBox(paneId')],
-]
-const PENDING: [string, (src: string) => boolean][] = [
   // The rest of class 1: the two remaining sites that type CONTENT into a pane on the daemon's own
   // initiative. Enumerated by `sendKeys(`/`sendKeysLiteral(`/`paste-buffer` per enclosing function,
   // filtered to arguments that are not key names — everything else that reaches a pane is either
-  // control keys or driven by a human tap or a bus verb.
+  // control keys or driven by a human tap or a bus verb. Landed in 2936a02 (v0.5.159); moved up here
+  // from PENDING, which the landing commit did not do — the control below had been red since.
   ['the cross-engine brief waits for a pane that RUNS typed input, not merely one showing a prompt',
     s => bodyOf(s, 'typeBriefIntoPane').includes('paneReadyForFirstDelivery(')
       && !bodyOf(s, 'typeBriefIntoPane').includes('onNormalPrompt(')],
   ['the unattended refresh will not type /exit onto a busy pane or somebody\'s draft',
     s => ordered(bodyOf(s, 'relaunchFreshSession'), 'paneReadyForFirstDelivery(preCap)', "agentExitKeys('claude')")],
 ]
+const PENDING: [string, (src: string) => boolean][] = []
 
 test('daemon.ts carries the founding-delivery wiring', () => {
   const src = readFileSync(`${DIR}daemon.ts`, 'utf8')

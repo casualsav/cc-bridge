@@ -232,6 +232,22 @@ guidance and touches no pane.
 
 ## Outbound
 
+**A pane's transcript is resolved by IDENTITY — the stamp, then the CLI's own
+`<config dir>/sessions/<pid>.json` record — and the newest-file-in-the-project-dir guess is the last
+resort, refusing rather than picking whenever it cannot be sure** (v0.5.160, 2026-08-18). The trap:
+both guards behind that guess (the live-sibling stamp check and `decideFallbackTranscript`'s
+claimant test) are scoped to ONE daemon process and ONE instance's `topics.json`, while the project
+dir is not — every chat lane on this box lives in `~/.claude-chat/projects/-srv-chat` — so a pane
+adopts a neighbour's live conversation and relays its replies into the wrong chat (canary, 04:41Z;
+prod's own fresh lane onto its dead predecessor, 03:35:45Z; both 2026-08-18). Three things are
+load-bearing: a record whose `.jsonl` does not exist yet means the session has SAID nothing and
+refuses — CC writes the file at the first turn, and that boot window is where the adoption happens;
+NO record still falls through to the guess (same reasoning as `session-freedom.ts`'s `'unknown'` —
+a missing record must not break every pane the day the format moves); and the guess now refuses a
+conversation any LIVE record owns, or a folder holding more than one conversation touched this hour.
+Proof: `bun scripts/transcript-crossadopt-probe.ts` (two real panes in one cwd; `--cache <dir>` must
+FAIL against the deployed build), unit + source-bound control in `transcript-owner.test.ts`.
+
 **Every relay send is gated on `claimRelayDelivery` (`state.ts`)** — file + uuid + chat +
 thread. Four paths deliver a relayed reply and each advances only its OWN cursor, so racing two
 can both see a reply unrelayed (observed 2026-07-30: one reply, two copies in the DM). A fifth
