@@ -78,6 +78,41 @@ test('pasteVerified reports nothing when the box is free (the callback is for re
   expect(seen).toEqual([])
 })
 
+// ---- Readiness is "runs typed input AND the box is empty" --------------------------------------
+//
+// The gap between the two was the canary outage of 2026-08-18: `captureInheritedSettings` reads the
+// focused pane's dials before every spawn, that read types `/model` into the lane the daemon launched
+// one second earlier, the Enter never runs it, and the text stays. A bordered ❯ row is a normal prompt
+// whatever sits in it, so the weaker predicate called that lane ready and every inbound was refused on
+// our own `/model` for 182 seconds.
+const WITH_RESIDUE = readFileSync(`${DIR}fixtures/pane-idle-unsubmitted.txt`, 'utf8').replace('WEDGE-PROBE-MARKER this text was pasted and never submitted', '/model')
+
+test('paneReadyForFirstDelivery is false on a box holding our own /model, where paneRunsTypedInput is true', async () => {
+  const { paneReadyForFirstDelivery } = await import('./prompt.ts')
+  expect(paneRunsTypedInput(WITH_RESIDUE)).toBe(true)      // the reading that shipped, and the bug
+  expect(paneReadyForFirstDelivery(WITH_RESIDUE)).toBe(false)
+  expect(paneReadyForFirstDelivery(READY)).toBe(true)
+  expect(paneReadyForFirstDelivery(BOOTING)).toBe(false)   // still false while booting
+})
+
+test('clearInputBox sends Esc BEFORE C-u — Esc alone leaves the text, measured on the canary', async () => {
+  const keys: string[][] = []
+  execImpl = async (_c, args) => {
+    if (args[0] === 'send-keys') keys.push(args.slice(args.indexOf('-t') + 2))
+    // `sendKeys` refuses to send into a dead pane, so display-message must echo the id back.
+    return { stdout: args[0] === 'capture-pane' ? READY : args[0] === 'display-message' ? '%1' : '' }
+  }
+  const { inputBoxContent } = await import('./prompt.ts')
+  expect(await pane.clearInputBox('%1', inputBoxContent)).toBe(true)
+  expect(keys).toEqual([['Escape'], ['C-u']])
+})
+
+test('clearInputBox reports false when the box still holds text', async () => {
+  execImpl = async (_c, args) => ({ stdout: args[0] === 'capture-pane' ? WITH_RESIDUE : '' })
+  const { inputBoxContent } = await import('./prompt.ts')
+  expect(await pane.clearInputBox('%1', inputBoxContent)).toBe(false)
+})
+
 // ---- The wiring, read out of the shipped daemon ------------------------------------------------
 //
 // Each predicate is a line the next refactor could quietly drop, and each one is what the incident
@@ -97,7 +132,12 @@ const ordered = (body: string, first: string, second: string): boolean => {
   const a = body.indexOf(first), b = body.indexOf(second)
   return a >= 0 && b > a
 }
-const PREDICATES: [string, (src: string) => boolean][] = [
+//
+// Split in two on purpose. SHIPPED entries are already in HEAD, so they can only be checked against
+// the tree. PENDING entries belong to the unit being written now and must FAIL against HEAD — that
+// is what keeps this file an instrument rather than a description. When a unit lands, move its rows
+// up into SHIPPED in the same commit; a PENDING list that passes against HEAD is a broken control.
+const SHIPPED: [string, (src: string) => boolean][] = [
   ['a daemon-spawned pane is marked booting',
     s => bodyOf(s, 'registerSpawnedPane').includes('markPaneBooting(paneId)')],
   ['the inbound chain waits for readiness BEFORE it records a paste in flight',
@@ -115,18 +155,29 @@ const PREDICATES: [string, (src: string) => boolean][] = [
   ['every adopted pane death is logged, not only the focused one',
     s => bodyOf(s, 'discoverPanes').includes("what: 'pane death'")],
 ]
+const PENDING: [string, (src: string) => boolean][] = [
+  ["the dial read refuses a pane that isn't running typed input",
+    s => bodyOf(s, 'readCurrentModel').includes('paneRunsTypedInput(before)')],
+  ['the dial read clears its own /model afterwards — Esc dismisses the picker, it does not empty the box',
+    s => ordered(bodyOf(s, 'readCurrentModel'), "'/model', 'Enter'", "clearOwnTypedLine(paneId, '/model'")],
+  ['the readiness gate uses the box-empty predicate, not the weaker one',
+    s => bodyOf(s, 'awaitPaneReady').includes('paneReadyForFirstDelivery')],
+  ['an occupied box on a pane that has taken no delivery is CLEARED and retried, never buffered',
+    s => ordered(bodyOf(s, 'enqueueInboundInject'), "outcome === 'occupied'", 'clearPaneBox(paneId')],
+]
 
 test('daemon.ts carries the founding-delivery wiring', () => {
   const src = readFileSync(`${DIR}daemon.ts`, 'utf8')
-  for (const [name, p] of PREDICATES) expect(`${name}: ${p(src)}`).toBe(`${name}: true`)
+  for (const [name, p] of [...SHIPPED, ...PENDING]) expect(`${name}: ${p(src)}`).toBe(`${name}: true`)
 })
 
-// THE CONTROL. The same predicates against HEAD's daemon.ts, where they must be FALSE — otherwise
+// THE CONTROL. The pending predicates against HEAD's daemon.ts, where they must be FALSE — otherwise
 // this file is a test that cannot fail. Skipped (not failed) when there is no checkout to read.
-test('the same predicates FAIL against HEAD — the instrument is not blind', () => {
+test('the pending predicates FAIL against HEAD — the instrument is not blind', () => {
   let head = ''
   try { head = execFileSync('git', ['show', 'HEAD:daemon.ts'], { cwd: DIR, encoding: 'utf8', maxBuffer: 1 << 28 }) }
   catch { return }
-  const passing = PREDICATES.filter(([, p]) => p(head)).map(([n]) => n)
+  if (!PENDING.length) return
+  const passing = PENDING.filter(([, p]) => p(head)).map(([n]) => n)
   expect(passing).toEqual([])
 })

@@ -219,6 +219,10 @@ test('CONTROL: every noteDelivered call site in daemon.ts is accounted for', () 
   const expected = [
     // enqueueInboundInject, landed branch — the outcome itself, gated on markableOutcome.
     /^if \(markableOutcome\(outcome\)\) noteDelivered\(params\.meta\)$/,
+    // enqueueInboundInject, clear-and-retry branch — an `occupied` box on a pane that has taken no
+    // delivery holds OUR residue (the dial read's `/model`), so it is cleared and the paste retried;
+    // this stamps the retry's own outcome, and the fall-through below still buffers unstamped.
+    /^if \(markableOutcome\(retry\)\) noteDelivered\(params\.meta\)$/,
     // emitInbound, shim branch — the ONE place an attempt IS the outcome: a socket write to a live
     // shim has no refusal branch, and a dead shim throws rather than buffering.
     /^noteDelivered\(params\.meta\)$/,

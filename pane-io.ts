@@ -447,6 +447,18 @@ export async function waitForPaneReady(
   return 'timeout'
 }
 
+// Empty a pane's input box. Esc FIRST, because the residue this exists for arrives with the CLI's
+// slash palette open over it — and Esc alone does not empty the box, which is why the canary lane
+// stayed wedged for another 90 seconds after one (2026-08-18, measured on the pane). Returns whether
+// the box is empty afterwards; the caller owns the lock and the watcher pause.
+export async function clearInputBox(paneId: string, boxContent: (cap: string) => string | null): Promise<boolean> {
+  await sendKeys(paneId, ['Escape'])
+  await waitForSettle(paneId, 200, 2000).catch(() => {})
+  await sendKeys(paneId, ['C-u'])
+  await waitForSettle(paneId, 200, 3000).catch(() => {})
+  return !boxContent(await capturePane(paneId).catch(() => ''))?.trim()
+}
+
 // The recovery for 'unsubmitted': press Enter again at a box that already holds the block. Never
 // pastes, so it cannot duplicate — which is the entire point of splitting the outcome.
 export async function resubmitVerified(

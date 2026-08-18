@@ -44,7 +44,7 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -92,7 +92,7 @@ import {
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
   submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
   paneDeliveriesInFlight, drainPaneDeliveries,
-  pasteVerified, resubmitVerified, waitForPaneReady, type PasteOutcome,
+  pasteVerified, resubmitVerified, waitForPaneReady, clearInputBox, type PasteOutcome,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -606,6 +606,15 @@ function paneBootAge(paneId: string): number | null {
   const at = paneBooting.get(paneId)
   return at == null ? null : Date.now() - at
 }
+// Empty the input box of a pane whose contents are OURS. Esc first, because the residue this exists
+// for arrives with the CLI's slash palette open over it — and Esc alone does not empty the box, which
+// is why the canary lane stayed wedged for another 90s after one (2026-08-18). Takes the same
+// delivery lock every write to this pane takes; a caller that cannot get its turn gets `false`.
+async function clearPaneBox(paneId: string, watcher: PaneWatcher): Promise<boolean> {
+  return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(
+    () => clearInputBox(paneId, inputBoxContent)), () => false)
+}
+
 // Resolves once the pane runs typed input, or when its boot window is spent — after which the
 // delivery goes in blind, because a launch that never reaches a prompt must not hold inbound
 // forever. A pane nobody marked returns immediately: this gate exists for the founding delivery and
@@ -615,11 +624,11 @@ async function awaitPaneReady(paneId: string, target: string): Promise<'ready' |
   const age = paneBootAge(paneId)
   if (age == null) return 'not-booting'
   if (age >= PANE_BOOT_WINDOW_MS) return 'timeout'
-  const r = await waitForPaneReady(paneId, paneRunsTypedInput, {
+  const r = await waitForPaneReady(paneId, paneReadyForFirstDelivery, {
     attempts: Math.max(1, Math.ceil((PANE_BOOT_WINDOW_MS - age) / PANE_BOOT_POLL_MS)),
     pollMs: PANE_BOOT_POLL_MS,
     onWait: n => { logDecision({ key: `boot:${paneId}`, family: 'human', what: 'founding inbound', target, pane: paneId,
-      decision: 'HELD', predicate: 'pane is still booting (does not run typed input yet)', hint: `waited ${Math.round(n * PANE_BOOT_POLL_MS / 1000)}s` }) },
+      decision: 'HELD', predicate: 'pane is not ready for its first delivery (still booting, or its box is not empty)', hint: `waited ${Math.round(n * PANE_BOOT_POLL_MS / 1000)}s` }) },
   })
   if (r === 'timeout') {
     logDecision({ family: 'human', what: 'founding inbound', target, pane: paneId, decision: 'DROPPED',
@@ -869,12 +878,24 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher | null): Pr
   const run = async () => {
     // Opening /model only works when Claude is idle — mid-turn it just queues the
     // text. Skip the read while busy and fall back to the last known value.
-    if (detectWorking(await capturePane(paneId))) return lastKnownModel
+    //
+    // …and on a pane that is not RUNNING typed input yet, `/model` is not a picker flash, it is
+    // residue. Measured live on the canary, 2026-08-18: a spawn adopts its own new pane as focus, the
+    // next spawn one second later inherits dials off it, this read types `/model` into a 1-second-old
+    // CLI, the Enter never runs it, the palette opens, and the Escape below closes the palette while
+    // LEAVING the text. Every inbound to that lane was then refused on our own `/model` — 182s of
+    // silence, ended only by a hand-sent C-u. `detectWorking` is false on a booting pane, so it never
+    // covered this; `paneRunsTypedInput` is the predicate that answers "will this actually run".
+    const before = await capturePane(paneId)
+    if (!paneRunsTypedInput(before)) return lastKnownModel
     if (!(await sendKeys(paneId, ['/model', 'Enter']))) return lastKnownModel
     await waitForSettle(paneId, 200, 4000)
     const text = await capturePane(paneId)
     await sendKeys(paneId, ['Escape'])
     await waitForSettle(paneId, 200, 3000)
+    // Esc dismisses the picker; it does NOT empty the box. Clear what we typed if it is still
+    // sitting there — this is the whole difference between a flash and a wedge.
+    await clearOwnTypedLine(paneId, '/model', inputBoxContent)
     const parsed = parseCurrentModel(text)
     if (parsed) lastKnownModel = parsed
     return parsed ?? lastKnownModel
@@ -1521,15 +1542,29 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
         // Nothing of ours went in, so the record must go: leaving it would point the recovery at
         // somebody else's draft, which is the one thing this design promises never to submit.
         clearPasteInFlight(paneId)
-        // A pane still in the boot set has never had a delivery of anyone's land in it, so what the
-        // box holds cannot be a draft — it is chrome the readiness gate did not outlast. Say which
-        // of the two this is, and NAME the occupant either way: "already holds typed text" with no
-        // subject is what made the 2026-08-18 silence a forensics job instead of a grep.
+        // A pane still in the boot set has never had a delivery of ANYONE's land in it, so what the
+        // box holds cannot be a stranger's draft — it is the daemon's own residue (the canary's was
+        // `/model`, left by the dial read above). Clear it and deliver: the rule this branch exists
+        // to protect — never submit somebody else's half-written words — is untouched, because on
+        // this pane there is nobody else. Buffering instead is what left his lane silent for 182s.
         const booting = paneBootAge(paneId)
+        if (booting != null) {
+          logDecision({ family: 'human', what: 'inbound', target: String(params.meta.chat_id), pane: paneId, decision: 'DROPPED',
+            predicate: `pane is ${Math.round(booting / 1000)}s old and has taken no delivery — the box holds our own ${JSON.stringify((occupant ?? '').slice(0, 60))}`,
+            hint: 'clearing it and retrying — nobody else has typed into this pane' })
+          const cleared = await clearPaneBox(paneId, watcher)
+          const retry = cleared ? await injectPasteOutcome(paneId, watcher, block, who => { occupant = who }) : 'failed'
+          if (retry === 'landed') {
+            clearPasteInFlight(paneId); paneBooting.delete(paneId)
+            if (markableOutcome(retry)) noteDelivered(params.meta)
+            process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id} (after clearing our own residue)\n`)
+            return
+          }
+        }
+        // NAME the occupant: "already holds typed text" with no subject is what made the 2026-08-18
+        // silence a forensics job instead of a grep.
         logDecision({ family: 'human', what: 'inbound', target: String(params.meta.chat_id), pane: paneId, decision: 'BUFFERED',
-          predicate: booting == null
-            ? `input box already holds typed text ${JSON.stringify((occupant ?? '').slice(0, 60))}`
-            : `pane is ${Math.round(booting / 1000)}s old and has taken no delivery — its box holds boot chrome ${JSON.stringify((occupant ?? '').slice(0, 60))}, not a draft` })
+          predicate: `input box already holds typed text ${JSON.stringify((occupant ?? '').slice(0, 60))}` })
         bufferEvent(params)
         return
       }

@@ -809,6 +809,17 @@ export function paneRunsTypedInput(paneText: string): boolean {
   return onNormalPrompt(paneText) && !detectWorking(paneText) && !hasQueuedMessages(paneText)
 }
 
+// The stronger reading, for the FIRST delivery into a pane the daemon just launched: it runs typed
+// input AND its box is empty. The two are not the same question, and the gap between them is a
+// measured outage — a bordered ❯ row is a normal prompt whatever is sitting in it, so a lane holding
+// the daemon's own unsubmitted `/model` (left by the dial read on a still-booting CLI) read as ready
+// and every inbound was then refused on that text: 182 seconds of silence on the canary, 2026-08-18.
+// Only for a pane with no delivery on record — anywhere else a non-empty box may be a human's draft,
+// which is a reason to refuse, never a reason to wait.
+export function paneReadyForFirstDelivery(paneText: string): boolean {
+  return paneRunsTypedInput(paneText) && !inputBoxContent(paneText)?.trim()
+}
+
 // What is sitting in the session's input box, or null when no bordered input box is on screen (a
 // modal, a picker, a surface we don't parse). Same bordered-❯ shape onNormalPrompt trusts: a prompt
 // row directly between two box-border rows, which a menu cursor never is.
