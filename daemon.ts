@@ -21894,16 +21894,19 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
     if (!h.pane) return row
     // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
     // context — read off the SAME status line the turn detector reads. A pane that is down is a real
-    // and ordinary state here (closed on purpose; the next ask resumes it), never an error.
+    // and ordinary state here (closed on purpose; the next ask opens a fresh conversation, the same
+    // `closeEnds` contract an openclaw agent has), never an error.
     const pane = await hermesPaneOf(h.name)
     const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
     const st = cap ? parseHermesStatus(cap) : null
-    return { ...row, pane: true, live: !!pane, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? null }
+    return { ...row, pane: true, live: !!pane, closeEnds: true, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? null }
   }))
 }
-// Close / reopen one. Close kills the pane and keeps the session id; reopen relaunches on that id, so
-// the conversation continues rather than restarting — the asymmetry IS the feature (see
-// killHermesPane). A one-shot endpoint is refused rather than silently doing nothing: it has no pane.
+// Close / reopen one. Close ENDS the conversation for every kind of agent (owner ruling 2026-08-13 for
+// openclaw, extended to Hermes panes 2026-08-17): a Hermes close kills the pane AND forgets its session
+// id, so the reopen — explicit, or the next task — launches without `--resume` and starts on a fresh
+// context window. Only the ✖ remove path still keeps the id (killHermesPane's asymmetry). A one-shot
+// endpoint is refused rather than silently doing nothing: it has no pane.
 async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen'): Promise<string | null> {
   const cfg = hermesEndpoints.get(normalizeEndpointName(name))
   if (!cfg) return `@${name} isn't a configured agent.`
@@ -21920,7 +21923,12 @@ async function webappAgentAct(_userId: string, name: string, action: 'close' | '
   if (!cfg.pane) return `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
   if (action === 'close') {
     if (!(await hermesPaneOf(cfg.name))) return `@${cfg.name} isn't running.`
-    return (await killHermesPane(cfg.name)) ? null : `Couldn't close @${cfg.name}'s session.`
+    if (!(await killHermesPane(cfg.name))) return `Couldn't close @${cfg.name}'s session.`
+    // Forget the session, never delete it: hermes keeps the old conversation in its own store; the
+    // bridge just stops resuming it. `seen: 0` with it, or the first reply of the new session would be
+    // read against the old one's watermark.
+    setHermesPaneState(cfg.name, { sessionId: null, seen: 0 })
+    return null
   }
   const up = await ensureHermesPane(cfg)
   return 'error' in up ? `Couldn't reopen @${cfg.name} — ${up.error}` : null
@@ -22470,8 +22478,8 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   if (agent) {
     if (action === 'send') return text?.trim() ? webappAgentSend(agent, text.trim()) : 'nothing to send'
     // Closing from inside the drill-in is the same verb the card's ✕ is, so it goes through the same
-    // function — an openclaw agent has no pane and killHermesPane would report it as not running.
-    if (action === 'close') return isOpenclaw(agent) ? await webappAgentAct(userId, agent.name, 'close') : (await killHermesPane(agent.name)) ? null : `@${agent.name} isn't running.`
+    // function — the one place that knows a close ends the conversation for every kind of agent.
+    if (action === 'close') return await webappAgentAct(userId, agent.name, 'close')
     logDecision({ family: 'ctl', what: `webapp ${action}`, target: agent.name, pane: null, decision: 'REFUSED', predicate: `agent endpoint has no ${action} control` })
     return `@${agent.name} is a Hermes agent — ${action} is a Claude Code control and it has none.`
   }

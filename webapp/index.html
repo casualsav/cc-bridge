@@ -3065,10 +3065,9 @@ function renderAgents(el, agents) {
       '<span class="chip">' + esc(a.model || a.kind) + "</span>" +
       (a.pane && a.live ? '<button class="cardx" title="Close session" aria-label="Close session ' + esc(a.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' : "") +
       "</div>" +
-      // "Closed" says what a tap will DO, because closing one here is reversible and the reopen keeps
-      // the conversation — a bare 💀, borrowed from the session card, would read as something lost.
-      // A `closeEnds` agent says the opposite thing for the same reason: what comes back is a new
-      // conversation, and a caption promising the old one back is the bug this line was written for.
+      // "Closed" says what a tap will DO — a bare 💀, borrowed from the session card, would read as
+      // something lost. `closeEnds` picks the true caption: what comes back is a new conversation, and a
+      // caption promising the old one back is the bug this line was written for.
       '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : closed ? (a.closeEnds ? "💤 closed — a new task starts a fresh conversation" : "💤 closed — a new task reopens it where it left off") : "✅ ready") + "</div>" +
       foot;
     // The same drill-in a coding session opens, on a pseudo sid the daemon resolves back to the
@@ -3080,11 +3079,10 @@ function renderAgents(el, agents) {
     el.appendChild(c);
   }
 }
-// Closing an agent is NOT the session ✕'s warning, and the difference is real: this kills a pane and
-// keeps the conversation, so the next task picks it up where it stopped. Asking "this ends the
-// session" for something reversible teaches the dialog to be ignored on the card where it isn't.
-// `closeEnds` is the agent for which that reasoning inverts — its conversation IS what closing ends,
-// so it gets the warning, and promising it back was the owner's 2026-08-13 report.
+// `closeEnds` says whether closing ENDS the conversation (the next task starts a fresh one) or merely
+// parks it; the daemon decides per agent, and since 2026-08-17 every agent kind reports true — a close
+// that promised the old conversation back was the owner's 2026-08-13 report. The parked wording is kept
+// for a daemon that still sends `closeEnds: false`.
 async function closeAgentCard(name, closeEnds) {
   const q = closeEnds
     ? 'Close @' + name + "'s session? This ends the conversation — the next task starts a fresh one."
