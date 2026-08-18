@@ -246,7 +246,9 @@ NO record still falls through to the guess (same reasoning as `session-freedom.t
 a missing record must not break every pane the day the format moves); and the guess now refuses a
 conversation any LIVE record owns, or a folder holding more than one conversation touched this hour.
 Proof: `bun scripts/transcript-crossadopt-probe.ts` (two real panes in one cwd; `--cache <dir>` must
-FAIL against the deployed build), unit + source-bound control in `transcript-owner.test.ts`.
+FAIL against the deployed build), unit + source-bound control in `transcript-owner.test.ts`, and the
+canary founding a lane beside the live prod one — the live-owner guard refusing `1bbc9821` 9ms after
+the spawn, before the new pane had a record of its own (`$(tg shared)/crossadopt-canary-baseline.txt`).
 
 **Every relay send is gated on `claimRelayDelivery` (`state.ts`)** — file + uuid + chat +
 thread. Four paths deliver a relayed reply and each advances only its OWN cursor, so racing two
