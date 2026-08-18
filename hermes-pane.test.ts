@@ -283,3 +283,14 @@ test('an answer already delivered is not re-emitted by the next turn', () => {
   // returns only its own.
   expect(assistantReplySince(next, afterSend.messages.length)).toBe('SECOND ANSWER')
 })
+
+// The closed-card model reader: the profile's `model.default`, and nothing from other `model:` keys
+// nested deeper in the file (mimo's config carries several under delegation blocks).
+test('parseHermesProfileModel reads model.default and ignores nested model keys', async () => {
+  const { parseHermesProfileModel, hermesConfigPath } = await import('./hermes-pane.ts')
+  expect(parseHermesProfileModel('model:\n  default: mimo-v2.5-pro\n  provider: xiaomi\nagent:\n  x:\n    model: other\n')).toBe('mimo-v2.5-pro')
+  expect(parseHermesProfileModel('model:\n  provider: xiaomi\nsub:\n  model:\n    default: nope\n')).toBeNull()
+  expect(parseHermesProfileModel('')).toBeNull()
+  expect(hermesConfigPath('default', '/h')).toBe('/h/.hermes/config.yaml')
+  expect(hermesConfigPath('mimo', '/h')).toBe('/h/.hermes/profiles/mimo/config.yaml')
+})

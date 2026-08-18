@@ -168,17 +168,12 @@ export interface AgentRow {
   // freshly closed one is every render, since its next conversation does not exist yet. So it has to
   // name the tool honestly: a card reading "hermes" over an openclaw agent is what the owner saw.
   name: string; kind: 'hermes' | 'openclaw'; profile: string; busy: boolean
+  // `model` is what the agent is running on, or — closed — what its next conversation opens on.
   pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null
-  // Does closing this one END its conversation? The card's confirm and its closed caption promise
-  // opposite things either way, so the answer travels as a fact ABOUT the agent rather than as the
-  // transport it can be derived from — the client has no business knowing what an openclaw is.
-  closeEnds?: boolean
 }
-// Closing a pane-backed agent kills its pane and KEEPS its session id, which is what makes reopening
-// it the same conversation rather than a fresh one; a `closeEnds` agent has no pane and closing it
-// completes the conversation instead. There is no third action: a one-shot endpoint has nothing to
-// close, and the daemon refuses it rather than pretending.
-export type AgentAct = 'close' | 'reopen'
+// `close` ENDS the agent's conversation (every kind — the next task starts fresh) and is what `/clear`
+// in its drill-in does; `remove` closes and unregisters it, which is the list's ✕; `reopen` starts it.
+export type AgentAct = 'close' | 'reopen' | 'remove'
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
 // the session's own pane by the same /model and /effort injections the chat-side pickers use.
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
@@ -571,7 +566,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.agentAct) return json({ error: 'unavailable' }, 404)
     const body = await req.json().catch(() => null) as { name?: unknown; action?: unknown } | null
     const action = String(body?.action || '') as AgentAct
-    if (!body || typeof body.name !== 'string' || !body.name.trim() || !['close', 'reopen'].includes(action)) return json({ error: 'bad body' }, 400)
+    if (!body || typeof body.name !== 'string' || !body.name.trim() || !['close', 'reopen', 'remove'].includes(action)) return json({ error: 'bad body' }, 400)
     deps.log(`webapp: agent ${action} name=${body.name} user=${userId}`)
     const err = await deps.agentAct(userId, body.name.trim(), action)
     return err ? json({ error: err }, 400) : json({ ok: true })

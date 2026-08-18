@@ -200,11 +200,11 @@ import { startHermes, hermesEnv, renderHermesPrompt, DEFAULT_HERMES_TIMEOUT_S, t
 import {
   hermesChatArgv, hermesAtPrompt, hermesWorking, parseHermesStatus, parseHermesExport,
   assistantReplySince, newSessionId, parseSessionIds, runHermesTurn, hermesStatePath, hermesFeedItems,
-  parseHermesActivity, isHermesSessionCommand, type HermesStoreRow,
+  parseHermesActivity, isHermesSessionCommand, parseHermesProfileModel, hermesConfigPath, type HermesStoreRow,
 } from './hermes-pane.ts'
 import {
   startOpenclaw, openclawSessionsFile, pickOpenclawSession, openclawCtxPct, openclawFeedItems,
-  openclawLife, closeOpenclaw, openOpenclaw, type OpenclawCfg, type OpenclawLives,
+  openclawLife, closeOpenclaw, openOpenclaw, pickOpenclawModel, type OpenclawCfg, type OpenclawLives,
 } from './openclaw-driver.ts'
 import { silentTurnEnvPrefix, probeSilentTurns, describeProbe, isSilentTurnScope, type SilentTurnScope } from './silent-turns.ts'
 import {
@@ -21885,31 +21885,55 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
     }
     // An openclaw agent carries the same two facts, read from its gateway's index instead of a pane:
     // `live` is its lifecycle record rather than a process, because there is no process — closed
-    // means the owner ended that conversation and the next task opens a fresh one. `closeEnds` is
-    // what the card branches on, so the client never has to know which transport this is.
+    // means the owner ended that conversation and the next task opens a fresh one. A closed agent
+    // has no index row to read a model off, so the card names the CONFIGURED one — the model its
+    // next conversation opens on (owner's ask, 2026-08-18: a closed agent is a one-line card with its
+    // model and kind, like a cleared coding session).
     if (isOpenclaw(h)) {
       const s = openclawIndex(h)
-      return { ...row, pane: true, live: !openclawClosed(h.name), closeEnds: true, busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? null }
+      return { ...row, pane: true, live: !openclawClosed(h.name), busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? openclawConfiguredModel(h.profile) }
     }
     if (!h.pane) return row
     // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
     // context — read off the SAME status line the turn detector reads. A pane that is down is a real
-    // and ordinary state here (closed on purpose; the next ask opens a fresh conversation, the same
-    // `closeEnds` contract an openclaw agent has), never an error.
+    // and ordinary state here (closed on purpose; the next ask opens a fresh conversation), never an
+    // error — and its model is the profile's configured default, for the same reason as above.
     const pane = await hermesPaneOf(h.name)
     const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
     const st = cap ? parseHermesStatus(cap) : null
-    return { ...row, pane: true, live: !!pane, closeEnds: true, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? null }
+    return { ...row, pane: true, live: !!pane, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? hermesConfiguredModel(h.profile) }
   }))
 }
-// Close / reopen one. Close ENDS the conversation for every kind of agent (owner ruling 2026-08-13 for
-// openclaw, extended to Hermes panes 2026-08-17): a Hermes close kills the pane AND forgets its session
-// id, so the reopen — explicit, or the next task — launches without `--resume` and starts on a fresh
-// context window. Only the ✖ remove path still keeps the id (killHermesPane's asymmetry). A one-shot
-// endpoint is refused rather than silently doing nothing: it has no pane.
-async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen'): Promise<string | null> {
+// The model a card names when the agent has no live conversation to read one off — see
+// webappListAgents. Both are file reads on the 4s poll; a miss is null and the card shows the kind.
+function hermesConfiguredModel(profile: string): string | null {
+  try { return parseHermesProfileModel(readFileSync(hermesConfigPath(profile, homedir()), 'utf8')) } catch { return null }
+}
+function openclawConfiguredModel(profile: string): string | null {
+  try { return pickOpenclawModel(readFileSync(join(OPENCLAW_STATE_DIR, 'openclaw.json'), 'utf8'), profile) } catch { return null }
+}
+// Close / reopen / remove one. Close ENDS the conversation for every kind of agent (owner ruling
+// 2026-08-13 for openclaw, extended to Hermes panes 2026-08-17): a Hermes close kills the pane AND
+// forgets its session id, so the reopen — explicit, or the next task — launches without `--resume` and
+// starts on a fresh context window; an openclaw close bumps its conversation generation. Remove is a
+// close plus unregistering the endpoint (owner's ask, 2026-08-18: the list's ✕ takes an agent OFF the
+// list, and `/clear` inside it is what ends a conversation and leaves it idle) — the endpoint comes
+// back through the 🤖 panel in Telegram. Only that panel's own ✖ still keeps a Hermes session id
+// (killHermesPane's asymmetry). A one-shot endpoint can be removed but has nothing to close.
+async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen' | 'remove'): Promise<string | null> {
   const cfg = hermesEndpoints.get(normalizeEndpointName(name))
   if (!cfg) return `@${name} isn't a configured agent.`
+  const err = await webappAgentEndConversation(cfg, action)
+  if (err) return err
+  if (action !== 'remove') return null
+  if (!removeHermesEndpoint(HERMES_ENDPOINTS_FILE, cfg.name)) return `Couldn't remove @${cfg.name} from the list.`
+  loadHermesEndpoints()
+  process.stderr.write(`daemon: webapp removed agent ${cfg.name}\n`)
+  return null
+}
+// The close half. `remove` on a closed or one-shot agent has nothing to end and is not an error;
+// `close` on one says so.
+async function webappAgentEndConversation(cfg: HermesEndpoint, action: 'close' | 'reopen' | 'remove'): Promise<string | null> {
   // An openclaw agent has no process to kill, so closing it is a bump of its conversation generation
   // (openclaw-driver.ts): the conversation it was in is complete, and everything after it opens a
   // fresh context window. The owner's ruling, 2026-08-13 — a close that promised to come back "with
@@ -21917,21 +21941,23 @@ async function webappAgentAct(_userId: string, name: string, action: 'close' | '
   // conversation stays in the gateway under its own key; nothing is deleted.
   if (isOpenclaw(cfg)) {
     const lives = openclawLives()
-    writeJsonFile(OPENCLAW_LIVES_FILE, action === 'close' ? closeOpenclaw(lives, cfg.name) : openOpenclaw(lives, cfg.name))
+    if (action === 'remove' && openclawClosed(cfg.name)) return null
+    writeJsonFile(OPENCLAW_LIVES_FILE, action === 'reopen' ? openOpenclaw(lives, cfg.name) : closeOpenclaw(lives, cfg.name))
     return null
   }
-  if (!cfg.pane) return `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
-  if (action === 'close') {
-    if (!(await hermesPaneOf(cfg.name))) return `@${cfg.name} isn't running.`
-    if (!(await killHermesPane(cfg.name))) return `Couldn't close @${cfg.name}'s session.`
-    // Forget the session, never delete it: hermes keeps the old conversation in its own store; the
-    // bridge just stops resuming it. `seen: 0` with it, or the first reply of the new session would be
-    // read against the old one's watermark.
-    setHermesPaneState(cfg.name, { sessionId: null, seen: 0 })
-    return null
+  if (!cfg.pane) return action === 'remove' ? null : `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
+  if (action === 'reopen') {
+    const up = await ensureHermesPane(cfg)
+    return 'error' in up ? `Couldn't reopen @${cfg.name} — ${up.error}` : null
   }
-  const up = await ensureHermesPane(cfg)
-  return 'error' in up ? `Couldn't reopen @${cfg.name} — ${up.error}` : null
+  // A pane that is already down still gets its session forgotten: an id recorded before close meant
+  // "end" (or left by a pane that died on its own) would otherwise resume on the next task.
+  if ((await hermesPaneOf(cfg.name)) && !(await killHermesPane(cfg.name))) return `Couldn't close @${cfg.name}'s session.`
+  // Forget the session, never delete it: hermes keeps the old conversation in its own store; the
+  // bridge just stops resuming it. `seen: 0` with it, or the first reply of the new session would be
+  // read against the old one's watermark.
+  setHermesPaneState(cfg.name, { sessionId: null, seen: 0 })
+  return null
 }
 
 // ── The usage header's two sources ───────────────────────────────────────────
@@ -22192,6 +22218,11 @@ async function webappAgentFeed(cfg: HermesEndpoint): Promise<WebappSessionFeed> 
 // session, where a reply reaches the pane's own surface and nothing is minted. A closed agent is
 // REOPENED by sending to it (on its own session), because that is what the card promises.
 async function webappAgentSend(cfg: HermesEndpoint, text: string): Promise<string | null> {
+  // `/clear` typed into an agent's drill-in ENDS its conversation and leaves it idle — the same verb a
+  // coding session has, and the one that ends a conversation now that the list's ✕ removes the agent
+  // (owner, 2026-08-18). It never reaches the agent as text: hermes' own /clear would open a new
+  // session in a pane that stays up, and openclaw would answer it as a prompt.
+  if (/^\/clear\b/i.test(text.trim())) return await webappAgentAct('', cfg.name, 'close')
   // An openclaw turn is a subprocess of OURS, minutes long, and this call is an HTTP request the mini
   // app is waiting on — so it is DETACHED, exactly as a bus ask is. His message and the reply both
   // land in the gateway's transcript, which the 3-second poll is already reading; there is nothing to

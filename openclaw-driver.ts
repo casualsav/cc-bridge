@@ -261,3 +261,16 @@ export function startOpenclaw(cfg: OpenclawCfg, prompt: string): { started: Prom
 export function runOpenclaw(cfg: OpenclawCfg, prompt: string): Promise<RunResult> {
   return startOpenclaw(cfg, prompt).done
 }
+
+// The model a CLOSED openclaw agent's card names — its next conversation has no index row yet, so it
+// is the configured one: the agent's own entry in `agents.list` when it has a model, else
+// `agents.defaults.model.primary`. PURE over the file's JSON; a miss is null and the card shows the
+// kind chip alone.
+export function pickOpenclawModel(openclawJson: string, profile: string): string | null {
+  let d: any
+  try { d = JSON.parse(openclawJson) } catch { return null }
+  const agent = Array.isArray(d?.agents?.list) ? d.agents.list.find((a: any) => a?.id === profile) : null
+  const own = agent?.model
+  const m = typeof own === 'string' ? own : own?.primary ?? d?.agents?.defaults?.model?.primary
+  return typeof m === 'string' && m ? m : null
+}

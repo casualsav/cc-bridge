@@ -3050,46 +3050,45 @@ function renderAgents(el, agents) {
   for (const a of agents) {
     const c = document.createElement("div");
     c.className = "sess";
-    // The dot reads the same three ways a session's does, and the third only exists for a pane-backed
-    // agent: pulsing while it works, still green at rest, and DEAD when its pane is closed — which is
-    // an ordinary state here, not a failure, because the next task reopens it on its own session.
+    // The dot reads the same ways a session's does: pulsing while it works, still green at rest, and
+    // the bare GREY of an idle cleared session when its conversation is closed — an ordinary state
+    // (the owner, 2026-08-18: grey, not red — nothing is broken, the next task opens a fresh one).
     const closed = a.pane && !a.live;
-    const dot = a.busy ? "on" : closed ? "dead" : "rest";
-    // A one-shot endpoint has no context to show and no session to close: it gets the kind chip it
-    // always had, and no ✕. Everything conditional on this card is conditional on `pane`.
-    const foot = a.pane && a.ctxPct != null
+    const dot = a.busy ? "on" : closed ? "" : "rest";
+    // Chips in the session card's grammar: model, then the KIND where a session shows its mode —
+    // "hermes"/"openclaw" is the fact that matters about an agent (his ask, same date).
+    const chips = [a.model ? esc(a.model) : "", esc(a.kind)].filter(Boolean);
+    // A one-shot endpoint has no context to show and no session to end; a CLOSED agent is ONE line —
+    // title row only, like a cleared coding session — so the task line and the foot are both open-only.
+    const foot = a.pane && a.live && a.ctxPct != null
       ? '<div class="foot"><span>ctx ' + a.ctxPct + "%</span>" + pctBar(a.ctxPct) + "</div>" : "";
     c.innerHTML =
       '<div class="top"><span class="dot ' + dot + '"></span>' +
       '<span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + "</span>" +
-      '<span class="chip">' + esc(a.model || a.kind) + "</span>" +
-      (a.pane && a.live ? '<button class="cardx" title="Close session" aria-label="Close session ' + esc(a.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' : "") +
+      chips.map(x => '<span class="chip">' + x + "</span>").join("") +
+      // The ✕ REMOVES the agent from the list (confirmed, like a session's) — ending a conversation is
+      // `/clear` inside it. Every agent gets one, a one-shot endpoint included: removal is the one verb
+      // that applies to a row that has no session.
+      '<button class="cardx" title="Remove agent" aria-label="Remove agent ' + esc(a.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      // "Closed" says what a tap will DO — a bare 💀, borrowed from the session card, would read as
-      // something lost. `closeEnds` picks the true caption: what comes back is a new conversation, and a
-      // caption promising the old one back is the bug this line was written for.
-      '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : closed ? (a.closeEnds ? "💤 closed — a new task starts a fresh conversation" : "💤 closed — a new task reopens it where it left off") : "✅ ready") + "</div>" +
+      (a.pane && !closed ? '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : "✅ ready") + "</div>" : "") +
       foot;
     // The same drill-in a coding session opens, on a pseudo sid the daemon resolves back to the
     // endpoint (`agent:<name>`). A CLOSED agent opens too, and the composer reopens it on its own
     // session when he sends — refusing the tap would refuse the thing the card promises.
     c.onclick = () => openDrill(AGENT_SID + a.name, a.name);
     const x = c.querySelector(".cardx");
-    if (x) x.onclick = e => { e.stopPropagation(); closeAgentCard(a.name, a.closeEnds); };
+    if (x) x.onclick = e => { e.stopPropagation(); removeAgentCard(a.name); };
     el.appendChild(c);
   }
 }
-// `closeEnds` says whether closing ENDS the conversation (the next task starts a fresh one) or merely
-// parks it; the daemon decides per agent, and since 2026-08-17 every agent kind reports true — a close
-// that promised the old conversation back was the owner's 2026-08-13 report. The parked wording is kept
-// for a daemon that still sends `closeEnds: false`.
-async function closeAgentCard(name, closeEnds) {
-  const q = closeEnds
-    ? 'Close @' + name + "'s session? This ends the conversation — the next task starts a fresh one."
-    : 'Close @' + name + "'s session? It reopens on your next task, with its conversation.";
-  if (!(await askConfirm(q))) return;
-  if (!(await writeOp("/api/agent/act", { name, action: "close" }))) return;
-  showDone("@" + name + " closed");
+// Removing an agent ends its conversation and takes it off the list — the same weight as closing a
+// session, so it asks the same way. It comes back through the 🤖 Agents panel in Telegram; the dialog
+// says so, because "gone from the list" and "gone" read the same on a phone.
+async function removeAgentCard(name) {
+  if (!(await askConfirm('Remove @' + name + '? This ends its conversation and takes it off the list — add it back from the 🤖 Agents panel in Telegram.'))) return;
+  if (!(await writeOp("/api/agent/act", { name, action: "remove" }))) return;
+  showDone("@" + name + " removed");
   renderSessions();
 }
 // Telegram's own confirm where the webview offers it (as the file-trash path already does), the browser's

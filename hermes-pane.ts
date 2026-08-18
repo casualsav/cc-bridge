@@ -277,3 +277,16 @@ export function parseSessionIds(stdout: string): string[] {
   }
   return ids
 }
+
+// The model a CLOSED agent's card names: the profile's configured default (`model.default` in its
+// config.yaml) — the model its next conversation opens on. Read only when there is no live status
+// line, which is the source while a pane is up. A regex over the top-level `model:` block, not a YAML
+// parser: one key, one file we do not own, and a miss degrades to the kind chip alone.
+export function parseHermesProfileModel(yaml: string): string | null {
+  const m = yaml.match(/^model:[ \t]*\n((?:[ \t]+.*\n?)*)/m)
+  const d = m?.[1]?.match(/^[ \t]+default:[ \t]*['"]?([^'"\n#]+)/m)
+  return d?.[1]?.trim() || null
+}
+export function hermesConfigPath(profile: string, home: string): string {
+  return profile === 'default' ? `${home}/.hermes/config.yaml` : `${home}/.hermes/profiles/${profile}/config.yaml`
+}

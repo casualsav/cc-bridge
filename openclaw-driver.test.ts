@@ -230,3 +230,13 @@ test('only the newest `limit` rows travel', () => {
   const items = openclawFeedItems(many, { limit: 3 })
   expect(items.map(i => i.text)).toEqual(['m7', 'm8', 'm9'])
 })
+
+test('pickOpenclawModel: the agent entry wins, the defaults primary is the fallback, a miss is null', async () => {
+  const { pickOpenclawModel } = await import('./openclaw-driver.ts')
+  const cfg = JSON.stringify({ agents: { defaults: { model: { primary: 'anthropic/claude-opus-4-8' } }, list: [{ id: 'main' }, { id: 'ops', model: 'x/y' }, { id: 'p', model: { primary: 'q/r' } }] } })
+  expect(pickOpenclawModel(cfg, 'main')).toBe('anthropic/claude-opus-4-8')
+  expect(pickOpenclawModel(cfg, 'ops')).toBe('x/y')
+  expect(pickOpenclawModel(cfg, 'p')).toBe('q/r')
+  expect(pickOpenclawModel('{}', 'main')).toBeNull()
+  expect(pickOpenclawModel('not json', 'main')).toBeNull()
+})
