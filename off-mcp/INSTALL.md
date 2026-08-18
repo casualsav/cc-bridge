@@ -264,6 +264,17 @@ use pairing instead if they didn't give an ID):
 If Q6 was **no file browser**, add `"fileBrowser": false` to this object — that's what omits the
 Files tab + file API from the Mini App (flippable later from /settings → 🗂 File browser).
 
+**If that file already exists, STOP and read it before writing a byte.** This is an install step
+pointed at a live box: run it against a bridge that is already configured and you overwrite a real
+allowlist with a placeholder. On 2026-07-30 that happened to this repo's own production instance —
+and it cost more than the allowlist, because before `prefs.json` exists every PREFERENCE lives in
+this same file (`readPrefs` falls back to `access.json` only while `prefs.json` is empty), so the
+write took `autoUpdate` with it and the CLI stopped auto-installing for 19 days. So: if
+`access.json` exists and is not a placeholder, **do not write it** — copy it to
+`access.json.bak-<date>`, tell the user what is already there, and change only what they asked for,
+keeping every key you did not come to change. A repair afterwards restores what you can name; the
+preferences you cannot see are gone.
+
 **Only if the user explicitly asked for a second Claude account during the interview** — most
 installs are single-account and need **no** `accounts.json`. Do **not** write a placeholder account:
 skip this entire step unless they named one. If they did, write
