@@ -218,7 +218,7 @@ import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './ha
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
-import { parseLaunch, parseSpawnAddress, parseLaunchArgs, type ParsedLaunch } from './launch-command.ts'
+import { parseLaunch, parseSpawnAddress, parseLaunchArgs, parseLaunchCommand, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { createOwnerReplyRoutes, ownerReplyMarker, type OwnerReplyRoute } from './owner-reply.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
@@ -17847,11 +17847,14 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
   {
     verb: 'launch',
     run: async (ctx, chatId, laneSid, text, msgId, files) => {
-      // Two spellings, one row and one handler: `@launch|@spawn <name> …` and the target-first
-      // `@<name> /spawn …`. Everything downstream sees the same ParsedLaunch, so neither spelling can
-      // reach a branch the other doesn't.
+      // Three spellings, one row and one handler: `@launch|@spawn <name> …`, the target-first
+      // `@<name> /spawn …`, and `/launch|/spawn …` — which reaches here only as a photo's CAPTION,
+      // since a typed one is consumed by `bot.command` long before handleInbound. Everything
+      // downstream sees the same ParsedLaunch, so no spelling can reach a branch another doesn't —
+      // and the caption's file rides along in `files`, exactly as it already does for `@launch`.
       const parsed = parseLaunch(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
         ?? parseSpawnAddress(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
+        ?? parseLaunchCommand(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
       if (!parsed) return false
       await runOwnerLaunch(ctx, chatId, laneSid, parsed, msgId, files)
       return true
@@ -18168,8 +18171,14 @@ async function deliverOwnerDirectReply(paneId: string, file: string, r: { uuid: 
 // grammar. The one loud failure is a name the bus KNOWS and that is no longer running: he meant a
 // session, so it is named rather than swallowed — the same two gestures routeOwnerReply offers.
 async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number, files?: string[]): Promise<boolean> {
-  const parsed = parseAddress(text)
+  const parsed = parseAddress(text, !!files?.length)
   if (!parsed) return false
+  // A caption of just `@weather` names the target and says nothing else, so the block carries the
+  // word a caption-LESS send to that session would have carried (the media handlers' own fallbacks)
+  // rather than an empty body: what he sent is a picture, and that is what the session should read.
+  const imgs = (files ?? []).filter(p => INBOX_IMAGE_RE.test(p))
+  const message = parsed.message
+    || (imgs.length > 1 ? `(${imgs.length} photos)` : imgs.length ? '(photo)' : '(file)')
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
   await reapDeadEndpoints(parsed.name)
   const endpoints = busEndpoints()
@@ -18183,7 +18192,7 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
     // Known but down, or never known at all. Only the first is his — the second is prose.
     const known = endpoints.some(e => normalizeEndpointName(e.name) === want || e.id.toLowerCase() === want)
     if (!known) return false
-    const fresh = `"@launch ${want} ${parsed.message.slice(0, 40)}${parsed.message.length > 40 ? '…' : ''}"`
+    const fresh = `"@launch ${want} ${message.slice(0, 40)}${message.length > 40 ? '…' : ''}"`
     await reply(`@${want} isn't running — "@reopen ${want}" brings it back with its conversation, or ${fresh} starts a fresh one. Nothing was delivered.`)
     return true
   }
@@ -18194,10 +18203,10 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
   // exchange in the third person. A Hermes endpoint has no pane to type into and no transcript to
   // narrate anything: one `hermes -z` run IS the answer, so the ask row is the only shape that can
   // carry it, and `ownerDirect` is what routes it to his DM instead of into his lane.
-  if (target.kind === 'hermes') { await ownerHermesAsk(reply, laneSid, target.id, parsed.message, msgId, files); return true }
+  if (target.kind === 'hermes') { await ownerHermesAsk(reply, laneSid, target.id, message, msgId, files); return true }
   if (target.id === laneSid) return false   // his own lane by name: ordinary conversation, not a bus hop
   // No react here — the confirmation belongs to DELIVERY, not to parsing (tryDeliverAsk's ok branch).
-  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message, msgId, files)
+  await ownerDirectDispatch(reply, laneSid, target.id, message, msgId, files)
   return true
 }
 
@@ -18496,7 +18505,9 @@ async function handleInbound(
       const repliedToSid = repliedTo != null ? msgRoutes.sidFor(chat_id, repliedTo) : undefined
       // forceReplyArmed is false here by construction: an armed prompt was already handled (or stood
       // aside for a verb) in bot.on('message:text'), which runs first.
-      const plan = planOwnerRoute({ text: content, forceReplyArmed: false, repliedToSid, laneSid: lane.sessionId })
+      // `hasAttachment` is what makes a bare `@weather` caption an address: with a photo riding along
+      // there IS a message, and without one there is nothing to deliver (chat-verbs.ts).
+      const plan = planOwnerRoute({ text: content, forceReplyArmed: false, repliedToSid, laneSid: lane.sessionId, hasAttachment: inboundFiles.length > 0 })
       if (plan === 'verb') {
         for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, chat_id, lane.sessionId, content, msgId, inboundFiles)) return
       }

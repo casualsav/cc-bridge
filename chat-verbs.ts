@@ -28,6 +28,19 @@ export const LAUNCH_RE = /^\s*@(?:launch|spawn)(?=\s|$)/i
 // malformed input rather than a session named "kill".
 export const LAUNCH_SLASH_RE = /^\s*@([A-Za-z0-9][\w.-]*)\s+\/spawn(?=\s|$)/i
 
+// `/launch|/spawn …` — the SAME verb a THIRD time, and the only spelling that arrives here as a
+// CAPTION. Telegram puts a caption's command entity in `caption_entities`, and grammy's command
+// router filters on `entities` (`Context.has.command`), so `bot.command('spawn')` cannot fire for a
+// captioned photo at all: the update falls past every command handler to `bot.on('message:photo')`
+// and into handleInbound, which is this table. The owner watched it happen — "it ends up in your
+// context window instead of spawning the session" (2026-08-19); the dispatcher proof is
+// `scripts/caption-inbound-dispatch.ts`.
+//
+// Unreachable for a TEXT message, deliberately: there `bot.command` consumes the update long before
+// handleInbound runs, and that is the path this must not disturb. Not a row of its own — same reason
+// LAUNCH_SLASH_RE isn't one: a second row is a second handler to keep in step.
+export const LAUNCH_CMD_RE = /^\s*\/(?:launch|spawn)(?:@\w+)?(?=\s|$)/i
+
 export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'launch', re: LAUNCH_RE },
   { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
@@ -66,7 +79,7 @@ export function parseNameVerb(raw: string, verb: 'kill' | 'reopen' | 'watch'): P
 // `@launch` in the middle of a sentence is prose about the feature, not a use of it.
 export function chatVerbIn(text: string): string | null {
   for (const { verb, re } of CHAT_VERBS) if (re.test(text)) return verb
-  return LAUNCH_SLASH_RE.test(text) ? 'launch' : null
+  return LAUNCH_SLASH_RE.test(text) || LAUNCH_CMD_RE.test(text) ? 'launch' : null
 }
 
 // ---- The two voices --------------------------------------------------------------------------
@@ -102,12 +115,21 @@ export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' 
 // on another session's CLI (handled ahead of this, in bot.on('message:text')) — and `/spawn`, the one
 // member of that shape aimed at a name that does NOT exist yet, is a verb by the rule above and never
 // reaches here either. Two grammars for one gesture is how the weaker one becomes a silent misfire.
+//
+// `hasAttachment` is the caption case, and it changes exactly one thing: a bare `@name` with nothing
+// after it becomes an address. On a text message that form is prose — there is nothing to deliver, so
+// routing it would send an empty message to a session on the strength of one word — but a photo
+// captioned `@weather` IS a complete message, and the owner sent one and watched it land in the chat
+// lane (2026-08-19). Everything else about the grammar is unchanged, attachment or not.
 export type ParsedAddress = { name: string; message: string }
-export function parseAddress(raw: string): ParsedAddress | null {
+export function parseAddress(raw: string, hasAttachment = false): ParsedAddress | null {
   if (chatVerbIn(raw)) return null
-  const m = /^\s*@([A-Za-z0-9][\w.-]*)\s+(\S[\s\S]*)$/.exec(raw)
-  if (!m || m[2]!.startsWith('/')) return null
-  return { name: m[1]!, message: m[2]!.trim() }
+  const m = /^\s*@([A-Za-z0-9][\w.-]*)(\s[\s\S]*)?$/.exec(raw)
+  if (!m) return null
+  const message = (m[2] ?? '').trim()
+  if (!message) return hasAttachment ? { name: m[1]!, message: '' } : null
+  if (message.startsWith('/')) return null
+  return { name: m[1]!, message }
 }
 
 export type OwnerRoute = 'verb' | 'force-reply' | 'address' | 'session-reply' | 'lane'
@@ -130,10 +152,11 @@ export type OwnerRoute = 'verb' | 'force-reply' | 'address' | 'session-reply' | 
 // own message is ordinary conversation, and routing it would double-deliver his own chat back to it.
 export function planOwnerRoute(i: {
   text: string; forceReplyArmed: boolean; repliedToSid?: string | null; laneSid?: string | null
+  hasAttachment?: boolean
 }): OwnerRoute {
   if (chatVerbIn(i.text)) return 'verb'
   if (i.forceReplyArmed) return 'force-reply'
-  if (parseAddress(i.text)) return 'address'
+  if (parseAddress(i.text, i.hasAttachment)) return 'address'
   if (i.repliedToSid && i.repliedToSid !== i.laneSid) return 'session-reply'
   return 'lane'
 }

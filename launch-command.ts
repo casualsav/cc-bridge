@@ -7,7 +7,7 @@
 // no dials, so `name` is the first word of the message — which means the dial token can only be
 // consumed when the WHOLE token parses as dials. Everything else is a message word.
 
-import { LAUNCH_RE, LAUNCH_SLASH_RE } from './chat-verbs.ts'
+import { LAUNCH_RE, LAUNCH_SLASH_RE, LAUNCH_CMD_RE } from './chat-verbs.ts'
 
 export type LaunchDials = { model: string | null; effort: string | null }
 export type ParsedLaunch =
@@ -135,4 +135,15 @@ export function parseSpawnAddress(raw: string, models: readonly string[], effort
   const head = LAUNCH_SLASH_RE.exec(raw)
   if (!head) return null
   return parseDialsAndMessage(head[1]!, eat(raw.slice(head[0].length)), models, efforts, SPAWN_SLASH_USAGE)
+}
+
+// `/launch <name> …` / `/spawn …` as WHOLE TEXT rather than as grammy's stripped `ctx.match` — which
+// is how the launcher arrives when it is a photo's caption, because no command handler can fire for
+// one (see LAUNCH_CMD_RE). The verb word is cut here and the rest goes through `parseLaunchArgs`, so
+// a captioned `/spawn` and a typed `/spawn` produce the identical ParsedLaunch, usage string
+// included: one parse means no branch is reachable by one spelling and missed by the other.
+export function parseLaunchCommand(raw: string, models: readonly string[], efforts: readonly string[]): ParsedLaunch | null {
+  const head = LAUNCH_CMD_RE.exec(raw)
+  if (!head) return null
+  return parseLaunchArgs(raw.slice(head[0].length), models, efforts, /spawn/i.test(head[0]) ? 'spawn' : 'launch')
 }

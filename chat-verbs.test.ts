@@ -190,3 +190,73 @@ test('no chat-voice gesture carries markup a plain message cannot render', () =>
   expect(undoGesture('cli', 'web')).toContain('`')
   expect(spawnGesture('cli')).toContain('`')
 })
+
+// ---- a photo's CAPTION is a message like any other (owner, 2026-08-19) --------------------------
+//
+// He opened @weather, sent a photo captioned exactly "@weather", and it landed in the chat lane:
+// "I tagged weather on the caption but that didn't work to send it into that session, it came into
+// your session." Then the wider half: "It does the same when I add the caption for /spawn, it ends
+// up in your context window instead of spawning the session."
+//
+// Two independent causes, one symptom. The address grammar required a MESSAGE after the name — true
+// of a text message, where a bare "@weather" has nothing to deliver, and false the moment a photo
+// rides along: the picture IS the message. And the slash spelling of the launcher never reached the
+// caption path at all, because Telegram puts a caption's command entity in `caption_entities` while
+// grammy's command router filters on `entities` (scripts/caption-inbound-dispatch.ts proves that at
+// the dispatcher).
+
+test('a bare @name IS an address when something is attached — the picture is the message', () => {
+  expect(parseAddress('@weather', true)).toEqual({ name: 'weather', message: '' })
+  expect(parseAddress('  @cc-bridge  ', true)).toEqual({ name: 'cc-bridge', message: '' })
+  // A caption that says something keeps saying it — the attachment changes nothing here.
+  expect(parseAddress('@weather look at this', true)).toEqual({ name: 'weather', message: 'look at this' })
+})
+
+// THE CONTROL THAT MUST NOT MOVE, and it is the pinned line above ("a bare name with nothing to
+// say"): with no attachment a bare @name is still prose. There is nothing to deliver, and routing it
+// would send an empty message to a session on the strength of one word.
+test('THE CONTROL: a bare @name with nothing attached is still ordinary conversation', () => {
+  expect(parseAddress('@weather')).toBeNull()
+  expect(parseAddress('@weather', false)).toBeNull()
+  // The verbs still own their spellings, attachment or not.
+  expect(parseAddress('@spawn web do the thing', true)).toBeNull()
+  expect(parseAddress('@general /compact', true)).toBeNull()
+  expect(parseAddress('what did @general say?', true)).toBeNull()
+})
+
+test('the plan follows the parse: an attached bare @name routes, an unattached one is the lane', () => {
+  expect(planOwnerRoute({ text: '@weather', forceReplyArmed: false, laneSid: 'sid-lane', hasAttachment: true })).toBe('address')
+  expect(planOwnerRoute({ text: '@weather', forceReplyArmed: false, laneSid: 'sid-lane' })).toBe('lane')
+  // Precedence is untouched: an armed prompt still owns a reply aimed at it, attachment or not.
+  expect(planOwnerRoute({ text: '@weather', forceReplyArmed: true, laneSid: 'sid-lane', hasAttachment: true })).toBe('force-reply')
+})
+
+// The launcher's slash spelling, which only ever arrives here as a caption: for a text message
+// `bot.command('spawn')` consumes it long before handleInbound runs. Same verb, same handler, third
+// spelling — the rule this file already applies to `@spawn` and `@name /spawn`.
+test('/spawn and /launch in a caption are the launch verb, reported under its canonical name', () => {
+  expect(chatVerbIn('/spawn weather look at this')).toBe('launch')
+  expect(chatVerbIn('/launch weather look at this')).toBe('launch')
+  expect(chatVerbIn('  /SPAWN weather go')).toBe('launch')
+  expect(chatVerbIn('/spawn@salahsclaudebot weather go')).toBe('launch')
+})
+
+test('THE CONTROLS: a slash that is not the launcher stays out of the verb table', () => {
+  expect(chatVerbIn('/spawning a worker')).toBeNull()      // whole word only
+  expect(chatVerbIn('/compact')).toBeNull()                // an ordinary command, not this verb
+  expect(chatVerbIn('/home/ubuntu/shot.png is the file')).toBeNull()   // a path-shaped caption is prose
+  expect(chatVerbIn('look at /spawn in the docs')).toBeNull()          // start of the message only
+})
+
+// The seam, read out of the shipped file: these parsers are pure and the caller is 1.5MB away, so a
+// green suite here proves nothing about what a captioned photo actually does. `CAPTION_SRC` runs the
+// same check against a deployed copy — watched failing against the pre-fix build.
+test('handleInbound feeds the routing what a caption carries, and the verb row parses the slash form', () => {
+  const daemon = readFileSync(join(import.meta.dir, process.env.CAPTION_SRC ?? 'daemon.ts'), 'utf8')
+  // The attachment fact comes from the files that rode in with THIS message, not from the message class.
+  expect(daemon).toContain('hasAttachment: inboundFiles.length > 0')
+  expect(daemon).toContain('parseAddress(text, !!files?.length)')
+  // Third spelling, same row, same handler — and it is reached from the caption path only.
+  const table = daemon.slice(daemon.indexOf('const OWNER_CHAT_VERBS'), daemon.indexOf('// ---- Reply-to-route'))
+  expect(table).toContain('parseLaunchCommand(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)')
+})

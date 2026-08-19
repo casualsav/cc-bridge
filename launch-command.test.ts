@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseLaunch, parseSpawnAddress, parseLaunchArgs, LAUNCH_USAGE, SPAWN_SLASH_USAGE } from './launch-command.ts'
+import { parseLaunch, parseSpawnAddress, parseLaunchArgs, parseLaunchCommand, LAUNCH_USAGE, SPAWN_SLASH_USAGE } from './launch-command.ts'
 
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -152,4 +152,38 @@ test('empty message and a dash name refuse before anything is created', () => {
   expect(p('@launch')).toEqual({ kind: 'error', error: LAUNCH_USAGE })
   expect(p('@launch --help do the thing')).toMatchObject({ kind: 'error' })
   expect((p('@launch --help x') as { error: string }).error).toContain('starts with a dash')
+})
+
+// ---- the slash spelling as a photo CAPTION (owner, 2026-08-19) ----------------------------------
+//
+// "It does the same when I add the caption for /spawn, it ends up in your context window instead of
+// spawning the session." A caption's command entity is `caption_entities`, and grammy's command
+// router filters on `entities` — so `bot.command('spawn')` cannot fire for a captioned photo and the
+// message falls through to handleInbound as ordinary text. The verb table is where it lands, so the
+// verb table is where the slash spelling has to be parseable: same verb, same handler, third
+// spelling, exactly as `@spawn` and `@name /spawn` already are.
+test('/spawn and /launch parse as the launcher when they arrive as a caption', () => {
+  const c = (s: string) => parseLaunchCommand(s, MODELS, EFFORTS)
+  expect(c('/spawn weather look at this chart')).toEqual(
+    { kind: 'launch', name: 'weather', model: null, effort: null, message: 'look at this chart' })
+  expect(c('/launch cc-bridge opus/high hello')).toEqual(
+    { kind: 'launch', name: 'cc-bridge', model: 'opus', effort: 'high', message: 'hello' })
+  // Telegram appends @botname when the command menu is used in a group-capable chat.
+  expect(c('/spawn@salahsclaudebot weather go')).toEqual(
+    { kind: 'launch', name: 'weather', model: null, effort: null, message: 'go' })
+  // Byte-identical to every other spelling of the verb — one parse, so no branch can be reached by
+  // one spelling and missed by another.
+  expect(c('/spawn cc-bridge opus/high hello')).toEqual(parseLaunch('@launch cc-bridge opus/high hello', MODELS, EFFORTS))
+})
+
+test('THE CONTROLS: what a slash caption must NOT turn into a launch', () => {
+  const c = (s: string) => parseLaunchCommand(s, MODELS, EFFORTS)
+  expect(c('/spawning a worker')).toBeNull()
+  expect(c('/compact')).toBeNull()
+  expect(c('/home/ubuntu/shot.png is the file')).toBeNull()
+  expect(c('look at /spawn in the docs')).toBeNull()
+  // Bare, with no name: NULL, not an error — the caption falls through to the lane with its photo,
+  // which is today's behaviour for every caption this table does not claim.
+  expect(c('/spawn')).toBeNull()
+  expect(c('/spawn   ')).toBeNull()
 })
