@@ -742,7 +742,7 @@ export function modelSwitchEvidence(file: string): ModelSwitch {
 // `prompt` (agent rows only) = the prompt the subagent was handed, resolved from its Task tool_use
 // via `tuid` (the notification's <tool-use-id>). `tuid` is plumbing: recentConversation strips it
 // after the resolve, so it never reaches a client.
-export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; prompt?: string; tuid?: string; clipped?: true }
+export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; prompt?: string; tuid?: string; clipped?: true; bus?: true }
 
 // ---- Machine payloads that arrive USER-SIDE -----------------------------------------------------
 // Several things the harness writes are user-type entries carrying no user words at all. They pass
@@ -843,15 +843,35 @@ function commandItem(raw: string, ts: number, uuid?: string): ConversationItem |
 // The bridge's own envelope around an inbound message. Tolerates a few stray chars before `<tg`
 // (the survey-dismiss "0" era left such entries). Shared by the two paths that can carry one — the
 // delivered user entry and the queued one — so the envelope is parsed in one place.
-function unwrapTg(raw: string): { text: string; img?: string; imgs?: string[]; att?: string } {
-  const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
-  if (!m) return { text: raw }
+//
+// ONE DELIVERY CAN CARRY SEVERAL ENVELOPES. A bus message usually arrives behind a catch-up digest
+// block, and the single match here used to run `([\s\S]*)</tg>` GREEDILY — from the first `<tg` to
+// the LAST `</tg>` — so the digest's closing tag and the message's opening tag survived inside the
+// text and the feed printed them as prose. The owner photographed it (2026-08-19): a bubble reading
+// `</tg>` and `<tg @chat ack=784>` in the middle of a sentence. Each envelope is matched on its own
+// now, and the DIGEST IS DROPPED — catch-up is context the session was handed, not a message anyone
+// sent it, and it is the session's own scrollback restated.
+//
+// `bus` says an AGENT composed it, by the convention the envelope itself states (off-mcp/CLAUDE.md):
+// a human's message carries `from=` (dm/group/app/owner), and an agent-composed ask/ack/re/btw
+// carries only `@name`. The mini app renders those as the markdown they are written in, the same
+// call cc25c02 made for a subagent's report; his own words stay verbatim.
+const TG_ENVELOPE = /<tg([^>]*)>([\s\S]*?)<\/tg>/g
+function unwrapTg(raw: string): { text: string; img?: string; imgs?: string[]; att?: string; bus?: true } {
+  // The envelope has to OPEN the message (bar a few stray chars — the survey-dismiss "0" era left
+  // such entries), exactly as before: a `<tg …>` quoted inside somebody's prose is prose.
+  if (!/^[\s\S]{0,3}?<tg[^>]*>/.test(raw)) return { text: raw }
+  const blocks = [...raw.matchAll(TG_ENVELOPE)]
+  if (!blocks.length) return { text: raw }   // an unclosed envelope: unchanged, as it always was
+  const carried = blocks.filter(b => !/^\s*bus-digest\b/.test(b[1]!))
+  const m = carried[carried.length - 1] ?? blocks[blocks.length - 1]!
   // ALL of them: an album repeats `img=`, and a reader that takes the first shows one picture for a
   // message that carried four. `img` stays as the first so every existing consumer is untouched.
-  const imgs = [...m[1].matchAll(/img="([^"]+)"/g)].map(x => x[1]!)
-  const att = /att="([^"]+)"/.exec(m[1])?.[1]
-  return { text: m[2].trim(), ...(imgs.length ? { img: imgs[0] } : {}),
-    ...(imgs.length > 1 ? { imgs } : {}), ...(att ? { att } : {}) }
+  const imgs = [...m[1]!.matchAll(/img="([^"]+)"/g)].map(x => x[1]!)
+  const att = /att="([^"]+)"/.exec(m[1]!)?.[1]
+  const bus = /(^|\s)@[\w.-]+/.test(m[1]!) && !/\bfrom=/.test(m[1]!)
+  return { text: m[2]!.trim(), ...(imgs.length ? { img: imgs[0] } : {}),
+    ...(imgs.length > 1 ? { imgs } : {}), ...(att ? { att } : {}), ...(bus ? { bus: true as const } : {}) }
 }
 
 // Every machine payload that can arrive USER-SIDE, classified in ONE place — because it arrives on

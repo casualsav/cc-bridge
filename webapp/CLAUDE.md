@@ -179,6 +179,16 @@ give it.
   Shared by `bubble()` and the auto-fetch like `lastReplyIndex`, and the auto-fetch covers a
   payload-clipped exempt user row for the same no-tap-left reason. Agent cards are still never
   exempt. `userfold.mjs` measures it against a pinned pre-change control.
+- **A BUS message is a `user` row that renders like a REPORT, and his own words never do.** Which
+  renderer each row gets is `bodyHtml()`, one expression: agent → `mdReport`, assistant → `md`,
+  `i.bus` → `mdReport`, everything else → `esc`. `bus` is set server-side off the envelope's own
+  attributes (an agent-composed block carries `@name` and no `from=`), so the set this could damage —
+  what HE typed — is untouched and still shows the asterisks he wrote. Collapsing the four branches
+  back to three is the regression: he photographed a chat-lane ack rendering as literal `**bold**`
+  next to its raw `<tg …>` wire envelope (2026-08-19; the envelope half is `unwrapTg`'s, pinned in
+  `transcript.test.ts`). Proof: `webapp-bus-bubble.test.ts` (the string, with the assistant and
+  own-message controls cc25c02's ruling requires) and `scripts/webapp-measure/busbubble.mjs` (the
+  paint; §2 fails on the pre-change page, §1/§3 pass on both).
 - **A hand-opened fold is keyed by `msgKey(i)` — `uuid`, or `role:ts` when the row has none.** The
   tap sets a class and the 3s poll rebuilds `innerHTML` from the payload, so anything the open state
   is keyed by must exist for EVERY bubble: rows without a uuid (an optimistic bubble, a transcript

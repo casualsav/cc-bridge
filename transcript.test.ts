@@ -838,3 +838,68 @@ test('projectDirName maps every non-alphanumeric to "-", so a dotted cwd resolve
   writeFileSync(file, JSON.stringify({ type: 'user', cwd: '/home/ubuntu/.claude/work', message: { content: 'hi' } }) + '\n')
   expect(resolveTranscript('/home/ubuntu/.claude/work', [root])).toBe(file)
 })
+
+// ---- the bus envelope in the feed (the owner's screenshot, 2026-08-19) --------------------------
+//
+// He photographed a mini-app bubble reading, mid-sentence, `</tg>` and `<tg @chat ack=784>` — an
+// ack from the chat lane rendered with the plumbing showing and its markdown unrendered. The cause
+// was one greedy match: a bus delivery normally carries a catch-up DIGEST block in front of the
+// message, and `unwrapTg` ran from the first `<tg` to the LAST `</tg>`, so everything between the
+// two envelopes came through as text. The fixture below is his delivery, byte for byte.
+describe('a bus delivery is one message in the feed, not its wire format', () => {
+  const DELIVERY = '<tg bus-digest since 20m ago>\n'
+    + '💬 chat→killnotice: Widening evidence on ask 782, owner\'s words verbatim just now: "It does th…\n'
+    + '</tg>\n'
+    + '<tg @chat ack=784>Owner-side live verification closed on ask 782: he tested it **himself**.</tg>\n'
+    + '(acknowledgment — no answer needed, nothing is waiting on you)'
+
+  test('the bubble is the message alone — no envelope, no catch-up, no footer', () => {
+    const f = fixture([user(DELIVERY, 'u1')])
+    const [item] = recentConversation(f)
+    expect(item!.text).toBe('Owner-side live verification closed on ask 782: he tested it **himself**.')
+    // Each of these is a thing he actually saw on his phone.
+    expect(item!.text).not.toContain('</tg>')
+    expect(item!.text).not.toContain('<tg @chat')
+    expect(item!.text).not.toContain('💬')
+  })
+
+  test('and it is marked as an agent\'s prose, so the app renders the markdown', () => {
+    const f = fixture([user(DELIVERY, 'u1')])
+    expect(recentConversation(f)[0]!.bus).toBe(true)
+    // An ask, a re= and an aside are the same author class. The `from=owner` case is the exception
+    // the envelope's own convention names: a bus ask HE typed is still a human's words.
+    const one = (raw: string) => recentConversation(fixture([user(raw, 'u1')]))[0]!
+    expect(one('<tg @chat ask=782>diagnose this</tg>').bus).toBe(true)
+    expect(one('<tg @weather re=99>done</tg>').bus).toBe(true)
+    expect(one('<tg @chat btw>stop</tg>').bus).toBe(true)
+    expect(one('<tg @chat ask=7 from=owner>do the thing</tg>').bus).toBeUndefined()
+  })
+
+  // THE CONTROL THAT MUST NOT MOVE: his own messages are verbatim, envelope stripped and nothing
+  // else — including the photo attributes, which are what make a picture render as a picture.
+  test('THE CONTROL: his own message is unchanged, attachments included', () => {
+    const f = fixture([user('<tg 14071 from=dm img="/inbox/a.jpg">why are messages **like this**?</tg>', 'u1')])
+    const [item] = recentConversation(f)
+    expect(item!.text).toBe('why are messages **like this**?')   // his asterisks are his
+    expect(item!.img).toBe('/inbox/a.jpg')
+    expect(item!.bus).toBeUndefined()
+    // An album still reports all of them.
+    const album = recentConversation(fixture([user('<tg 1 from=dm img="/a.jpg" img="/b.jpg">two</tg>', 'u2')]))[0]!
+    expect(album.imgs).toEqual(['/a.jpg', '/b.jpg'])
+  })
+
+  test('THE CONTROLS: no envelope, and a broken one, are left exactly as they were', () => {
+    const plain = recentConversation(fixture([user('just words <tg> in the middle', 'u1')]))[0]!
+    expect(plain.text).toBe('just words <tg> in the middle')
+    // Unclosed: the raw text, which is what it has always done — there is nothing to unwrap.
+    const open = recentConversation(fixture([user('<tg 1 from=dm>half a message', 'u2')]))[0]!
+    expect(open.text).toBe('<tg 1 from=dm>half a message')
+  })
+
+  // A digest with nothing behind it cannot happen on the delivery path, but a reader that returned
+  // an empty bubble for one would be worse than one that shows it.
+  test('a digest with no message behind it still renders something', () => {
+    const only = recentConversation(fixture([user('<tg bus-digest since 5m ago>⌛ a→b #1: gone</tg>', 'u1')]))[0]!
+    expect(only.text).toBe('⌛ a→b #1: gone')
+  })
+})

@@ -3314,6 +3314,24 @@ function mdReport(s) {
       // The marker becomes a real bullet in place, which keeps whatever indent the agent wrote.
       .replace(/^([ \t]*)[-*] +/gm, "$1• ")).join("");
 }
+// WHICH RENDERER A ROW'S OWN TEXT GETS, as one expression, because the answer is a ruling and not a
+// detail. Three of the four were already settled: an assistant reply gets md()'s light subset, an
+// agent's report gets mdReport()'s block constructs on top of it (cc25c02 — widening md() itself
+// restyles every message in the app and is the owner's call), and everything else is escaped
+// verbatim.
+//
+// The fourth is a BUS message — another agent's prose, delivered INTO this session, and a `user` row
+// only because that is the side of the transcript it arrives on. It reads as a report because it is
+// one, so it renders like one; the owner asked for exactly this after a bus ack reached his feed as
+// literal `**bold**` (2026-08-19). `i.bus` is set by transcript.ts off the envelope's own attributes
+// — an agent-composed block carries `@name` and no `from=` — so HIS OWN messages, which is the whole
+// set this could damage, are untouched and still show precisely what he typed.
+function bodyHtml(i, t) {
+  return i.role === "agent" ? mdReport(t)
+    : i.role === "assistant" ? md(t)
+    : i.bus ? mdReport(t)
+    : esc(t);
+}
 // One feed row → bubble HTML. A local command renders as its invocation over its output; `!` bash
 // rows as a quiet mono chip; attachments as a photo thumbnail (hydrated after paint) / 📎 chip with
 // the caption; assistant text gets light markdown.
@@ -3363,9 +3381,10 @@ function bubble(i, n, all) {
   const t = full || ((i.img || i.att) && placeholder ? "" : (i.text || ""));
   // An agent's report is prose it wrote, so it goes through the same md() a reply does — the reports
   // are markdown (headings, lists, code) and escaping them showed the source instead of the document.
+  // Which renderer, for every role, is `bodyHtml` above.
   if (t) inner += (i.img ? '<div class="cap">' : "")
     + (i.role === "assistant" ? FINAL_DOT : "")
-    + (i.role === "agent" ? mdReport(t) : i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
+    + bodyHtml(i, t) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
   // the screen. The fold used to name the payload clamp — "message truncated at 4000 chars" — which
