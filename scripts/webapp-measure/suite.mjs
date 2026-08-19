@@ -1,4 +1,12 @@
 import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/index.mjs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+// Screenshots go BESIDE THIS SCRIPT, the way every sibling here resolves its own files. `shots/…`
+// was relative to the CWD, so a run started from the repo root left a second, byte-identical copy
+// at the top level — outside `scripts/webapp-measure/*shots*/`, which is where the root .gitignore
+// already covers this harness's output, so it sat in `git status` for a week (2026-08-12).
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const SHOT = n => join(HERE, "shots", n);
 // Every case measures TWICE: immediately, and again after idling through two 3s repaint cycles.
 // A timer-driven regression is invisible to a check that measures straight after acting.
 const IDLE = 7000;
@@ -35,7 +43,7 @@ const row = async (label, p, want) => {
 let p = await open(); await fill(p);
 await row("1 type past cap -> bottom", p, "bottom");
 let r = await p.locator(".composer").evaluate(e=>{const b=e.getBoundingClientRect();return{x:b.x,y:b.y,width:b.width,height:b.height}});
-for(let i=0;i<6;i++){try{await p.screenshot({path:"shots/fix-typed-rest.png",clip:r});break;}catch{await p.waitForTimeout(300);}}
+for(let i=0;i<6;i++){try{await p.screenshot({path:SHOT("fix-typed-rest.png"),clip:r});break;}catch{await p.waitForTimeout(300);}}
 await p.close();
 
 p = await open(); await fill(p);
@@ -43,7 +51,7 @@ await p.evaluate(()=>{ const ta=document.getElementById("dtext"); ta.selectionSt
 await p.keyboard.type("XX");
 await row("2 edit mid-field -> stays put", p, "notBottom");
 r = await p.locator(".composer").evaluate(e=>{const b=e.getBoundingClientRect();return{x:b.x,y:b.y,width:b.width,height:b.height}});
-for(let i=0;i<6;i++){try{await p.screenshot({path:"shots/fix-midfield.png",clip:r});break;}catch{await p.waitForTimeout(300);}}
+for(let i=0;i<6;i++){try{await p.screenshot({path:SHOT("fix-midfield.png"),clip:r});break;}catch{await p.waitForTimeout(300);}}
 await p.close();
 
 p = await open(); await fill(p);
