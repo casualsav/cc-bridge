@@ -127,6 +127,11 @@ export function systemAskLabel(kind?: SystemAskKind): { icon: string; did: strin
   }
 }
 
+// One chevron card already on a human surface: enough to edit it, and nothing else. Persisted with
+// the row because the edit belongs to the moment the delivery is PROVED, which for a busy target is
+// a sweep minutes later in a different process lifetime — the same reason ownerMsgId is persisted.
+export type SenderCard = { chat: string; thread?: number; msgId: number }
+
 export type BusPending = {
   id: number
   fromSid: string     // asker's endpoint id (a claude sessionId; panes re-resolved at delivery)
@@ -211,6 +216,20 @@ export type BusPending = {
   // confirmation belongs at the moment the ask actually lands — which for a busy target is a sweep
   // minutes later, in a different process lifetime than the one that read his message.
   ownerMsgId?: number
+  // v0.5.168 — THE SENDER'S CHEVRON CARD IS DRAWN AT ENQUEUE, and these two fields are what let a
+  // confirmation minutes later edit that card instead of drawing a second one. Until this the card
+  // lived only in onAskConfirmed, so a queued ask was invisible on the sender's surface for as long
+  // as the target stayed busy (asks 799/801/802 sat 8–22 minutes with nothing on the owner's screen,
+  // 2026-08-19) — while the ledger row and the mini-app feed had had them since creation, for the
+  // reason appendLedger's own site gives: a queued ask really has happened.
+  //
+  // `senderCarded` is the CLAIM, staked before the first delivery attempt so the confirm sweep can
+  // never draw a card the enqueue path is already about to draw. `senderCards` holds only the cards
+  // that went out carrying the queued marker — the ones a proof must edit back to the plain header;
+  // an ask that landed on its first attempt was carded plain and leaves this absent. A row with
+  // NEITHER was minted by an older build and keeps the confirm-time card, which is its only one.
+  senderCarded?: true
+  senderCards?: SenderCard[]
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -323,6 +342,14 @@ function rebuildPending(e: unknown): BusPending | null {
       ...(typeof p.heldNoticeAt === 'number' ? { heldNoticeAt: p.heldNoticeAt } : {}),
       ...(typeof p.runnableSince === 'number' ? { runnableSince: p.runnableSince } : {}),
       ...(typeof p.stuckPagedAt === 'number' ? { stuckPagedAt: p.stuckPagedAt } : {}),
+      // The claim and the cards it owns, persisted for the reason heldNoticeAt is: this box deploys
+      // several times an hour, and a queued ask's confirmation is usually minutes and one restart
+      // away. Losing the claim would draw a SECOND card under the first; losing the ids would leave
+      // the first one reading "queued" for a message that landed.
+      ...(p.senderCarded === true ? { senderCarded: true as const } : {}),
+      ...(Array.isArray(p.senderCards)
+        ? { senderCards: p.senderCards.filter((c): c is SenderCard => !!c && typeof c === 'object' && typeof (c as SenderCard).chat === 'string' && typeof (c as SenderCard).msgId === 'number') }
+        : {}),
       ...(p.founding === true ? { founding: true as const } : {}),
       // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
       // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
@@ -565,6 +592,36 @@ export function markPastedAt(id: number, at: number | null): void {
   if (!p) return
   if (at == null) { if (p.pastedAt == null) return; delete p.pastedAt } else p.pastedAt = at
   save()
+}
+
+/**
+ * Record that the enqueue path owns this row's sender-side chevron card. Called TWICE and the order
+ * is the point: once with nothing, before the first delivery attempt, to stake the claim while the
+ * outcome is still unknown; then with the cards actually sent, but only when they went out carrying
+ * the queued marker. A delivered-on-first-attempt ask leaves `senderCards` absent, which is what
+ * planSenderCardOnConfirm reads as "already correct, draw nothing".
+ */
+export function markSenderCarded(id: number, cards?: SenderCard[]): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return   // an ack can confirm and be removed while its own card is still in flight
+  p.senderCarded = true
+  if (cards?.length) p.senderCards = cards; else delete p.senderCards
+  save()
+}
+
+/**
+ * What a confirmed delivery owes the SENDER's chevron card.
+ *
+ * `edit` — the card went out marked queued and the marker must now come off. `none` — it went out
+ * plain (the ask landed on its first attempt), or this row draws no sender card at all. `send` — the
+ * row predates `senderCarded`, so the confirm-time card is still its ONLY one and dropping it would
+ * lose the message from the owner's surface entirely, which is the loss this whole change is about.
+ */
+export function planSenderCardOnConfirm(p: Pick<BusPending, 'founding' | 'senderCarded' | 'senderCards'>): 'edit' | 'send' | 'none' {
+  if (p.founding) return 'none'   // the spawn closure already sent this row's two cards
+  if (!p.senderCarded) return 'send'
+  return p.senderCards?.length ? 'edit' : 'none'
 }
 
 /**

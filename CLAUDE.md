@@ -440,6 +440,20 @@ missed) re-opens an answered ask and the re-run doubles the answer block — noi
 was the disease.** Answering a row that was never delivered is allowed and logged (`answered undelivered`,
 ledger `undelivered: true`). Proof: `answer-path.test.ts` (source-bound), `agent-bus-persist.test.ts`.
 
+**The SENDER's chevron card is drawn when the message is SENT — a confirmation EDITS it, never draws
+one.** It lived in `onAskConfirmed` until v0.5.168, so a queued ask was invisible on the sender's
+surface for as long as the target stayed busy: three asks to a busy @weatherpad sat 8–22 minutes with
+nothing on the owner's screen, while the ledger row and the mini-app feed (`recordOutbound`) had had
+them since enqueue (his report, 2026-08-19). The enqueue path stakes `senderCarded` BEFORE the first
+delivery attempt so a racing sweep cannot draw a second card, marks the header `· ⏳ queued` iff the
+ask did not land on that attempt, and records the message ids; `planSenderCardOnConfirm` then returns
+`edit` / `none` / `send` — `send` is the row an older build minted with no card at all, and dropping
+it would re-create the loss. Moving the card back beside the target-side one (which stays at
+confirmation, because "@chat messaged @you" must be true when shown) is the re-regression. Proof:
+`bus-sender-card.test.ts` (source-bound to both call sites; `CC_BRIDGE_SRC_DIR=<dir of HEAD's
+daemon.ts>` must fail exactly its three call-site tests) and `bun scripts/bus-card-edit-probe.ts`
+(a real Telegram round trip, canary token, with a no-op re-edit as the control).
+
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
 instead: `checkConcludedTurnObligations` nudges THE SESSION once per ask, after a grace; nothing

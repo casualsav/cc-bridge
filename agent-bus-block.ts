@@ -95,9 +95,16 @@ export type BusVerb = 'ask' | 'ack' | 'btw' | 'answer'
 // shipping it as a literal glyph drew the disclosure twice. Verb text only here; the chevron is the
 // rich message's <details> and is untouched.
 const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: 'Notified', btw: 'Informed', answer: 'Answered' }
+// A card drawn while the message is still in the bus queue says so — and keeps saying so until the
+// delivery is proved, when the card is EDITED and the marker comes off (planSenderCardOnConfirm).
+// The card is drawn at ENQUEUE from v0.5.168: before that it waited for transcript proof, so three
+// asks to a busy @weatherpad sat 8–22 minutes with nothing on the owner's surface at all
+// (2026-08-19). Default false, deliberately: the ~120 asks a day that land on the first attempt draw
+// exactly the header they always drew.
+export const QUEUED_MARK = ' · ⏳ queued'
 // The SENDER's surface: "Messaged @kam" / "Notified @kam" / "Informed @kam" / "Answered @kam".
-export function busSentHeader(verb: BusVerb, to: string): string {
-  return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
+export function busSentHeader(verb: BusVerb, to: string, queued = false): string {
+  return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>${queued ? QUEUED_MARK : ''}`
 }
 // The TARGET's surface, where the sender has to be named too. An aside is absent on purpose: its
 // card keeps the "sent an aside 💬" wording it has always had — it was never the ambiguous one, and

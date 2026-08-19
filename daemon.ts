@@ -175,6 +175,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, stillQueued, markRunnable, markStuckPaged, heartbeatPagedFor, markHeartbeatPaged, lastLedgerEventAt, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
+  markSenderCarded, planSenderCardOnConfirm, type SenderCard,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, reapReasonText, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
   isOwnerAddress,
@@ -4278,8 +4279,13 @@ async function notifyLanesOfPost(fromSid: string | null, fromName: string, body:
 // `subjectSid` is the session the card is ABOUT, not the surface it lands on — replying to
 // "Spawned @test" means talking to @test, not to the session that spawned it. Cards with no session
 // as their subject (bridge UI: the pin card, settings, readouts) pass nothing and stay unroutable.
-async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string, subjectSid?: string | null): Promise<void> {
-  const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
+const busCardShown = (body: string): string => body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
+// The rich card's envelope, shared by the send and by the queued-marker edit — so the render, and
+// with it the escaping the whole card's safety rests on, can never drift between drawing a card and
+// rewriting it.
+const busCardRichHtml = (header: string, rendered: string): string => `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>`
+async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string, subjectSid?: string | null): Promise<SenderCard | null> {
+  const shown = busCardShown(body)
   // RENDERED, not escaped. `escapeHtml` alone put the agent's raw markdown on his phone — literal
   // `**bold**`, and a code span's backticks sitting hard against the next letter, which reads as an
   // accent over it (measured: Telegram stores plain U+0060, so this was never an entity bug — see
@@ -4290,32 +4296,57 @@ async function sendBusCard(chat: string, thread: number | undefined, header: str
   // introduce markup — in particular it cannot emit `</details>` or `</blockquote>` and break the
   // envelope. What it CAN now do is render bold, which is the point of the change.
   const rendered = mdToTelegramHtml(shown)
-  const richHtml = `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>`
+  const richHtml = busCardRichHtml(header, rendered)
   // `<pre>` nested inside an expandable blockquote is accepted by the classic parser (verified live
   // against the API, 2026-08-10) — so the degraded path renders too, rather than falling back to raw.
   const fallback = `${header}\n<blockquote expandable>${rendered}</blockquote>`
   try {
     const m = await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
     rememberMsgRoute(chat, m?.message_id, subjectSid)
+    // The id is the whole reason a queued card can later be edited rather than doubled. Both other
+    // exits return null on purpose: an unknown outcome may have left a card we cannot identify, and
+    // the classic-HTML fallback below is not an editRichMessage target at all — such a card keeps
+    // its queued marker rather than being rewritten through the wrong API.
+    return m?.message_id != null ? { chat, ...(thread != null ? { thread } : {}), msgId: m.message_id } : null
   } catch (e) {
     // Same split as sendAgentText's fallback: only a Telegram refusal frees us to send the card again.
-    if (!telegramRefused(e)) { process.stderr.write(`daemon: bus card to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
+    if (!telegramRefused(e)) { process.stderr.write(`daemon: bus card to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return null }
     process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
     void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) })
       .then(ref => rememberMsgRoute(chat, ref?.messageId, subjectSid)).catch(() => {})
+    return null
   }
 }
-async function notifyBusRich(surfaceSid: string, header: string, body: string, subjectSid?: string | null): Promise<void> {
+async function notifyBusRich(surfaceSid: string, header: string, body: string, subjectSid?: string | null): Promise<SenderCard[]> {
   const pane = await paneForSession(surfaceSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
-  if (!targets.length) return
-  for (const { chat, thread } of targets) await sendBusCard(chat, thread, header, body, subjectSid)
+  if (!targets.length) return []
+  const sent: SenderCard[] = []
+  for (const { chat, thread } of targets) {
+    const card = await sendBusCard(chat, thread, header, body, subjectSid)
+    if (card) sent.push(card)
+  }
+  return sent
 }
 // Outbound: "Messaged @kam" on the sender's surface, the message behind the chevron. The verb is
 // explicit at every call site rather than defaulted — an ack that renders as an ask is exactly the
 // bug busSentHeader exists to close, and a default is how it would come back.
-const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusVerb, toSid?: string | null): Promise<void> =>
-  notifyBusRich(fromSid, busSentHeader(verb, toName), text, toSid)
+const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusVerb, toSid?: string | null, queued = false): Promise<SenderCard[]> =>
+  notifyBusRich(fromSid, busSentHeader(verb, toName, queued), text, toSid)
+
+// The queued marker comes OFF when the delivery is proved — the SAME card, edited, never a second
+// one under the first. A failed edit is swallowed with a log line and leaves the card reading
+// "queued" for a message that did land: that is the named risk of drawing the card early, and it is
+// the harmless half of it, since the message itself is on his surface either way. The header is
+// rebuilt from the row rather than closed over, for the reason ownerMsgId is on the row — the sweep
+// that confirms a queued ask is usually a later process entirely.
+async function editAskSentCards(p: BusPending): Promise<void> {
+  const html = busCardRichHtml(busSentHeader(p.noReply ? 'ack' : 'ask', p.toName), mdToTelegramHtml(busCardShown(p.text)))
+  for (const c of p.senderCards ?? []) {
+    await editRichMessage(TOKEN!, c.chat, c.msgId, { html })
+      .catch(e => process.stderr.write(`daemon: ask ${p.id} sender card edit failed (chat ${c.chat} msg ${c.msgId}) — it keeps its queued marker: ${e}\n`))
+  }
+}
 
 // A plain one-line bus-plumbing notice on a session's OWN surface (its chat DM / topic) — never
 // General. The text-only sibling of notifyBusRich, for short status lines with no body to collapse.
@@ -4516,7 +4547,15 @@ function onAskConfirmed(cur: BusPending, now: number): void {
   if (cur.ownerDirect) {
     const chat = cur.ownerMsgId != null ? chatIdForDmChatSession(cur.fromSid) : null
     if (chat) void channel.react({ chatId: chat, messageId: String(cur.ownerMsgId) }, REACTIONS.delivered).catch(() => {})
-  } else if (!cur.founding) void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
+  } else {
+    // The sender's card is no longer BORN here (v0.5.168) — the enqueue path drew it when the
+    // message was sent, queued or not, and what a proof owes it is at most the removal of the queued
+    // marker. `send` is the row an older build minted with no card at all: for those this is still
+    // the only one they will ever get, which is exactly the loss the change is about.
+    const step = planSenderCardOnConfirm(cur)
+    if (step === 'edit') void editAskSentCards(cur)
+    else if (step === 'send') void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
+  }
   // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
   // visible from inside the session too. A `quiet` row is the one exception: a daemon notice whose
   // fact a card on that same chat already carries (the held spawn's approval card).
@@ -7925,7 +7964,17 @@ async function handleCall(
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
           // @ccbridge. sweepBus still retries anything not delivered here.
+          // THE SENDER'S CARD IS DRAWN HERE, at send, and not on transcript proof (v0.5.168, owner
+          // ruling). The claim is staked BEFORE the attempt so a confirmation racing this line can
+          // never draw a second card; the card itself waits for the outcome, because a header that
+          // says "queued" on an ask that landed on its first attempt would be a new wrong answer in
+          // place of the old one. Not awaited: the socket caller is waiting on `text`, and the ids
+          // are only needed by a confirmation that is minutes away for every row that has any.
+          markSenderCarded(p.id)
           const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
+          const queued = outcome !== 'delivered'
+          void notifyAskSent(fromSid, toName, askText, noReply ? 'ack' : 'ask', res.id, queued)
+            .then(cards => { if (queued) markSenderCarded(p.id, cards) }).catch(() => {})
           text = noReply
             ? (outcome === 'delivered'
                 ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
