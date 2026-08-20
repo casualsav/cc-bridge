@@ -463,9 +463,12 @@ lost to a worker that never re-ran. Hermes/openclaw completions (no agent to re-
 take the legacy CLI-queue paste, logged `QUEUED-MID-TURN`. Proof rides a separate `answers` map in
 `agent-bus.json` (`AnswerInFlight`, row included), NOT a state on the pending row, so nothing that reads
 rows learns a third state; on 120s without proof the ask is RE-OPENED and the answerer told to re-run.
-**Accepted risk, written down for the day a dupe is reported: a proof false-negative (answer landed, match
-missed) re-opens an answered ask and the re-run doubles the answer block — noise; a silently lost answer
-was the disease.** Answering a row that was never delivered is allowed and logged (`answered undelivered`,
+**Accepted risk: a proof false-negative (answer landed, match missed) re-opens an answered ask and the
+re-run doubles the answer block — noise; a silently lost answer was the disease. The one known trigger is
+closed (v0.5.172): the proof scans from the transcript size RECORDED at the paste (`pastedSize`, minus a
+64 KB back-window because the block can precede the stamp), never a fixed tail — answer 896's block was
+pushed out of the old 512 KB tail by the asker's own 606 KB first tool result within ten seconds
+(2026-08-20; `confirm-scan.test.ts` replays it, control included).** Answering a row that was never delivered is allowed and logged (`answered undelivered`,
 ledger `undelivered: true`). Proof: `answer-path.test.ts` (source-bound), `agent-bus-persist.test.ts`.
 
 **The SENDER's chevron card is drawn when the message is SENT — a confirmation EDITS it, never draws

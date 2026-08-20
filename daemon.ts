@@ -116,7 +116,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript, recordedTranscript, fallbackIsCrowded } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
-import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, CONFIRM_WINDOW_MS } from './ask-parity.ts'
+import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { paneFreedom, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
@@ -4513,7 +4513,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // ask block is found in the target's transcript. On 2026-08-15 this branch fired for asks 472
       // and 474 against a pane whose CLI queue then discarded them, and everything below ran on a
       // delivery that never happened.
-      markPastedAt(cur.id, Date.now())
+      markPastedAt(cur.id, Date.now(), await transcriptSizeForPane(pane))
     }
     // 'not-landed', never 'busy': busDeliver now returns false when the block is sitting
     // unsubmitted in the box, and calling that merely-busy is the understatement this fix exists
@@ -4569,28 +4569,30 @@ function onAskConfirmed(cur: BusPending, now: number): void {
   if (cur.noReply) removePending(cur.id)
 }
 
-// Is the ask block in the target's conversation? Read from the tail of the transcript rather than the
-// whole file — a live session's JSONL runs to megabytes and this asks every 15s. The needle is
-// `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting it back
-// would false-positive on.
-const CONFIRM_TAIL_BYTES = 512 * 1024
-const askBlockInTranscript = (sid: string, id: number): Promise<boolean> => transcriptTailCarries(sid, t => blockCarriesAsk(t, id))
+// Is the ask block in the target's conversation? Read from where the paste was recorded (`pastedSize`,
+// the transcript's size at the time, minus a back-window) to the end of the file — never the whole
+// file, a live session's JSONL runs to megabytes and this asks every 15s; and no longer a fixed tail,
+// which answer 896's 606 KB first tool result pushed the block out of (ask-parity.ts `confirmScanStart`).
+// The needle is `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting
+// it back would false-positive on.
+const askBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<boolean> => transcriptCarries(sid, t => blockCarriesAsk(t, id), pastedSize)
 // Unit 3: an ANSWER's proof — the `re=<id>` block in the ASKER's transcript.
-const answerBlockInTranscript = (sid: string, id: number): Promise<boolean> => transcriptTailCarries(sid, t => blockCarriesAnswer(t, id))
-async function transcriptTailCarries(sid: string, carries: (tail: string) => boolean): Promise<boolean> {
+const answerBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<boolean> => transcriptCarries(sid, t => blockCarriesAnswer(t, id), pastedSize)
+async function transcriptCarries(sid: string, carries: (text: string) => boolean, pastedSize?: number): Promise<boolean> {
   try {
     const pane = await paneForSession(sid).catch(() => null)
     const file = pane ? await transcriptForPane(pane, null).catch(() => null) : null
     if (!file) return false
-    const size = statSync(file).size
-    const start = Math.max(0, size - CONFIRM_TAIL_BYTES)
-    const fd = openSync(file, 'r')
-    try {
-      const buf = Buffer.allocUnsafe(size - start)
-      readSync(fd, buf, 0, buf.length, start)
-      return carries(buf.toString('utf8'))
-    } finally { closeSync(fd) }
+    return fileCarries(file, carries, pastedSize)
   } catch { return false }
+}
+// The anchor for that scan, taken at the paste. Undefined when the transcript cannot be resolved (a
+// fresh spawn that has said nothing yet) — the proof then keeps the tail read.
+async function transcriptSizeForPane(pane: string): Promise<number | undefined> {
+  try {
+    const file = await transcriptForPane(pane, null).catch(() => null)
+    return file ? statSync(file).size : undefined
+  } catch { return undefined }
 }
 
 // The sweep. Promotes a pasted ask to delivered on proof, and REPORTS one that never arrived — it
@@ -4599,7 +4601,7 @@ async function transcriptTailCarries(sid: string, carries: (tail: string) => boo
 async function confirmInjections(): Promise<void> {
   const now = Date.now()
   for (const cur of awaitingConfirmation()) {
-    const seen = await askBlockInTranscript(cur.toSid, cur.id).catch(() => false)
+    const seen = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch(() => false)
     const plan = planInjectionConfirm({ seen, pastedAt: cur.pastedAt!, now })
     if (plan === 'wait') continue
     if (plan === 'confirm') {
@@ -4634,7 +4636,7 @@ async function confirmInjections(): Promise<void> {
   // risk, written down: a proof FALSE-NEGATIVE (answer landed, the match missed) re-opens an answered
   // ask and the re-run produces a DUPLICATE answer block. Noise; a silently lost answer was the disease.
   for (const a of listAnswersInFlight()) {
-    const seen = await answerBlockInTranscript(a.askerSid, a.id).catch(() => false)
+    const seen = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch(() => false)
     const plan = planInjectionConfirm({ seen, pastedAt: a.pastedAt, now })
     if (plan === 'wait') continue
     clearAnswerInFlight(a.id)
@@ -5411,7 +5413,8 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   if (!('error' in answered)) void notifyAskSent(answered.id, cur.fromName, body, 'answer', cur.fromSid)
   appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs, ...(opts.undelivered ? { undelivered: true } : {}) })
   // Pasted, not proved: confirmInjections promotes it on transcript proof or re-opens the ask.
-  recordAnswerPasted({ id: cur.id, row: cur, askerSid: cur.fromSid, pane: askerPane, answerer, pastedAt: Date.now(), ...(opts.answererSid ? { answererSid: opts.answererSid } : {}) })
+  const pastedSize = await transcriptSizeForPane(askerPane)
+  recordAnswerPasted({ id: cur.id, row: cur, askerSid: cur.fromSid, pane: askerPane, answerer, pastedAt: Date.now(), ...(pastedSize != null ? { pastedSize } : {}), ...(opts.answererSid ? { answererSid: opts.answererSid } : {}) })
   const waited = Math.round(gate.waitedMs / 1000)
   process.stderr.write(`daemon: ${label} (${askerPane}) ${queuedMidTurn ? `QUEUED-MID-TURN (non-Claude answerer, waited ${waited}s: ${gate.why})` : waited >= 2 ? `DELIVERED after ${waited}s wait` : 'DELIVERED'}${opts.undelivered ? ` — row was never delivered to @${cur.toName} (answered undelivered)` : ''}\n`)
   return `answered @${cur.fromName} (ask ${cur.id})${waited >= 2 ? ` (waited ${waited}s for their prompt)` : ''}${late ? ' (late — delivered after the timeout)' : ''}`
@@ -9912,7 +9915,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // never through tryDeliverAsk, so it used to arm the answer window straight off the paste — the
       // exact shape of ask 428 on 2026-08-15, whose brief sat unsubmitted in a fresh REPL for 15
       // minutes while the bus counted it delivered. confirmInjections promotes it on transcript proof.
-      if (p) markPastedAt(p.id, Date.now())
+      if (p) markPastedAt(p.id, Date.now(), await transcriptSizeForPane(newPane))
       // The human path's equivalent, and it is armed for the same reason on the same instant: the new
       // session's first reply is his, and a reply that beats its own route reaches only that session's
       // own surface. Off the block that was pasted, never rebuilt beside it (owner-reply.ts).

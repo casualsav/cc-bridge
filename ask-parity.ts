@@ -17,6 +17,7 @@
 //
 // These are the decisions, extracted so they can be read and tested without a daemon attached — the
 // same reason keys-plan.ts and paste-recovery.ts are separate from the pane and the socket.
+import { statSync, openSync, readSync, closeSync } from 'node:fs'
 import type { BusPending, LedgerEntry } from './agent-bus.ts'
 
 // ---- R-1: the delivery gate --------------------------------------------------------------------
@@ -103,3 +104,34 @@ export function mentionsAsk(text: string | undefined, id: number): boolean {
 // transcript. Sibling of blockCarriesAsk; the same 120s planInjectionConfirm window applies.
 export const blockCarriesAnswer = (text: string, id: number): boolean =>
   new RegExp(`re=${id}(?!\\d)`).test(text)
+
+// ---- where in the transcript the proof is looked for -------------------------------------------
+//
+// The proof used to read the LAST 512 KB of the file and nothing else. Answer 896 (2026-08-20) landed
+// in @chat's transcript as a 5 KB entry, and ten seconds later the first tool result of the turn it
+// started was a 606 KB entry — the block was outside the window before the first sweep, the ask was
+// re-opened and the answerer told to re-run a delivery that had been read and acted on. A big first
+// tool result is ordinary for a chat lane (image reads), and the same window served ASK proofs.
+//
+// So the scan is anchored at the file size RECORDED when the paste was recorded, minus a back-window:
+// the block can be written BEFORE the stamp (896's was, by 5s — the CLI appends the user entry the
+// moment Enter lands, the daemon stamps after its own verification), and 64 KB holds any block the
+// bus formats. From there to the end of the file. A row with no recorded size (minted by an older
+// build, or the asker's transcript unresolved at paste time) keeps the tail, which is what it had.
+export const CONFIRM_TAIL_BYTES = 512 * 1024
+export const CONFIRM_BACK_WINDOW_BYTES = 64 * 1024
+export function confirmScanStart(size: number, pastedSize: number | undefined): number {
+  if (pastedSize != null) return Math.max(0, Math.min(pastedSize, size) - CONFIRM_BACK_WINDOW_BYTES)
+  return Math.max(0, size - CONFIRM_TAIL_BYTES)
+}
+
+export function fileCarries(file: string, carries: (text: string) => boolean, pastedSize?: number): boolean {
+  const size = statSync(file).size
+  const start = confirmScanStart(size, pastedSize)
+  const fd = openSync(file, 'r')
+  try {
+    const buf = Buffer.allocUnsafe(size - start)
+    readSync(fd, buf, 0, buf.length, start)
+    return carries(buf.toString('utf8'))
+  } finally { closeSync(fd) }
+}
