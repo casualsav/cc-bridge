@@ -45,6 +45,7 @@ import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
+import { planResumeOptions, planResumeCardText, planResumeOutcome, planResumeCardMint, resumePickerSig, paneGlance, type ResumeOption } from './resume-picker-card.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
@@ -800,29 +801,95 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   notifyChats('🧩 Installed the plugin for you (user scope).', { plain: true })
 }
 
-// Relay the post-update "Resume session" picker as buttons (summary / full / don't-ask) so the user
-// chooses how a large/old session comes back, rather than auto-picking for them. Routed to the
-// session's own topic (outboundTargetsFor), deduped per pane on the options hash so the picker
-// repainting each poll doesn't re-post. A `resumesel:N:pane` tap drives that pane (see the callback
-// handler), which then flushes any message held while the picker was up.
-const resumeRelayed = new Map<string, string>()   // pane → last-relayed options hash
-function resumeButtonLabel(label: string): string {
-  const emoji = /summary/i.test(label) ? '📝' : /full session/i.test(label) ? '📜' : /don.?t ask/i.test(label) ? '🚫' : '▫️'
-  const short = label.replace(/\s*\(recommended\)\s*$/i, '').trim() || label
-  return `${emoji} ${short.length > 28 ? short.slice(0, 27) + '…' : short}`
+// The post-update resume-cost picker, relayed to THE OWNER as a card he chooses from — his ruling,
+// 2026-08-20, after refusing a three-way policy fork outright: "That decision should come to me in a
+// message here in the main chat with buttons naming the session, the amount of context, and giving
+// me the options to choose from." Wording, button plan and the one-card rule live in
+// `resume-card.ts`; this owns the pane, the send and the store.
+//
+// TWO THINGS CHANGED HERE AND BOTH ARE THE POINT. It used to go to `outboundTargetsFor(paneId)` —
+// for a worker that is its own topic tab, which is SILENT by design, so the one lever that could
+// revive @hourlystudy sat unread for hours. And the dedup was an in-memory Map, so every daemon
+// restart re-sent it: six cards, each 1.5s after a `listening on` line, all invisible. The mark is
+// persisted now and the destination is the chat he actually reads.
+const RESUME_CARD_FILE = join(STATE_DIR, 'resume-cards.json')
+type ResumeCardRow = { sig: string; chat?: string; messageId?: number; at: number }
+const loadResumeCards = (): Record<string, ResumeCardRow> =>
+  readJsonFile<Record<string, ResumeCardRow>>(RESUME_CARD_FILE, {})
+function saveResumeCards(rows: Record<string, ResumeCardRow>): void {
+  try { writeJsonFile(RESUME_CARD_FILE, rows) } catch {}
 }
-async function relayResumeChoice(paneId: string, options: PromptOption[]): Promise<void> {
-  const h = hashText(options.map(o => o.label).join('|'))
-  if (resumeRelayed.get(paneId) === h) return   // same picker, just repainting
-  resumeRelayed.set(paneId, h)
-  process.stderr.write(`daemon: relaying resume-session picker for pane ${paneId} (${options.length} options)\n`)
+function clearResumeCard(pane: string): void {
+  const rows = loadResumeCards()
+  if (!(pane in rows)) return
+  delete rows[pane]
+  saveResumeCards(rows)
+}
+
+// The chats the owner actually reads: his DM chat lanes ("the main chat" in his words), falling back
+// to the access allowlist on a box with no lane. NOT the group and NOT a topic — the whole defect
+// was a decision addressed to a surface nobody watches.
+function ownerCardChats(): string[] {
+  const lanes = listDmChatSessions().map(d => String(d.chatId)).filter(Boolean)
+  return lanes.length ? [...new Set(lanes)] : loadAccess().allowFrom.map(String)
+}
+
+// Press one option on a live picker. THE KEYS ARE RE-DERIVED HERE, from a fresh capture, rather than
+// carried in the callback data: the card can be hours old, and Down-presses counted against a cursor
+// that has since moved would select the wrong row — which on this picker means discarding a
+// conversation. A picker that is no longer on screen presses nothing at all.
+async function applyResumeChoice(pane: string, idx: number):
+  Promise<{ ok: true; chosen: ResumeOption; glance: string } | { ok: false; error: string }> {
+  if (!(await paneAlive(pane).catch(() => false))) {
+    await flushEditorHeld(pane)   // pane gone → let the held message buffer/route normally
+    clearResumeCard(pane)
+    return { ok: false, error: 'its pane is gone — nothing was pressed' }
+  }
+  const cap = await capturePane(pane).catch(() => '')
+  const picker = cap ? detectResumeSessionPrompt(cap) : null
+  if (!picker) {
+    clearResumeCard(pane)
+    return { ok: false, error: 'that picker is no longer on its screen — nothing was pressed' }
+  }
+  const chosen = planResumeOptions(picker.options, picker.current).find(o => o.idx === idx)
+  if (!chosen) return { ok: false, error: `option ${idx + 1} is not reachable from where its cursor sits — nothing was pressed` }
+  const downs = chosen.keys.filter(k => k === 'down').length
+  process.stderr.write(`daemon: resume picker — pressing "${chosen.label}" on ${pane} (${downs} down, enter)\n`)
+  await withPaneInjection(pane, async () => { await navigateDown(pane, downs); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 8000) })
+  clearResumeCard(pane)
+  // Claude Code resumes at DEFAULT mode + the model-default effort, so re-assert the session's own
+  // last-known dials once it reaches the REPL, THEN deliver anything held while the picker was up.
+  await restoreResumedDials(pane, pane === focus.activePaneId ? focus.paneWatcher : null)
+  await flushEditorHeld(pane)
+  const after = await capturePane(pane).catch(() => '')
+  return { ok: true, chosen, glance: paneGlance({
+    blocked: after ? detectBlockedScreen(after)?.label ?? null : null,
+    working: !!after && detectWorking(after),
+    atPrompt: !!after && onNormalPrompt(after),
+  }) }
+}
+
+async function relayResumeChoice(paneId: string, resume: { options: PromptOption[]; current: number | null; scale: { age: string; tokens: string } | null }): Promise<void> {
+  const sig = resumePickerSig(resume.options, resume.scale)
+  const rows = loadResumeCards()
+  if (planResumeCardMint(rows[paneId]?.sig ?? null, sig) === 'skip') return
+  // Staked BEFORE the send, so a second relay tick inside the round trip cannot mint a twin.
+  rows[paneId] = { sig, at: Date.now() }
+  saveResumeCards(rows)
+  const offered = planResumeOptions(resume.options, resume.current)
+  const name = await paneDisplayName(paneId)
+  const cwd = await paneCwd(paneId).catch(() => null)
+  process.stderr.write(`daemon: resume picker card → owner for ${name} (${paneId}); ${offered.length} option(s) offered, ${resume.scale?.tokens ?? '?'} tokens\n`)
   const kb = new InlineKeyboard()
-  options.forEach((o, i) => { kb.text(resumeButtonLabel(o.label), `resumesel:${i + 1}:${paneId}`).row() })
-  const body = ['🔄 <b>This session is resuming after a Claude update.</b> Pick how to bring it back:', '',
-    ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
-  for (const t of await outboundTargetsFor(paneId)) {
-    await channel.sendText(String(t.chat), body,
-      { buttons: kbToButtons(kb), ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
+  for (const o of offered) kb.text(o.button, `resumesel:${o.idx + 1}:${paneId}`).row()
+  const body = planResumeCardText({ name, cwd, scale: resume.scale, options: resume.options, offered })
+  for (const chat of ownerCardChats()) {
+    const m = await channel.sendText(chat, body, offered.length ? { buttons: kbToButtons(kb) } : {}).catch(() => null)
+    if (m) {
+      const now = loadResumeCards()
+      now[paneId] = { sig, at: Date.now(), chat, messageId: Number(m.messageId) }
+      saveResumeCards(now)
+    }
   }
 }
 
@@ -2998,7 +3065,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
   if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
-  { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(pane, resume.options); return } }
+  { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(pane, resume); return } }
 
   // Sign-in link printed as plain output (independent of menu detection).
   const authUrl = extractAuthUrl(text)
@@ -7037,7 +7104,7 @@ function onPaneEvent(text: string): void {
   // Post-update "Resume session" picker — relay the choice (summary / full / don't-ask) as buttons so
   // the user decides how the session comes back, instead of wedging before the REPL and bouncing every
   // inbound as an unrecognised screen. Deduped per pane so a repaint doesn't re-post.
-  if (focus.activePaneId) { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(focus.activePaneId, resume.options); return } }
+  if (focus.activePaneId) { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(focus.activePaneId, resume); return } }
 
   // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
   // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH
@@ -17491,35 +17558,26 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Post-update "Resume session" picker choice (detectResumeSessionPrompt / relayResumeChoice) —
-  // `resumesel:N:pane` drives the Nth option on that pane. The picker opens on option 1, so reaching
-  // option N is N-1 Down presses then Enter. After it settles, flush any message held while the
-  // picker was up (held in editorHeld by the inbound guard).
+  // Post-update resume-cost picker choice — `resumesel:N:pane` presses option N on that pane.
+  // The handler is deliberately a THIN SHELL over applyResumeChoice: an agent can never originate a
+  // callback query (no backdoor past cbAuth, ever), so everything a test or a probe can reach has to
+  // live below this line, and only the dispatch stays unproven.
   const resumeSelMatch = /^resumesel:(\d+):(.+)$/.exec(data)
   if (resumeSelMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const idx = Number(resumeSelMatch[1]) - 1
     const pane = resumeSelMatch[2]
-    await ctx.editMessageReplyMarkup().catch(() => {})   // drop the buttons
-    resumeRelayed.delete(pane)
-    if (!(await paneAlive(pane).catch(() => false))) {
-      await flushEditorHeld(pane)   // pane gone → let the held message buffer/route normally
-      await ctx.reply('⚠️ That session\'s pane is gone — couldn\'t drive the resume.').catch(() => {})
-      return
-    }
-    await withPaneInjection(pane, async () => { await navigateDown(pane, idx); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 8000) })
-    const progressMsg = await ctx.reply('⏳ Resuming — restoring its previous mode/effort, and any message you sent meanwhile will be delivered once it\'s back.').catch(() => null)
-    // Claude Code resumes at DEFAULT mode + the model-default effort, so re-assert the session's own
-    // last-known dials once it reaches the REPL, THEN deliver anything held while the picker was up.
-    // Once it's actually back, self-edit the ⏳ notice into a ✅ confirmation.
-    const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+    await ctx.editMessageReplyMarkup().catch(() => {})   // drop the buttons: the decision is taken
+    await ctx.editMessageText('⏳ Pressing it — restoring its mode/effort, then I\'ll say what its row reads.',
+      { parse_mode: 'HTML' }).catch(() => {})
+    // Detached: restoreResumedDials waits for the REPL, which is far longer than a callback should
+    // hold. The card is the progress surface, so there is nothing to keep the handler open for.
     void (async () => {
-      await restoreResumedDials(pane, watcher)
-      await flushEditorHeld(pane)
-      if (progressMsg && await paneAlive(pane).catch(() => false))
-        await channel.editText({ chatId: String(progressMsg.chat.id), messageId: String(progressMsg.message_id) },
-          '✅ Resumed — restored its previous mode/effort. Anything you sent meanwhile has been delivered.').catch(() => {})
+      const r = await applyResumeChoice(pane, idx)
+      const name = await paneDisplayName(pane).catch(() => pane)
+      await ctx.editMessageText(r.ok ? planResumeOutcome({ name, chosen: r.chosen, glance: r.glance })
+        : `⚠️ <b>@${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, { parse_mode: 'HTML' }).catch(() => {})
     })()
     return
   }
@@ -18951,7 +19009,7 @@ async function handleInbound(
     if (cap) {
       const resume = detectResumeSessionPrompt(cap)
       if (resume) {
-        void relayResumeChoice(effPane, resume.options)
+        void relayResumeChoice(effPane, resume)
         editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
         logDecision({ family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: 'resume picker on screen', hint: 'held in editorHeld until the picker is answered' })
         return
@@ -21586,12 +21644,13 @@ setInterval(() => void sweepClaudeInstall(), 6 * 3_600_000).unref()
 // terminates on delete) and its own deletion performs the "✅ Compacted" card teardown — a bare
 // sweep-delete would strand the "🗜️ Compacting…" card forever. Entries are short-lived + self-cleaning.
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
-  resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
+  paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
   modelUnavailAlerted, staleSessionNotified, auxPromptStates, stuckWatch, paneActionOrigin,
   loginHeldPanes, wedgeEscalated,   // Sets — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
   for (const m of PANE_STATE_MAPS) m.delete(paneId)
+  clearResumeCard(paneId)            // the resume-card mark is PERSISTED (it must survive a restart), so it is swept here rather than in the map list above
   invalidateCapture(paneId)          // the shared capture cache is pane-keyed too — don't leak it
 }
 async function sweepDeadPaneState(): Promise<void> {

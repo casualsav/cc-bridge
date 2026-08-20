@@ -225,6 +225,26 @@ that discards the conversation, which is what the first hint recommended before 
 is colour, which `capturePane` strips) and `resumeRecovery` counts down-presses from there to the
 full-session option — naming no keys at all when either is unreadable, because a wrong keystroke here
 is unrecoverable and a missing hint is not.
+
+**THE RESUME PICKER IS THE OWNER'S DECISION, DELIVERED AS A CARD — nothing presses it unattended, ever**
+(v0.5.178, 2026-08-20). Put to him as a three-way policy fork (stop refreshing big sessions / always
+press "full" / always press "summary") he refused all three: *"That decision should come to me in a
+message here in the main chat with buttons naming the session, the amount of context, and giving me the
+options to choose from."* Either answer spends something irreversible — his usage limits or a working
+conversation — so `relayResumeChoice` cards **his DM** (`ownerCardChats`, the chat lanes; never a worker
+topic, which is silent by design and is why @hourlystudy's eight relays went unread) and
+`applyResumeChoice` is reachable from exactly ONE caller, the `resumesel` tap behind `cbAuth` —
+`resume-picker-card.test.ts` asserts that call count, because a sweep or timer acquiring this function is
+the regression. Three things are load-bearing: the mint mark is **persisted**
+(`resume-cards.json`) — the in-memory Map it replaces re-sent the card 1.5s after every `listening on`;
+the keys are **re-derived from a fresh capture at press time**, never carried in the callback data, since
+a card can be hours old and Down-presses counted against a moved cursor select the wrong row; and the
+button labels say what the tap COSTS rather than repeating "(recommended)", which is the CLI's word for
+the destructive one. Proof: `resume-picker-card.test.ts` (source-bound; four call-site tests must fail
+against a pre-0.5.178 `daemon.ts`) and a live run on an INDEPENDENT picker — a 227.3k-token conversation
+copied into a scratch project dir, `down enter` moving the cursor 1→2 and resuming at `↑227.1k`, i.e.
+full and not from a summary (`$(tg shared)/bridgevitals-2026-08-20/`). The tap itself has never fired:
+an agent cannot originate a callback query, which is why the handler is a thin shell.
 Proof: `blocked-screen.test.ts` — the real wedged pane as `fixtures/pane-resume-wedge.txt`, with the
 shipped busy composite asserted TRUE on it as the known-answer control, and a source-bound half
 (`CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts>` must fail exactly its five call-site tests). **Still

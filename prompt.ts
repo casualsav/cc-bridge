@@ -623,7 +623,10 @@ const RESUME_SUMMARY_OPT = /resume (?:from|with) summary/i
 // "Resume from summary" — the destructive one. Read from the plain capture (the glyph), never from
 // the highlight colour, which `capturePane` strips (see the /model picker's note on SGR 153).
 const RESUME_OPT = /^\s*(?:([>❯►▶_])\s*)?(\d+)[.)]\s+(.+?)\s*$/
-export function detectResumeSessionPrompt(paneText: string): { options: PromptOption[]; current: number | null } | null {
+// The size claim the picker makes about the conversation — the number the owner is being asked to
+// spend, quoted to him rather than measured here.
+const RESUME_SCALE = /this session is\s+(.+?)\s+old and\s+(\S+)\s+tokens/i
+export function detectResumeSessionPrompt(paneText: string): { options: PromptOption[]; current: number | null; scale: { age: string; tokens: string } | null } | null {
   const lines = paneLines(paneText)
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -641,7 +644,12 @@ export function detectResumeSessionPrompt(paneText: string): { options: PromptOp
   }
   if (rows.length < 2 || !rows.some(o => RESUME_SUMMARY_OPT.test(o.label))) return null
   const cursor = rows.findIndex(r => r.cursor)
-  return { options: rows.map(r => ({ label: r.label })), current: cursor < 0 ? null : cursor }
+  const m = lines.slice(0, footerIdx).reverse().map(l => RESUME_SCALE.exec(l)).find(Boolean)
+  return {
+    options: rows.map(r => ({ label: r.label })),
+    current: cursor < 0 ? null : cursor,
+    scale: m ? { age: m[1].trim(), tokens: m[2].trim() } : null,
+  }
 }
 export function isResumeSessionPrompt(paneText: string): boolean {
   return !!detectResumeSessionPrompt(paneText)
