@@ -17576,8 +17576,13 @@ bot.on('callback_query:data', async ctx => {
     void (async () => {
       const r = await applyResumeChoice(pane, idx)
       const name = await paneDisplayName(pane).catch(() => pane)
-      await ctx.editMessageText(r.ok ? planResumeOutcome({ name, chosen: r.chosen, glance: r.glance })
-        : `⚠️ <b>@${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, { parse_mode: 'HTML' }).catch(() => {})
+      // The edit is the ONLY thing the owner sees, and a bot cannot read its own message back — so
+      // whether his card was actually updated is knowable from the log or from nowhere. That is the
+      // same lesson this whole feature came from: a notice nobody can confirm is a notice nobody got.
+      const edited = await ctx.editMessageText(r.ok ? planResumeOutcome({ name, chosen: r.chosen, glance: r.glance })
+        : `⚠️ <b>@${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, { parse_mode: 'HTML' })
+        .then(() => true).catch(() => false)
+      process.stderr.write(`daemon: resume picker card for ${name} → ${r.ok ? `pressed "${r.chosen.label}"; now ${r.glance}` : `NOT pressed (${r.error})`}; card edit ${edited ? 'ok' : 'FAILED'}\n`)
     })()
     return
   }
