@@ -119,7 +119,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript, recordedTranscript, fallbackIsCrowded } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
-import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, CONFIRM_WINDOW_MS } from './ask-parity.ts'
+import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, CONFIRM_WINDOW_MS, type ProofRead } from './ask-parity.ts'
 import { paneFreedom, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
@@ -4675,24 +4675,63 @@ function onAskConfirmed(cur: BusPending, now: number): void {
 // which answer 896's 606 KB first tool result pushed the block out of (ask-parity.ts `confirmScanStart`).
 // The needle is `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting
 // it back would false-positive on.
-const askBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<boolean> => transcriptCarries(sid, t => blockCarriesAsk(t, id), pastedSize)
+const askBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAsk(t, id), pastedSize)
 // Unit 3: an ANSWER's proof — the `re=<id>` block in the ASKER's transcript.
-const answerBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<boolean> => transcriptCarries(sid, t => blockCarriesAnswer(t, id), pastedSize)
-async function transcriptCarries(sid: string, carries: (text: string) => boolean, pastedSize?: number): Promise<boolean> {
+const answerBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAnswer(t, id), pastedSize)
+
+// Three answers, not two. `absent` means the conversation was READ and does not carry the block;
+// `unreadable` means the proof never got to look, and the two used to share the word `false` — which
+// is how a one-second resolution refusal became "the CLI accepted and discarded your brief", carded to
+// the owner's DM (asks 956 and 967, 2026-08-20; ask-parity.ts carries his ruling). `whyUnreadable`
+// names the check that failed, because a warning that cannot say what it checked cannot be trusted by
+// the person reading it — and because the next occurrence should identify its own guard instead of
+// being reconstructed from offsets afterwards, the way these two had to be.
+const lastUnreadableWhy = new Map<string, string>()
+async function transcriptCarries(sid: string, carries: (text: string) => boolean, pastedSize?: number): Promise<ProofRead> {
+  const note = (why: string): ProofRead => { lastUnreadableWhy.set(sid, why); return 'unreadable' }
   try {
     const pane = await paneForSession(sid).catch(() => null)
-    const file = pane ? await transcriptForPane(pane, null).catch(() => null) : null
-    if (!file) return false
-    return fileCarries(file, carries, pastedSize)
-  } catch { return false }
+    if (!pane) return note('that session has no live pane, so its conversation could not be opened')
+    const file = await transcriptForPane(pane, null).catch(() => null)
+    if (!file) return note(`its transcript could not be resolved for pane ${pane} (the CLI's record refused it, or a guard declined the folder)`)
+    try { return fileCarries(file, carries, pastedSize) ? 'found' : 'absent' }
+    catch { return note(`its transcript ${basename(file)} could not be read`) }
+  } catch { return note('the proof itself failed before it could look') }
 }
-// The anchor for that scan, taken at the paste. Undefined when the transcript cannot be resolved (a
-// fresh spawn that has said nothing yet) — the proof then keeps the tail read.
+const whyUnreadable = (sid: string): string => lastUnreadableWhy.get(sid) ?? 'the proof could not read its conversation'
+// The anchor for that scan, taken at the paste.
+//
+// A FRESH SPAWN'S FOUNDING ASK CAN BE PASTED BEFORE ITS TRANSCRIPT EXISTS. `transcriptForPane` refuses
+// an unwritten conversation by design (v0.5.160 — that boot window is where cross-adoption happened),
+// so this returned `undefined` and the proof fell back to the 512 KB tail. An unwritten conversation
+// has a KNOWN anchor and it is 0: the file does not exist, so when it is created the block cannot land
+// anywhere but after byte zero.
+//
+// NOT the cause of asks 956/967, though it was first read that way — measured afterwards, 956's block
+// sat at byte 517 of a 340 KB file, inside every window this module has ever used, and its transcript
+// existed 13s before the paste. Those were unreadable-vs-absent (see transcriptCarries). This stands
+// on its own: a race that has not been observed losing anything is still a window worth closing.
+//
+// The `unwritten` read is POSITIVE — `recordedTranscript`'s own verdict, the same call
+// `transcriptForPane` makes — and NOT "null means zero". Every other reason resolution fails still
+// yields `undefined` and keeps the tail: those are states where the file may be enormous and already
+// scrolled past, and scanning one from 0 every sweep is a cost this must not take on a guess.
 async function transcriptSizeForPane(pane: string): Promise<number | undefined> {
   try {
     const file = await transcriptForPane(pane, null).catch(() => null)
-    return file ? statSync(file).size : undefined
+    if (file) return statSync(file).size
+    return paneTranscriptUnwritten(pane) ? 0 : undefined
   } catch { return undefined }
+}
+
+// "The CLI has a live record for this pane, and the conversation it names has not been written yet."
+// Deliberately the same two calls `transcriptForPane`'s STEP 2 makes, so the two readings cannot
+// drift apart in meaning — only in when they are asked.
+function paneTranscriptUnwritten(pane: string): boolean {
+  try {
+    const row = rowForPane(pane, readRegistryRows(listAccounts().map(a => a.configDir)))
+    return recordedTranscript(row && rowIsLive(row) ? row : null, existsSync).kind === 'unwritten'
+  } catch { return false }
 }
 
 // The sweep. Promotes a pasted ask to delivered on proof, and REPORTS one that never arrived — it
@@ -4701,9 +4740,21 @@ async function transcriptSizeForPane(pane: string): Promise<number | undefined> 
 async function confirmInjections(): Promise<void> {
   const now = Date.now()
   for (const cur of awaitingConfirmation()) {
-    const seen = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch(() => false)
-    const plan = planInjectionConfirm({ seen, pastedAt: cur.pastedAt!, now })
+    let read = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch((): ProofRead => 'unreadable')
+    // RE-VERIFY BEFORE ACCUSING ANYONE (owner's ruling, 2026-08-20). Only at the deadline, so the
+    // ordinary sweep still costs one read: the whole failure was a terminal verdict taken off a single
+    // read that had not actually looked.
+    if (read !== 'found' && now - cur.pastedAt! >= CONFIRM_WINDOW_MS)
+      read = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch((): ProofRead => 'unreadable')
+    const plan = planInjectionConfirm({ seen: read === 'found', readable: read !== 'unreadable', pastedAt: cur.pastedAt!, now })
     if (plan === 'wait') continue
+    if (plan === 'unverifiable') {
+      // NOT a delivery failure and never reported as one. The row stays exactly as it was — still
+      // awaiting confirmation — so a later sweep that CAN read the conversation still settles it.
+      logDecision({ key: `confirm:${cur.id}`, family: 'bus', what: `ask ${cur.id}`, target: cur.toName, pane: null,
+        decision: 'HELD', predicate: `proof unreadable: ${whyUnreadable(cur.toSid)}`, hint: 'not reported — a failed read is not a missing block' })
+      continue
+    }
     if (plan === 'confirm') {
       // Elapsed is read BEFORE the promotion: markInjected deletes `pastedAt` from the very row object
       // this loop is holding, so reading it afterwards printed "after NaNs" (live, 0.5.127).
@@ -4724,7 +4775,7 @@ async function confirmInjections(): Promise<void> {
     const askerPane = await paneForSession(cur.fromSid).catch(() => null)
     for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : [])
       void channel.sendText(chat,
-        `⚠️ Ask ${cur.id} was pasted into <b>${escapeHtml(cur.toName)}</b>'s pane but never appeared in its conversation — the CLI took it and did not run it. Nothing was re-sent (that would duplicate). Re-send it yourself if it still matters.`,
+        `⚠️ Ask ${cur.id} was pasted into <b>${escapeHtml(cur.toName)}</b>'s pane but never appeared in its conversation — the CLI took it and did not run it. Nothing was re-sent (that would duplicate). Re-send it yourself if it still matters.\n\n<i>Checked twice: its conversation was read to the end both times and does not carry the block.</i>`,
         { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', cur.id,
       `(ask ${cur.id} was PASTED into @${cur.toName}'s pane but never entered its conversation — the CLI accepted and discarded it. Not re-sent, because nothing can see that queue and a retry would duplicate. Re-send if it still matters.)`))
@@ -4736,9 +4787,18 @@ async function confirmInjections(): Promise<void> {
   // risk, written down: a proof FALSE-NEGATIVE (answer landed, the match missed) re-opens an answered
   // ask and the re-run produces a DUPLICATE answer block. Noise; a silently lost answer was the disease.
   for (const a of listAnswersInFlight()) {
-    const seen = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch(() => false)
-    const plan = planInjectionConfirm({ seen, pastedAt: a.pastedAt, now })
+    let read = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch((): ProofRead => 'unreadable')
+    if (read !== 'found' && now - a.pastedAt >= CONFIRM_WINDOW_MS)
+      read = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch((): ProofRead => 'unreadable')
+    const plan = planInjectionConfirm({ seen: read === 'found', readable: read !== 'unreadable', pastedAt: a.pastedAt, now })
     if (plan === 'wait') continue
+    if (plan === 'unverifiable') {
+      // Same ruling, higher stakes: this branch RE-OPENS an ask and tells the answerer to re-run.
+      // Doing that because we could not read the asker's conversation would double a delivered answer.
+      logDecision({ key: `confirm:answer:${a.id}`, family: 'bus', what: `answer ${a.id}`, target: a.row.fromName, pane: null,
+        decision: 'HELD', predicate: `proof unreadable: ${whyUnreadable(a.askerSid)}`, hint: 'not re-opened — a failed read is not a missing answer' })
+      continue
+    }
     clearAnswerInFlight(a.id)
     if (plan === 'confirm') {
       process.stderr.write(`daemon: answer ${a.id} by @${a.answerer} → @${a.row.fromName} CONFIRMED in its transcript after ${Math.round((now - a.pastedAt) / 1000)}s\n`)

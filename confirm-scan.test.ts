@@ -10,7 +10,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync, appendFileSync, statSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileCarries, confirmScanStart, blockCarriesAnswer, blockCarriesAsk, CONFIRM_TAIL_BYTES, CONFIRM_BACK_WINDOW_BYTES } from './ask-parity.ts'
+import { fileCarries, confirmScanStart, blockCarriesAnswer, blockCarriesAsk, planInjectionConfirm, CONFIRM_TAIL_BYTES, CONFIRM_BACK_WINDOW_BYTES } from './ask-parity.ts'
 
 const line = (o: object) => JSON.stringify(o) + '\n'
 const filler = (n: number) => 'x'.repeat(n)
@@ -85,4 +85,114 @@ test('SOURCE: the three paste stamps record the transcript size and both proofs 
   expect(src).toContain('askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize)')
   expect(src).toContain('answerBlockInTranscript(a.askerSid, a.id, a.pastedSize)')
   expect(src).not.toContain('CONFIRM_TAIL_BYTES = ')   // the window lives in ask-parity.ts now, with its rule
+})
+
+// ---- the FOUNDING ask: pasted before the transcript exists ---------------------------------------
+//
+// Asks 956 and 967, both on 2026-08-20, inside an hour of each other. A spawn's first message is
+// pasted into a REPL that has never written a turn, so `transcriptForPane` refuses (v0.5.160: an
+// unwritten conversation must not be guessed at) and there was no size to stamp. The proof fell back
+// to the 512 KB tail — and a fresh session's FIRST tool result is routinely bigger than that, so the
+// founding block was outside the window before the first sweep. The bus then reported "pasted but
+// never entered its conversation" about a brief the session was already executing.
+//
+// The anchor was never unknowable: an unwritten conversation starts at byte 0.
+function foundingSpawn(): { file: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'confirm-scan-'))
+  const file = join(dir, 'fresh.jsonl')
+  // …at paste time this file DOES NOT EXIST. The daemon stamps pastedSize = 0.
+  // The CLI then writes the conversation, starting with the founding block:
+  writeFileSync(file, line({ type: 'user', message: { content: `<tg @chat ask=956>Owner-reported bridge defect, fresh session, one unit. ${filler(4_000)}</tg>` } }))
+  // …and the session's first act is a big read — a repo file, a log tail, a fixture.
+  appendFileSync(file, line({ type: 'assistant', message: { content: [{ type: 'tool_use' }] } }))
+  appendFileSync(file, line({ type: 'user', message: { content: [{ type: 'tool_result', content: filler(CONFIRM_TAIL_BYTES + 200_000) }] } }))
+  return { file }
+}
+
+test('CONTROL: with no anchor the founding ask reads as never delivered — asks 956 and 967', () => {
+  const { file } = foundingSpawn()
+  expect(readFileSync(file, 'utf8')).toContain('ask=956')            // the session HAS the brief
+  expect(fileCarries(file, t => blockCarriesAsk(t, 956))).toBe(false) // …and the proof says otherwise
+})
+
+test('an unwritten conversation anchors at 0, and the proof finds the founding block', () => {
+  const { file } = foundingSpawn()
+  expect(fileCarries(file, t => blockCarriesAsk(t, 956), 0)).toBe(true)
+  // 0 is a real anchor, not an absent one: it must survive the `!= null` test the row-store and the
+  // scan both make, or it decays to the tail read that caused this.
+  expect(confirmScanStart(5_000_000, 0)).toBe(0)
+  expect(confirmScanStart(5_000_000, undefined)).toBe(5_000_000 - CONFIRM_TAIL_BYTES)
+  // and it stays a proof, not a rubber stamp — a different id in the same file is still not found
+  expect(fileCarries(file, t => blockCarriesAsk(t, 957), 0)).toBe(false)
+})
+
+test('SOURCE: the 0 anchor comes from a POSITIVE record read, never from "resolution failed"', () => {
+  const src = readFileSync(join(process.env.CC_BRIDGE_SRC_DIR || import.meta.dir, 'daemon.ts'), 'utf8')
+  const fn = src.slice(src.indexOf('async function transcriptSizeForPane('), src.indexOf('function paneTranscriptUnwritten('))
+  expect(fn).toContain('paneTranscriptUnwritten(pane) ? 0 : undefined')
+  // The distinction this rests on: a REFUSAL (unknown owner, unreadable registry, an older CLI that
+  // writes no record) keeps the tail, because those files can be enormous and already scrolled past.
+  const probe = src.slice(src.indexOf('function paneTranscriptUnwritten('))
+  expect(probe).toContain("recordedTranscript(row && rowIsLive(row) ? row : null, existsSync).kind === 'unwritten'")
+})
+
+// ---- unreadable is not absent: the false alarm that reached the owner's DM -----------------------
+//
+// Asks 956 and 967 (2026-08-20) were both reported as "pasted but NEVER appeared in its conversation",
+// and because the asker was @chat — whose lane lives in the owner's DM — both warnings were carded to
+// him. Neither was true. Measured afterwards from the transcript itself:
+//
+//   22:31:51.324Z  @bridgevitals' transcript is created
+//   22:32:04Z      ask 956 pasted; its block is written at BYTE 517
+//   22:34:04Z      "NEVER appeared after 120s" — the file is 340 KB, so the 512 KB tail covered
+//                  ALL of it, and the block was inside every window this module has ever used
+//
+// So the scan was never the problem: `transcriptCarries` answered `false` for "not in the
+// conversation" AND for "could not resolve the conversation", and the sweep read the second as the
+// first. The daemon log holds the refusal 13 seconds earlier — "session 2ebef204… has written no
+// transcript yet" — which is what a freshly-spawned pane looks like for a moment.
+//
+// His ruling: "The false alarm notifications also need to be fixed… a warning he receives should be
+// true."
+const t0 = 1_000_000
+const WINDOW = 120_000
+
+test('CONTROL: one boolean cannot tell "not there" from "could not look" — asks 956 and 967', () => {
+  // What the sweep computed. Both failures arrive as `seen: false`, and both end TERMINAL.
+  expect(planInjectionConfirm({ seen: false, pastedAt: t0, now: t0 + WINDOW })).toBe('unconfirmed')
+})
+
+test('an unreadable proof is HELD, never reported as a delivery that vanished', () => {
+  expect(planInjectionConfirm({ seen: false, readable: false, pastedAt: t0, now: t0 + WINDOW })).toBe('unverifiable')
+  // …and it is still only a deadline verdict: before the window it waits exactly as it always did.
+  expect(planInjectionConfirm({ seen: false, readable: false, pastedAt: t0, now: t0 + WINDOW - 1 })).toBe('wait')
+  // A conversation that WAS read and genuinely lacks the block is still reported — that warning is true.
+  expect(planInjectionConfirm({ seen: false, readable: true, pastedAt: t0, now: t0 + WINDOW })).toBe('unconfirmed')
+  // Found beats everything, readable or not.
+  expect(planInjectionConfirm({ seen: true, readable: false, pastedAt: t0, now: t0 + WINDOW })).toBe('confirm')
+})
+
+test('the default keeps every existing caller meaning exactly what it meant', () => {
+  expect(planInjectionConfirm({ seen: false, pastedAt: t0, now: t0 + WINDOW })).toBe('unconfirmed')
+  expect(planInjectionConfirm({ seen: false, readable: undefined, pastedAt: t0, now: t0 + WINDOW })).toBe('unconfirmed')
+})
+
+test("SOURCE: the proof is three-state, re-verified at the deadline, and unreadable is never reported", () => {
+  const src = readFileSync(join(process.env.CC_BRIDGE_SRC_DIR || import.meta.dir, 'daemon.ts'), 'utf8')
+  // 'absent' and 'unreadable' are different answers, and the reason is kept for the warning text.
+  const carries = src.slice(src.indexOf('async function transcriptCarries('), src.indexOf('const whyUnreadable'))
+  expect(carries).toContain("? 'found' : 'absent'")
+  expect(carries).toContain("return note(")
+  expect(carries).not.toContain('return false')
+  // Both sweeps re-read once at the deadline before taking any terminal action…
+  const asks = src.slice(src.indexOf('async function confirmInjections('), src.indexOf('for (const a of listAnswersInFlight()'))
+  expect(asks).toContain('now - cur.pastedAt! >= CONFIRM_WINDOW_MS')
+  expect(asks).toContain("readable: read !== 'unreadable'")
+  // …and an unreadable one continues, leaving the row awaiting confirmation rather than accusing anyone.
+  expect(asks).toContain("if (plan === 'unverifiable')")
+  const answers = src.slice(src.indexOf('for (const a of listAnswersInFlight()'))
+  expect(answers).toContain('now - a.pastedAt >= CONFIRM_WINDOW_MS')
+  expect(answers).toContain("if (plan === 'unverifiable')")
+  // The warning that DOES reach him says what was checked, so he can tell a true one from a guess.
+  expect(src).toContain('Checked twice: its conversation was read to the end both times')
 })

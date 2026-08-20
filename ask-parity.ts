@@ -54,11 +54,31 @@ export function planAskGate(p: PaneGate): AskGate {
 // removing.
 export const CONFIRM_WINDOW_MS = 120_000
 
-export type ConfirmPlan = 'confirm' | 'wait' | 'unconfirmed'
+// A FAILED READ IS NOT A MISSING BLOCK — the distinction this whole file exists to make, applied to
+// its own instrument. `transcriptCarries` used to answer `false` for "the block is not in the
+// conversation" AND for "I could not resolve or read the conversation at all", so a resolution that
+// refused for a second (a fresh spawn's boot window, a guard declining a crowded folder) came out as
+// "the CLI accepted and discarded your brief" — and that warning is carded to whoever asked, which for
+// a chat-origin ask is the OWNER'S DM. Asks 956 and 967 (2026-08-20) were both reported that way while
+// the block sat at byte 517 of a 340 KB file, well inside every window this module has ever used; his
+// ruling the same evening: "The false alarm notifications also need to be fixed… a warning he receives
+// should be true."
+//
+// So an expired window has two endings, and only one of them accuses the CLI of eating the message.
+// `readable: false` says the proof never got to look — reported as UNVERIFIABLE, naming the check that
+// failed, and never as a delivery that vanished.
+export type ProofRead = 'found' | 'absent' | 'unreadable'
+export type ConfirmPlan = 'confirm' | 'wait' | 'unconfirmed' | 'unverifiable'
 
-export function planInjectionConfirm(r: { seen: boolean; pastedAt: number; now: number }, windowMs = CONFIRM_WINDOW_MS): ConfirmPlan {
+export function planInjectionConfirm(
+  r: { seen: boolean; pastedAt: number; now: number; readable?: boolean },
+  windowMs = CONFIRM_WINDOW_MS,
+): ConfirmPlan {
   if (r.seen) return 'confirm'
-  return r.now - r.pastedAt < windowMs ? 'wait' : 'unconfirmed'
+  if (r.now - r.pastedAt < windowMs) return 'wait'
+  // Default TRUE so every pre-existing caller and test keeps its exact meaning: the new ending is
+  // reachable only by a caller that has actually distinguished the two failures.
+  return r.readable === false ? 'unverifiable' : 'unconfirmed'
 }
 
 // The needle. A delivered block carries `ask=<id>` — or `ack=<id>`, because formatAskBlock renders a
