@@ -188,7 +188,7 @@ test('the daemon binds tmux to the shared loop and adds no decision of its own',
 })
 
 test('a declined exit is "not now": un-marked and retried, never reported as refreshed', () => {
-  const sweep = bodyOf('async function autoRefreshStaleSessions(', 5000)
+  const sweep = bodyOf('async function autoRefreshStaleSessions(', 7500)
   expect(sweep).toContain('liveSubagents(file)')                        // the pre-gate
   expect(sweep).toContain("now === 'untouched' || st.declined")         // the post-gate, same bucket
   expect(sweep).toContain('staleSessionNotified.delete(t.pane)')        // so a later sweep retries it
@@ -198,6 +198,23 @@ test('a declined exit is "not now": un-marked and retried, never reported as ref
   expect(core).toContain('if (declined) { if (status) status.declined = true; return null }')
   // Ahead of every other post-run branch — they all reason about a pane the agent has LEFT.
   expect(core.indexOf('status.declined = true')).toBeLessThan(core.indexOf('if (!launchVerified && await paneAlive(pane))'))
+})
+
+test('a held session is skipped before any gate, and never marked as handled', () => {
+  // The guard makes a badly-timed /exit RECOVERABLE, not FREE: a clean exit-and-relaunch still costs
+  // an in-CLI scheduled task, silently. So a hold has to win over "it looks idle", which means it is
+  // read before the gates that ask that question. Owner ruling 2026-08-20, @hourlyedge.
+  const sweep = bodyOf('async function autoRefreshStaleSessions(', 7500)
+  expect(sweep).toContain('await holdFor(pane, holds)')
+  expect(sweep.indexOf('holdFor(pane, holds)')).toBeLessThan(sweep.indexOf('safeToType(cap)'))
+  // Unmarked on purpose: `staleSessionNotified` would retire the pane until the next binary, so
+  // lifting the hold would not take effect for hours — and the hourly line that says "held on
+  // purpose" would stop.
+  const skip = sweep.slice(sweep.indexOf('const held ='), sweep.indexOf('const cap ='))
+  expect(skip).not.toContain('staleSessionNotified')
+  expect(skip).toContain('deliberate, temporary')
+  // Keyed by sid, never by name — a retired sid cannot come back and hold a stranger.
+  expect(bodyOf('async function holdFor(', 600)).toContain('sessionForPane(pane, false)')
 })
 
 test('the version claim is re-read before it is made', () => {

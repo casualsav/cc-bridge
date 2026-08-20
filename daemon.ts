@@ -12124,11 +12124,45 @@ async function paneSafeToType(pane: string): Promise<boolean> {
 // safety gate is skipped SILENTLY and retried on the next sweep — an owner mid-turn or mid-draft is
 // not a failure, it's "not now". Panes we DO attempt are marked against the installed version, so a
 // session that can't come back is tried once per new binary instead of every hour forever.
+// A session the sweep must NOT touch, however idle it looks — a deliberate, temporary hold, written
+// by hand into `<state>/refresh-hold.json` and read fresh on every sweep so removing it needs no
+// restart. Keyed by SESSION ID, never by name: a retired sid never comes back, so a forgotten entry
+// can never hold a stranger that happens to reuse the name.
+//
+// It exists because "safe to exit" and "free to exit" are still two questions. The guard below makes
+// a badly-timed `/exit` recoverable; it cannot make it free. A session holding an in-CLI SCHEDULED
+// TASK loses that task to a perfectly CLEAN exit-and-relaunch — nothing is wedged, nothing is
+// logged, the heartbeat is simply gone — and even the escape-and-back-out path costs a wedge window
+// on a session someone is watching. @hourlyedge, 2026-08-20 (owner ruling): held on CLI 2.1.235
+// until its catalog study ends, then retired, at which point the entry goes inert on its own.
+type RefreshHold = { name?: string; why: string; at?: number }
+const REFRESH_HOLD_FILE = join(STATE_DIR, 'refresh-hold.json')
+const loadRefreshHolds = (): Record<string, RefreshHold> =>
+  readJsonFile<Record<string, RefreshHold>>(REFRESH_HOLD_FILE, {})
+
+async function holdFor(pane: string, holds: Record<string, RefreshHold>): Promise<{ hold: RefreshHold; label: string } | null> {
+  if (!Object.keys(holds).length) return null   // the common case pays one property read, not a tmux round trip
+  const sid = await sessionForPane(pane, false).catch(() => null)
+  const hold = sid ? holds[sid] : undefined
+  if (!hold) return null
+  return { hold, label: `@${hold.name ?? getTopicBySession(sid!)?.name ?? sid} (${pane}, sid ${sid})` }
+}
+
 async function autoRefreshStaleSessions(panes: string[], installed: string): Promise<void> {
   const targets: RestartTarget[] = []
+  const holds = loadRefreshHolds()
   for (const pane of panes) {
     try {
       if (isPaneRestarting(pane)) continue
+      // FIRST, ahead of every gate: the others answer "is now a good moment", and a hold means there
+      // is no good moment. Deliberately NOT marked in `staleSessionNotified` — an unmarked pane is
+      // re-collected next sweep, so lifting the hold takes effect within the hour and the log keeps
+      // saying, hourly, that this session is being skipped on purpose.
+      const held = await holdFor(pane, holds)
+      if (held) {
+        process.stderr.write(`daemon: auto-refresh HOLD on ${held.label} — ${held.hold.why} (deliberate, temporary; ${REFRESH_HOLD_FILE})\n`)
+        continue
+      }
       const cap = await capturePane(pane).catch(() => '')
       // safeToType folds in the old onNormalPrompt/!detectWorking/empty-composer check AND every other
       // modal state (bash-mode-armed, the credit-consent dialog, a model picker, …) this narrower check
