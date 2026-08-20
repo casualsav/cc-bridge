@@ -429,7 +429,11 @@ record cannot see — typed text in the box, a picker, a wedge. **Only `busy` ve
 what the record shows with a BACKGROUND shell alive at a prompt, and treating it as held stopped every
 ask and ack to such a session for as long as the task lived (49 minutes on 2026-08-16, rows 586/593/594;
 fixed v0.5.139); `waiting` delivers because a blocked session is the one most in need of a message and
-a real dialog is still caught by `planAskGate` after the veto. Two more things are load-bearing and all
+a real dialog is still caught by `planAskGate` after the veto. **And `busy` is DATED against the
+transcript** (v0.5.171): the CLI holds `busy` for the life of a SUBAGENT tree, across every turn the
+parent concludes meanwhile, so a main-thread conclusion newer than `statusUpdatedAt` reads as `'unknown'`
+and the screen decides — asks 881/884 sat behind a record frozen at busy for 35 minutes on 2026-08-20
+while the alarm saw a prompt (`mainTurnConcludedAt`; measured on the bridge's own record). Two more things are load-bearing and all
 read as tidy-ups to remove: **`'unknown'` falls through to the screen** (no record, dead pid, a CLI
 that stopped writing them) — making it refuse would wedge the bus shut the day the format moves, and
 making it free would restore the six-week loss this replaced; and the veto runs **before** the

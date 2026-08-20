@@ -1153,6 +1153,25 @@ export function turnInProgress(file: string): boolean {
   return lastAssistant.message?.stop_reason === 'tool_use'
 }
 
+// When did the MAIN thread last CONCLUDE a turn? The timestamp (ms) of the latest main-thread
+// assistant entry iff it is not awaiting a tool — `turnInProgress`'s predicate — and null while a
+// turn runs or nothing has been said. Read by `session-freedom.ts`: the CLI's session record keeps
+// `status=busy` for as long as ANY subagent is alive (measured 2026-08-20 on CLI 2.1.237 — a record
+// frozen at busy for 35 minutes across eight concluded turns, and the bridge's own record busy for the
+// full 123s a subagent blocked after its turn had ended), so a conclusion NEWER than the record's
+// stamp is the proof that the record is not speaking about a turn.
+export function mainTurnConcludedAt(file: string): number | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.isSidechain || e.type !== 'assistant') continue
+    if (e.message?.stop_reason === 'tool_use') return null
+    const ts = e.timestamp ? Date.parse(e.timestamp) : NaN
+    return Number.isFinite(ts) ? ts : null
+  }
+  return null
+}
+
 // Did the session's LAST turn die on an upstream API error (rather than conclude normally)? Keyed
 // ONLY on the machine fields CC itself stamps on the synthetic error entry — never on the "API
 // Error: …" text, which a legitimate reply could echo verbatim (e.g. quoting a log). A false red is

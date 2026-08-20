@@ -43,6 +43,46 @@ test('SEEN FAILING: a session at a prompt with a background shell is free to rea
   expect(planSessionFreedom(row({ status: 'waiting' }), true).freedom).toBe('free')
 })
 
+test('SEEN LIVE: a busy record OLDER than the transcript\'s last concluded turn is a subagent, not a turn — unknown, the screen decides', () => {
+  // @hourlystudy, 2026-08-20: record `status=busy` stamped 08:21:54Z (the turn that spawned its
+  // subagents) and never rewritten while the transcript concluded turns at 08:25, 08:26, 08:31, 08:32,
+  // 08:34, 08:38, 08:40, 08:44 and 08:53Z; asks 881 and 884 sat `HELD — paneFreedom=busy` while the
+  // stall alarm read the same pane at a prompt. Reproduced on the bridge's own record (CLI 2.1.237):
+  // busy for the full 123s a subagent blocked after the parent's turn had ended.
+  const stamped = Date.parse('2026-08-20T08:21:54.172Z')
+  const r = planSessionFreedom(row({ status: 'busy', statusUpdatedAt: stamped }), true, Date.parse('2026-08-20T08:53:42.461Z'))
+  expect(r.freedom).toBe('unknown')
+  expect(r.status).toBe('busy')
+  expect(r.why).toContain('subagent')
+  // a conclusion OLDER than the stamp is the previous turn — the record IS speaking about a live one
+  expect(planSessionFreedom(row({ status: 'busy', statusUpdatedAt: stamped }), true, stamped - 60_000).freedom).toBe('busy')
+  // no transcript reading (turn in flight, nothing said yet, no file) keeps the veto
+  expect(planSessionFreedom(row({ status: 'busy', statusUpdatedAt: stamped }), true, null).freedom).toBe('busy')
+  // an unstamped record cannot be dated against anything
+  expect(planSessionFreedom(row({ status: 'busy' }), true, Date.now()).freedom).toBe('busy')
+})
+
+test('paneFreedom dates a busy record against the session\'s own transcript file', () => {
+  const proc = fakeProc('claude', '61272808')
+  const cfg = fakeConfig({
+    '4242.json': JSON.stringify({ pid: 4242, tmux: 'x:@7.%7', status: 'busy', procStart: '61272808', sessionId: 'sid-1', statusUpdatedAt: Date.parse('2026-08-20T08:21:54Z') }),
+  })
+  const proj = join(cfg, 'projects', '-home-x')
+  mkdirSync(proj, { recursive: true })
+  const line = (o: object) => JSON.stringify(o) + '\n'
+  const user = line({ type: 'user', timestamp: '2026-08-20T08:21:54.000Z', message: { role: 'user', content: 'go' } })
+  // main turn still awaiting a tool → the record's busy stands
+  writeFileSync(join(proj, 'sid-1.jsonl'), user + line({ type: 'assistant', timestamp: '2026-08-20T08:22:00.000Z', message: { stop_reason: 'tool_use', content: [] } }))
+  expect(paneFreedom('%7', [cfg], proc).freedom).toBe('busy')
+  // main turn concluded after the stamp, subagent entries (sidechain) notwithstanding → screen decides
+  writeFileSync(join(proj, 'sid-1.jsonl'), user
+    + line({ type: 'assistant', timestamp: '2026-08-20T08:25:30.000Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] } })
+    + line({ type: 'assistant', isSidechain: true, timestamp: '2026-08-20T08:40:00.000Z', message: { stop_reason: 'tool_use', content: [] } }))
+  const r = paneFreedom('%7', [cfg], proc)
+  expect(r.freedom).toBe('unknown')
+  expect(r.why).toContain('08:25:30')
+})
+
 test('the enum is the CLI\'s own, verbatim', () => {
   // Read off the 2.1.233 binary: JB_=["busy","shell","idle","waiting"]. If a CLI update adds a state,
   // this is the line that should make somebody look at the table above rather than silently widening.

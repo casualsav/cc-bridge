@@ -33,6 +33,7 @@
 // screen on the known-bad case: `bun scripts/session-freedom-probe.ts`.
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { findSessionFile, mainTurnConcludedAt } from './transcript.ts'
 
 // The CLI's own enum, copied verbatim from the 2.1.233 binary. ONLY `busy` vetoes: it is the one
 // value that means "a turn is running". `shell` is NOT a turn — it is what the record shows while
@@ -68,15 +69,35 @@ export type RegistryRow = {
 export type Freedom = 'free' | 'busy' | 'unknown'
 export type FreedomReading = { freedom: Freedom; status: SessionStatus | null; why: string }
 
-// The decision, pure — `alive` is injected so this is testable without a /proc.
-export function planSessionFreedom(row: RegistryRow | null, alive: boolean): FreedomReading {
+// The decision, pure — `alive` and the transcript's last conclusion are injected so this is testable
+// without a /proc or a file.
+export function planSessionFreedom(row: RegistryRow | null, alive: boolean, concludedAt: number | null = null): FreedomReading {
   if (!row) return { freedom: 'unknown', status: null, why: 'no session record for this pane' }
   if (!alive) return { freedom: 'unknown', status: null, why: `session record is stale — pid ${row.pid} is gone or recycled` }
   if (!row.status) return { freedom: 'unknown', status: null, why: `session record for pid ${row.pid} carries no status` }
   // The reading names its instrument (unit 2a's log format asks for it): a bare `busy` in a HELD line
   // said nothing about WHICH record vetoed, and a stale-pid story starts with the pid.
-  if (row.status === 'busy') return { freedom: 'busy', status: 'busy', why: `record status=busy pid=${row.pid}` }
+  if (row.status === 'busy') {
+    // `busy` means "a turn OR a subagent is running" — the CLI holds it for the life of the subagent
+    // tree, however many turns the parent concludes meanwhile (2026-08-20: @hourlystudy's record busy
+    // since 08:21:54Z, eight turns concluded by 08:53Z, asks 881/884 HELD behind it while the alarm saw a
+    // prompt). A main-thread conclusion dated AFTER the stamp is the record not speaking about a turn,
+    // and the question goes to the screen — 'unknown', the same path a missing record takes, never
+    // 'free': the box, a picker or a wedge are still the screen's to see.
+    if (concludedAt !== null && row.statusUpdatedAt !== undefined && concludedAt > row.statusUpdatedAt) {
+      return { freedom: 'unknown', status: 'busy', why: `record status=busy pid=${row.pid} stamped ${new Date(row.statusUpdatedAt).toISOString()} but its transcript concluded a turn at ${new Date(concludedAt).toISOString()} — a live subagent, not a turn; the screen decides` }
+    }
+    return { freedom: 'busy', status: 'busy', why: `record status=busy pid=${row.pid}` }
+  }
   return { freedom: 'free', status: row.status, why: `record status=${row.status} pid=${row.pid}` }
+}
+
+// The record's session, as its transcript last saw it: when the main thread last concluded a turn,
+// or null (no session id, no file yet, a turn in flight).
+export function transcriptConcludedAt(row: RegistryRow): number | null {
+  if (!row.sessionId) return null
+  const file = findSessionFile(row.sessionId, [join(row.configDir, 'projects')])
+  return file ? mainTurnConcludedAt(file) : null
 }
 
 // `"cc-hermes-mimo:@143.%143"` → `"%143"`. The bridge keys everything on the pane id, so this is the
@@ -156,7 +177,9 @@ export function rowForPane(paneId: string, rows: RegistryRow[]): RegistryRow | n
 }
 
 // The whole question in one call: is the session on this pane free to take typed input right now?
-export function paneFreedom(paneId: string, configDirs: string[], procRoot = '/proc'): FreedomReading {
+export function paneFreedom(paneId: string, configDirs: string[], procRoot = '/proc', concludedAt: (row: RegistryRow) => number | null = transcriptConcludedAt): FreedomReading {
   const row = rowForPane(paneId, readRegistryRows(configDirs))
-  return planSessionFreedom(row, row ? rowIsLive(row, procRoot) : false)
+  if (!row) return planSessionFreedom(null, false)
+  const alive = rowIsLive(row, procRoot)
+  return planSessionFreedom(row, alive, alive && row.status === 'busy' ? concludedAt(row) : null)
 }
