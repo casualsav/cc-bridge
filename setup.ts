@@ -808,6 +808,12 @@ function patchSettings(mode: Mode): void {
   if (!JSON.stringify(stop).includes('hook-stop.ts')) {
     stop.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}hook-stop.ts" 2>/dev/null || true` }] })
   }
+  // A fourth: the CLI's own SessionEnd report, which is what lets an ending say whether a human typed
+  // /exit or the thing fell over (see hook-session-end.ts). Silenced — it has no output to protect.
+  const sessionEnd = (s.hooks.SessionEnd ||= [])
+  if (!JSON.stringify(sessionEnd).includes('hook-session-end.ts')) {
+    sessionEnd.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}hook-session-end.ts" >/dev/null 2>&1 || true` }] })
+  }
   writeFileSync(SETTINGS, JSON.stringify(s, null, 2) + '\n')
   console.log(C.ok('  ✓ settings.json (marketplace + plugin + SessionStart hooks + statusline)'))
 

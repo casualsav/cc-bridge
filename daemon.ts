@@ -46,6 +46,7 @@ import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } fr
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { runRestartExit } from './refresh-exit.ts'
+import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
@@ -77,7 +78,7 @@ import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccount
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline, healStopHook,
+  allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline, healStopHook, healSessionEndHook,
   ACCOUNT_PANE_OPT, MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
@@ -511,6 +512,7 @@ initOutboundFeed(STATE_DIR)   // display mirror of what sessions said over the b
 initSessionEndLedger(e => appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'end', from: 'system', to: e.name, text: endAttributionText(e) }))
 healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
 healStopHook()         // the Stop hook that answers an open ask inside the turn — installs on boxes that predate it
+healSessionEndHook()   // the SessionEnd hook that attributes an ending — same, for boxes installed before v0.5.174
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
 
 // ---- Typing presence ----
@@ -8109,6 +8111,41 @@ async function handleCall(
         for (const p of toNudge) markNudged(p.id, Date.now())
         for (const p of toNudge) process.stderr.write(`daemon: ask ${p.id} to @${p.toName} unanswered at the turn's end — stop hook refused it (answer owed)\n`)
         text = formatStopReason(toNudge.map(p => ({ id: p.id, fromName: p.fromName })))
+        break
+      }
+      // The `SessionEnd` hook (hook-session-end.ts): the CLI's own report that a session has ended.
+      // An OBSERVATION and never an attribution — `tg kill` and a human's own `/exit` both arrive as
+      // `prompt_input_exit`, so who ended it stays with unit 1's request record and planEndRecord
+      // decides. The hook lands before the pane row disappears, so it is the first observation and
+      // "first observation wins" is what makes it beat the pane-gone inference.
+      //
+      // THE JOIN IS `session_id` → `agentSessionId` AND NOTHING ELSE. No cwd fallback, no pane: the
+      // payload carries neither, and an ending attributed onto the wrong session would be worse than
+      // one left unattributed. An unmatched payload is logged and dropped — that log line is the only
+      // way a future reader learns the join stopped working.
+      //
+      // NOT in AGENT_BUS_VERBS: an ending is not bus traffic, and a hook that started erroring the day
+      // the bus was switched off would be a puzzle nobody would connect back to it.
+      case 'session-end-hook': {
+        text = ''
+        const conversation = String(args.session_id ?? '')
+        const reason = String(args.reason ?? '')
+        // The hook whitelists too; this is the daemon refusing to trust its own client. `clear` fires
+        // this event on a LIVE session, and retiring one here would be the bug this feature prevents.
+        if (!conversation || !isTerminalEndReason(reason)) {
+          process.stderr.write(`daemon: session-end hook stood aside — reason=${reason || '(none)'} is not terminal\n`)
+          break
+        }
+        const row = listTopics().find(t => t.agentSessionId === conversation)
+        if (!row) {
+          process.stderr.write(`daemon: session-end hook UNMATCHED — no session row with agentSessionId=${conversation} (reason=${reason}); dropped\n`)
+          break
+        }
+        // `prompt_input_exit` is the CLI exiting at its own prompt; `other` is its pane being destroyed
+        // under it. Neither claims an actor — a request already on file keeps the ending as its own.
+        const observed = reason === 'prompt_input_exit' ? 'agent-exited' : 'pane-gone'
+        const rec = recordEndObserved({ sid: row.sessionId, name: row.name, cwd: row.cwd }, observed)
+        process.stderr.write(`daemon: session-end hook for @${row.name} (${row.sessionId}) reason=${reason} → ${rec.cause.by === 'unattributed' ? observed : `attributed: ${endAttributionText(rec)}`}\n`)
         break
       }
       // `tg wait "CI run 18832"` — the session says what it is blocked on, so the roster stops

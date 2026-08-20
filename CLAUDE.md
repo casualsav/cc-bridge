@@ -631,8 +631,25 @@ pane-death recovery path, which this must never block. Proof: `session-end.test.
 control — `CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts + topic-runtime.ts>` must fail exactly its five
 call-site tests) and the live run in `$(tg shared)/bridgeend-2026-08-20/`. Measured against claude
 2.1.238: a `SessionEnd` hook fires on `/exit` (`prompt_input_exit`), on `tmux kill-pane` (`other`) and
-on **`/clear`** — which is not an ending at all — and not on SIGKILL; consuming it without whitelisting
-the reason would retire a live session on every `/clear` (`PROBE-sessionend.md`, gated, unbuilt).
+on **`/clear`** — which is not an ending at all — and not on SIGKILL.
+
+**The `SessionEnd` hook is an OBSERVATION, never an attribution, and its WHITELIST is the load-bearing
+half** (`hook-session-end.ts`, v0.5.174). `tg kill` types the same `/exit` a human does and reports the
+same `prompt_input_exit`, so the reason says HOW a session ended and never WHO ended it — attribution
+stays with the request record and `planEndRecord` decides. What the hook buys is the case inference
+cannot reach: a daemon-spawned pane IS its claude process, so a human's `/exit` there and a crash leave
+byte-identical evidence, and the hook lands ~280ms BEFORE the pane row disappears (first observation
+wins). Three things must not be "simplified": **`clear` fires this event on a LIVE session**, so it is a
+WHITELIST (`prompt_input_exit` + `other`) and never a `clear`-shaped denylist — an unknown reason from a
+future CLI must fall through to inference, not retire a session; the join is **`session_id` →
+`agentSessionId` and nothing else** (no cwd, no pane — the payload has neither, and that guess is
+v0.5.160 rebuilt), so an unmatched payload is logged and dropped, including for a session that has never
+completed a turn and therefore has no conversation id yet; and **a healed hook row reaches only sessions
+started after it** — measured 2026-08-20, a hook added mid-session did NOT fire on that session's own
+exit, so `healSessionEndHook`'s coverage boundary is the next restart, not the running fleet. Proof:
+`hook-session-end.test.ts` (source-bound; four call-site tests must fail against HEAD) and the live run —
+`/exit`, `tg kill`, `tmux kill-pane` and a `/clear` control that kept both open asks and the roster row
+(`PROBE-sessionend.md`).
 
 ## Handoff
 
