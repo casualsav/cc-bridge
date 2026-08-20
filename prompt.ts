@@ -618,8 +618,12 @@ export function isPluginInstallUserScope(paneText: string): boolean {
 // on a "Resume from summary" option, which keeps it disjoint from the usage-limit menu that shares
 // the "Enter to confirm" footer.
 const RESUME_SUMMARY_OPT = /resume (?:from|with) summary/i
-const RESUME_OPT = /^\s*(?:[>❯►▶_]\s*)?(\d+)[.)]\s+(.+?)\s*$/
-export function detectResumeSessionPrompt(paneText: string): { options: PromptOption[] } | null {
+// The cursor glyph is CAPTURED, not just skipped: which row Enter would take is the difference
+// between keeping this conversation and discarding it, and on CLI 2.1.238 the picker opens on
+// "Resume from summary" — the destructive one. Read from the plain capture (the glyph), never from
+// the highlight colour, which `capturePane` strips (see the /model picker's note on SGR 153).
+const RESUME_OPT = /^\s*(?:([>❯►▶_])\s*)?(\d+)[.)]\s+(.+?)\s*$/
+export function detectResumeSessionPrompt(paneText: string): { options: PromptOption[]; current: number | null } | null {
   const lines = paneLines(paneText)
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -628,15 +632,16 @@ export function detectResumeSessionPrompt(paneText: string): { options: PromptOp
   if (footerIdx === -1) return null
   if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware liveness (shared)
   // Contiguous numbered options directly above the footer (a blank gap before them is fine).
-  const opts: PromptOption[] = []
+  const rows: { label: string; cursor: boolean }[] = []
   for (let i = footerIdx - 1; i >= 0; i--) {
     const m = lines[i].match(RESUME_OPT)
-    if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
-    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
-    if (opts.length) break                                            // a real non-option line ends the block
+    if (m) { rows.unshift({ label: m[3].replace(/\s*│\s*$/, '').trim(), cursor: !!m[1] }); continue }
+    if (!lines[i].trim()) { if (rows.length) break; else continue }   // blank gap is fine until options start
+    if (rows.length) break                                            // a real non-option line ends the block
   }
-  if (opts.length < 2 || !opts.some(o => RESUME_SUMMARY_OPT.test(o.label))) return null
-  return { options: opts }
+  if (rows.length < 2 || !rows.some(o => RESUME_SUMMARY_OPT.test(o.label))) return null
+  const cursor = rows.findIndex(r => r.cursor)
+  return { options: rows.map(r => ({ label: r.label })), current: cursor < 0 ? null : cursor }
 }
 export function isResumeSessionPrompt(paneText: string): boolean {
   return !!detectResumeSessionPrompt(paneText)
@@ -658,11 +663,43 @@ export function isResumeSessionPrompt(paneText: string): boolean {
 // the unrecognised/editor screen (that third hold branch is transient-prone on a one-shot capture,
 // and `detectStuckScreen` already cards it on its own), and every prompt the daemon answers itself
 // (usage-limit choice, plugin scope, onboarding) — those clear without anyone being told.
-export type BlockedScreen = { kind: 'resume' | 'login'; label: string }
+// `recover` is what actually unsticks it, already worded for a reader — with `{name}` where the
+// session's own name goes (blockedRecovery fills it). It is DERIVED from the picker rather than
+// written down, because the one thing a status line must not do here is recommend the destructive
+// key: on CLI 2.1.238 the resume picker opens on "Resume from summary", so a bare Enter throws the
+// conversation away, and `tg keys @name enter` is the obvious lever and a trap (@chat caught this
+// before anyone pressed it, 2026-08-20). A login menu takes no keystroke at all.
+export type BlockedScreen = { kind: 'resume' | 'login'; label: string; recover: string }
+
 export function detectBlockedScreen(paneText: string): BlockedScreen | null {
-  if (isResumeSessionPrompt(paneText)) return { kind: 'resume', label: 'resume picker' }
-  if (detectLoginPrompt(paneText)) return { kind: 'login', label: 'login menu' }
+  const resume = detectResumeSessionPrompt(paneText)
+  if (resume) return { kind: 'resume', label: 'resume picker', recover: resumeRecovery(resume) }
+  if (detectLoginPrompt(paneText)) {
+    return { kind: 'login', label: 'login menu', recover: 'it needs a sign-in, not a keystroke' }
+  }
   return null
+}
+
+// Down-presses then Enter, exactly as the daemon's own `resumesel` tap drives this picker — counted
+// from where the cursor IS to the option that keeps the conversation. Anything unreadable (no cursor
+// glyph, no full-session option, a picker this build doesn't recognise) names no keys rather than
+// guessing at one: a wrong keystroke here is unrecoverable and a missing hint is not.
+function resumeRecovery(p: { options: PromptOption[]; current: number | null }): string {
+  const keep = p.options.findIndex(o => /full session/i.test(o.label))
+  const at = p.current
+  const dflt = at != null ? p.options[at]?.label : null
+  if (keep < 0 || at == null || keep < at) {
+    return `answer it at the terminal — a bare Enter takes the highlighted default${dflt ? ` ("${dflt}")` : ''}`
+  }
+  const keys = [...Array(keep - at).fill('down'), 'enter'].join(' ')
+  return `\`tg keys @{name} ${keys}\` keeps the conversation`
+    + (dflt && RESUME_SUMMARY_OPT.test(dflt) ? ' — a bare Enter takes the default and DISCARDS it' : '')
+}
+
+// The recovery sentence for one session. Split from the detector so the screen owns the instruction
+// and the surface owns only the name.
+export function blockedRecovery(b: BlockedScreen, name: string): string {
+  return b.recover.replace('{name}', name)
 }
 
 // The CLI's answer to `/exit` when the session still has work running — a subagent, a background

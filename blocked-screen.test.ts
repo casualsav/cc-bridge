@@ -22,7 +22,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { detectBlockedScreen, onNormalPrompt, detectWorking, isResumeSessionPrompt } from './prompt.ts'
+import { detectBlockedScreen, blockedRecovery, detectResumeSessionPrompt, onNormalPrompt, detectWorking, isResumeSessionPrompt } from './prompt.ts'
 import { sessionState } from './wait-state.ts'
 
 const WEDGED = readFileSync(join(import.meta.dir, 'fixtures/pane-resume-wedge.txt'), 'utf8')
@@ -31,7 +31,38 @@ const IDLE = readFileSync(join(import.meta.dir, 'fixtures/pane-idle-bg-work.txt'
 // ---- the screen ---------------------------------------------------------------------------------
 
 test('the real wedged pane is read as blocked, and named', () => {
-  expect(detectBlockedScreen(WEDGED)).toEqual({ kind: 'resume', label: 'resume picker' })
+  const b = detectBlockedScreen(WEDGED)
+  expect(b?.kind).toBe('resume')
+  expect(b?.label).toBe('resume picker')
+})
+
+// THE TRAP. @chat stopped the first version of the roster hint before anyone acted on it: it said
+// `tg keys @name enter`, and on this picker Enter takes option 1 — "Resume from summary" — which
+// throws the conversation away. The cursor's position is therefore load-bearing, not cosmetic, and
+// it is read from the plain capture's ❯ glyph (the highlight is colour, which capturePane strips).
+test('the live picker opens on the DESTRUCTIVE option — so the hint must not say bare Enter', () => {
+  const p = detectResumeSessionPrompt(WEDGED)
+  expect(p?.current).toBe(0)
+  expect(p?.options[0].label).toBe('Resume from summary (recommended)')
+  expect(p?.options[1].label).toBe('Resume full session as-is')
+  const recover = blockedRecovery(detectBlockedScreen(WEDGED)!, 'hourlystudy')
+  expect(recover).toBe('`tg keys @hourlystudy down enter` keeps the conversation — a bare Enter takes the default and DISCARDS it')
+  expect(recover).not.toMatch(/keys @hourlystudy enter/)
+})
+
+// Derived, not written down: the keystrokes count from where the cursor IS.
+test('the recovery counts down-presses from the cursor, and names none when it cannot', () => {
+  const picker = (cursorOn: number, opts = ['Resume from summary (recommended)', 'Resume full session as-is', "Don't ask me again"]) =>
+    ['  This session is 10h 21m old and 242.3k tokens.', ''].concat(
+      opts.map((o, i) => `  ${i === cursorOn ? '❯' : ' '} ${i + 1}. ${o}`),
+    ).concat(['', '  Enter to confirm · Esc to cancel']).join('\n')
+  // Cursor already on the option that keeps the conversation: Enter alone is right, and safe.
+  expect(blockedRecovery(detectBlockedScreen(picker(1))!, 'w')).toBe('`tg keys @w enter` keeps the conversation')
+  // No cursor glyph at all — name no keys rather than guess one. A wrong key here is unrecoverable.
+  expect(blockedRecovery(detectBlockedScreen(picker(-1))!, 'w')).toBe('answer it at the terminal — a bare Enter takes the highlighted default')
+  // A build that reorders the options is followed, not assumed.
+  expect(blockedRecovery(detectBlockedScreen(picker(0, ["Don't ask me again", 'Resume from summary', 'Resume full session as-is']))!, 'w'))
+    .toBe('`tg keys @w down down enter` keeps the conversation')
 })
 
 // THE KNOWN-ANSWER CONTROL. Without this the test above proves only that a detector fires on a
@@ -115,6 +146,10 @@ test('call site: a blocked row says blocked INSTEAD of busy, and carries its own
   expect(rosterRow).toContain("wait?.why === 'blocked'")
   expect(rosterRow).toContain('· blocked: ')
   expect(rosterRow).toContain("stuck ? '⛔'")
+  // The hint comes from the screen, and the roster never spells a keystroke of its own — that is
+  // what made the first version recommend the destructive Enter.
+  expect(rosterRow).toContain('blockedRecovery(blocked!, nm)')
+  expect(rosterRow).not.toMatch(/tg keys @\$\{nm\} enter/)
 })
 
 test('call site: readSessionState reads the same signal, so card and roster cannot disagree', () => {

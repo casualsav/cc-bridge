@@ -218,6 +218,13 @@ it from drifting into "every modal"; the unrecognised/editor screen is the named
 (transient-prone on a one-shot capture, and `detectStuckScreen` cards it already); and it is a
 `waiting` state, not a fourth colour, because the mini-app dot has a standing ruling against one
 (`webapp/CLAUDE.md`) — the roster spends its own glyph, the card says `⏳ waiting: resume picker`.
+**And the row's recovery hint is DERIVED from the picker, never written down** (v0.5.177): CLI 2.1.238
+opens that picker on "Resume from summary", so the obvious lever — `tg keys @name enter` — is the one
+that discards the conversation, which is what the first hint recommended before @chat caught it.
+`detectResumeSessionPrompt` now records which row carries the ❯ (from the PLAIN capture; the highlight
+is colour, which `capturePane` strips) and `resumeRecovery` counts down-presses from there to the
+full-session option — naming no keys at all when either is unreadable, because a wrong keystroke here
+is unrecoverable and a missing hint is not.
 Proof: `blocked-screen.test.ts` — the real wedged pane as `fixtures/pane-resume-wedge.txt`, with the
 shipped busy composite asserted TRUE on it as the known-answer control, and a source-bound half
 (`CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts>` must fail exactly its five call-site tests). **Still

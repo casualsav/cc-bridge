@@ -44,7 +44,7 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
@@ -8332,7 +8332,7 @@ async function handleCall(
           // orchestrator's decision surface, and the whole failure was that nobody knew there was
           // anything to do. The relayed card is a silent message in a worker's topic tab.
           const stuck = wait?.why === 'blocked'
-          const state = `${stuck ? ` · blocked: ${wait!.label} — answer it (\`tg keys @${nm} enter\`); nothing reaches it until then`
+          const state = `${stuck ? ` · blocked: ${wait!.label} — nothing reaches it; ${blockedRecovery(blocked!, nm)}`
               : busy ? ' · busy' : errored ? ` · errored${apiError?.status ? ` (${apiError.status})` : ''}` : ' · idle'}`
             + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
             + `${wait && !stuck ? ` · waiting: ${wait.label}` : ''}`
