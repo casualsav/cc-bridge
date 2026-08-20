@@ -46,6 +46,7 @@ import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } fr
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { runRestartExit } from './refresh-exit.ts'
+import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -223,7 +224,7 @@ import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection,
 import { parseLaunch, parseSpawnAddress, parseLaunchArgs, parseLaunchCommand, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { createOwnerReplyRoutes, ownerReplyMarker, type OwnerReplyRoute } from './owner-reply.ts'
-import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
+import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, reopenForceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
@@ -505,6 +506,9 @@ initAccess({ getBotUsername: () => botUsername })
 initAccounts(STATE_DIR)
 setWaitsFile(join(STATE_DIR, 'waits.json'))   // `tg wait` declarations; security-free, so neither access.json nor prefs.json
 initOutboundFeed(STATE_DIR)   // display mirror of what sessions said over the bus (outbound-feed.ts)
+// One `end` row per session ending, written FROM the record so `tg history` cannot disagree with what
+// the dead letters and the reopen gate read. The sink lives here because busLedgerRoom does.
+initSessionEndLedger(e => appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'end', from: 'system', to: e.name, text: endAttributionText(e) }))
 healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
 healStopHook()         // the Stop hook that answers an open ask inside the turn — installs on boxes that predate it
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
@@ -3677,11 +3681,15 @@ async function reapDeadEndpoints(name: string): Promise<void> {
     if (row.closed || normalizeEndpointName(row.name) !== want) continue
     const pane = await paneForSession(row.sessionId).catch(() => null)
     if (pane && isPaneRestarting(pane)) continue
-    const dead = !pane
-      || !(await paneAlive(pane).catch(() => false))
-      || !(await paneClaudeLive(pane).catch(() => false))
-    if (dead) {
+    const paneUp = !!pane && await paneAlive(pane).catch(() => false)
+    const agentUp = paneUp && await paneClaudeLive(pane!).catch(() => false)
+    if (!agentUp) {
       updateTopic(row.sessionId, { closed: true })
+      // `agent-exited` is the signature of a session a HUMAN launched and exited at its own terminal:
+      // the `cc-bridge` shell function runs claude as a CHILD, so the pane outlives it. A
+      // daemon-spawned pane IS its claude process (spawnSession's `tmux new-window … claude`) and dies
+      // whole — that reads `pane-gone`. Neither claims an actor; both say more than "it ended".
+      recordEndObserved({ sid: row.sessionId, name: row.name, cwd: row.cwd }, paneUp ? 'agent-exited' : 'pane-gone')
       process.stderr.write(`bus: reaped dead endpoint "${row.name}" (${row.sessionId})\n`)
     }
   }
@@ -3695,7 +3703,13 @@ function busEndpoints(): BusEndpoint[] {
   // owner's own chat twice: as `chat` and again as a nameless session id. The named entry below wins;
   // topics.ts's setDmChatSession removes the stored row, and this keeps the roster honest meanwhile.
   const shadowed = new Set([...listDmChatSessions().map(d => d.sessionId), getGeneralSession() ?? ''])
-  const claude = listTopics().filter(t => !shadowed.has(t.sessionId)).map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
+  // `endedBy` rides along for CLOSED rows only — it is read by exactly one consumer (resolveEndpoint's
+  // refusal), and computing an "ago" string for every live endpoint on every roster read would be work
+  // nothing looks at.
+  const claude = listTopics().filter(t => !shadowed.has(t.sessionId)).map(t => {
+    const end = t.closed ? getSessionEnd(t.sessionId) : null
+    return { id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed, ...(end ? { endedBy: endAttributionText(end) } : {}) }
+  })
   // The DM chat lane(s) and the General anchor aren't topics but ARE bus participants — without an
   // endpoint entry, nameForEndpoint falls back to their raw session ids in every rendered bus event
   // ("messaged @bb1c6d35"), and they can't be addressed by name. The DM lane is "chat" (its
@@ -3759,6 +3773,10 @@ async function runSessionKill(fromSid: string, target: string, force: boolean, g
         // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
         // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
         updateTopic(res.id, { killedAt: Date.now() })
+        // Name the killer, at the REQUEST — never at the death. Every deliberate close ends, if it has
+        // to, in `tmux kill-pane`, so the observation that follows is shaped exactly like a crash.
+        recordEndRequest({ sid: res.id, name: target, cwd: topic.cwd },
+          { by: 'agent', actor: nameForEndpoint(fromSid, endpoints) })
         markSessionEnding(res.id)   // its card leaves the fleet list now, not when the /exit finally lands
         if (targetPane && alive) {
           // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
@@ -3791,7 +3809,7 @@ async function runSessionKill(fromSid: string, target: string, force: boolean, g
           : `@${target} was already down — ${undoGesture(g, target)} brings it back${sidNote}${handoffNote}` }
 }
 
-async function runSessionReopen(fromSid: string, target: string, g: Gestures): Promise<{ ok: boolean; text: string }> {
+async function runSessionReopen(fromSid: string, target: string, g: Gestures, force = false): Promise<{ ok: boolean; text: string }> {
         let text: string
         // resolveEndpoint deliberately refuses CLOSED endpoints ("exists but isn't running"), which is
         // every reopen target — so resolve against the registry directly. A sid (or an unambiguous
@@ -3805,6 +3823,19 @@ async function runSessionReopen(fromSid: string, target: string, g: Gestures): P
         const sid8 = sid.slice(0, 8)
         const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
         if (denial) { return { ok: false, text: denial } }
+        // THE OWNER-CLOSED GATE. Refuse once, name who closed it and what the undo costs, and make the
+        // caller say it again. Ahead of the teardown wait below so the refusal is instant.
+        //
+        // Owner-caused endings ONLY (reopenNeedsConfirm). An agent reopening a session it killed itself
+        // is routine — the reversibility is what makes a kill casual — and an UNATTRIBUTED ending stays
+        // frictionless because that is the pane-death recovery path this must never block. What is left
+        // is the 2026-08-20 incident exactly: undoing a human's decision, at full backlog cost, without
+        // knowing a human made it.
+        const endRec = getSessionEnd(sid)
+        if (!force && reopenNeedsConfirm(endRec)) {
+          const bl = t0.agentSessionId ? resumeBacklogSize(t0.agentSessionId) : null
+          return { ok: false, text: `@${t0.name} (${sid8}) ${endAttributionText(endRec)} — not by a crash. Reopening resumes its own conversation and replays its whole backlog${bl ? ` (${bl} of transcript)` : ''} at full token cost before it reads anything you send. ${reopenForceGesture(g, target)} to reopen it anyway; a self-contained task belongs in a fresh ${spawnGesture(g)} instead.` }
+        }
         if (!t0.closed && !t0.killedAt) { return { ok: false, text: `@${t0.name} (${sid8}) is already live` } }
         if (!t0.closed && t0.killedAt) {
           // `tg kill` stamps killedAt on the spot, but the row's own closed:true lands only on the
@@ -4758,6 +4789,10 @@ function fleetSpendLine(): string {
 // A bus target counts as GONE only when every signal agrees, because a false positive drops a live
 // ask: no pane resolves for its session id, no open session row claims it (a claude-update bounce or a
 // respawn briefly has no pane), and it isn't a bound DM lane (revived on the owner's next message).
+// How far back `tg roster`'s recently-ended tail reaches. Two hours covers the span in which a reader
+// is still reasoning about a session that was live when they last looked, and no further.
+const RECENT_END_WINDOW_MS = 2 * 60 * 60 * 1000
+
 async function busTargetGone(sid: string): Promise<boolean> {
   if (await paneForSession(sid).catch(() => null)) return false
   const t = getTopicBySession(sid)
@@ -4794,7 +4829,10 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | nu
   // The ack reason comes first for the same reason it does in the predicate: it is true whatever the
   // ledger says, and reporting a silenced ack as "asker killed the target" would misattribute both.
   const quietWhy = p.noReply ? 'nothing awaits an ack' : askerKilledTarget(p, ledger) ? 'asker killed the target' : 'asker already answered'
-  const why = reapReasonText(p)
+  // No record → `undefined`, not endAttributionText(null): the fallback sentence belongs to the reap's
+  // own wording, and routing a null through the renderer would replace it with a different one.
+  const targetEnd = getSessionEnd(p.toSid)
+  const why = reapReasonText(p, targetEnd ? endAttributionText(targetEnd) : undefined)
   // Same contract as the suppressed TTL expiry: the reap is true history and is always recorded, and
   // `suppressed` carries the fact that nothing was sent, so `tg history` shows it marked while the
   // ambient digest omits it. Two surfaces, one answer.
@@ -4818,7 +4856,10 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | nu
 async function notifyAskClosures(rows: BusPending[]): Promise<void> {
   for (const group of groupClosuresByAskerAndTarget(rows)) {
     const first = group[0]
-    const text = closureNoticeText(first.toName, group.map(p => ({ id: p.id, text: p.text })))
+    // The attribution is read ONCE per group and used by both surfaces below — the agent's pane block and
+    // the owner's card must never disagree about the same death.
+    const endPhrase = (() => { const e = getSessionEnd(first.toSid); return e ? endAttributionText(e) : undefined })()
+    const text = closureNoticeText(first.toName, group.map(p => ({ id: p.id, text: p.text })), endPhrase)
     const askerPane = await paneForSession(first.fromSid).catch(() => null)
     // The asking AGENT hears about this regardless of the human-facing card below — the delivered half
     // used to be dropped in total silence, and a live incident (2026-07-26) showed why that's wrong for a
@@ -4842,9 +4883,10 @@ async function notifyAskClosures(rows: BusPending[]): Promise<void> {
     // carding the owner told him about something the agent already knew. Fleet-internal by nature.
     const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
     const ids = carded.map(p => p.id)
+    const endedClause = endPhrase ? `that session ${escapeHtml(endPhrase)}` : 'that session has ended'
     const card = ids.length === 1
-      ? `❌ Ask ${ids[0]} to <b>${escapeHtml(first.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
-      : `❌ Asks ${ids.join(', ')} to <b>${escapeHtml(first.toName)}</b> were never delivered — that session has ended. Removed from the queue.`
+      ? `❌ Ask ${ids[0]} to <b>${escapeHtml(first.toName)}</b> was never delivered — ${endedClause}. Removed from the queue.`
+      : `❌ Asks ${ids.join(', ')} to <b>${escapeHtml(first.toName)}</b> were never delivered — ${endedClause}. Removed from the queue.`
     for (const { chat, thread } of cardTargets) {
       void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
@@ -4875,7 +4917,8 @@ const nextWatchId = (): number => ++watchStore.seq
 // watcher's own pane. noReply clears the row on landing, quiet keeps the humans' surfaces out of it,
 // depth 0 is what every system wake carries.
 async function notifyWatchFired(w: BusWatch, outcome: WatchOutcome, now: number): Promise<void> {
-  const text = watchNoticeText(w, outcome, now)
+  const watchEnd = outcome === 'gone' ? getSessionEnd(w.targetSid) : null
+  const text = watchNoticeText(w, outcome, now, watchEnd ? endAttributionText(watchEnd, now) : undefined)
   process.stderr.write(`daemon: watch ${w.id} on @${w.targetName} fired (${outcome}) → ${w.chatOrigin ? `chat ${w.chatOrigin.chatId}` : w.watcherSid}\n`)
   // Armed from his chat ⇒ the fire IS the notification, and it goes to him as a card whose subject is
   // the watched session (so "it's free now" and "then do this" are one reply apart). EITHER/OR with
@@ -8213,6 +8256,15 @@ async function handleCall(
             + `${handoffNote ? ` · ${handoffNote}` : ''}`
           rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${effort}${pct}${state}${flair}`)
         }
+        // The RECENTLY-ENDED tail. An ended session leaves this list entirely (the loop above filters
+        // `!e.closed`), so the orchestrator's own roster showed nothing at all about @hourlyedge on
+        // 2026-08-20 — which is half of why reopening it looked free. Bounded to two hours and to rows
+        // that carry an attribution: this is a short "what just happened", not a graveyard.
+        const ended = recentSessionEnds(RECENT_END_WINDOW_MS)
+        if (ended.length) {
+          rows.push('', `recently ended (${RECENT_END_WINDOW_MS / 3_600_000}h):`)
+          for (const e of ended) rows.push(`⚪ ${e.name} · ${endAttributionText(e)}`)
+        }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
         break
       }
@@ -8302,7 +8354,7 @@ async function handleCall(
           // answer, clamped to 100 chars, is how one went unanswered on 2026-07-29 (the owner found the
           // block by eyeballing a pane). Every other kind stays clamped: they are correlation handles
           // whose payload lives in the pane it was delivered to.
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📨' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent)' : ''}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📨' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : e.kind === 'end' ? '🔚' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }
@@ -8722,7 +8774,7 @@ async function handleCall(
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg reopen` must run inside a bridged session' }); return }
         const target = String(args.name ?? '').trim()
         if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg reopen <name or session id>' }); return }
-        const r = await runSessionReopen(fromSid, target, 'cli')
+        const r = await runSessionReopen(fromSid, target, 'cli', args.force === true)
         if (!r.ok) { write({ t: 'result', id, ok: false, text: r.text }); return }
         text = r.text
         break
@@ -15453,6 +15505,8 @@ bot.on('message:forum_topic_closed', async ctx => {
   if (!sid) return
   if (sid === getGeneralSession()) return   // the General anchor's stale topic tab — closing it must NOT exit the session (it lives in General)
   updateTopic(sid, { closed: true })   // record it, so a daemon-side close doesn't re-close
+  recordEndRequest({ sid, name: getTopicBySession(sid)?.name ?? '', cwd: getTopicBySession(sid)?.cwd ?? '' },
+    { by: 'owner', surface: 'topic-close', userId: String(ctx.from?.id ?? '') })
   markTopicClosePending(sid)           // suppress the lazy-reopen until /exit lands — else trailing outbound flaps it open
   const pane = await paneForSession(sid)
   if (!pane || !(await paneAlive(pane))) return                           // session already gone
@@ -15515,6 +15569,7 @@ async function teardownDeletedTopic(group: string, t: { sessionId: string; threa
   sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
   process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
   if (pane && await paneAlive(pane)) {
+    recordEndRequest({ sid: t.sessionId, name: t.name, cwd: t.cwd }, { by: 'owner', surface: 'topic-delete' })
     await exitSessionPane(pane, 'topic-deleted')
     // Tell the truth: some panes ignore the /exit keystrokes (a busy or non-focused TUI). The topic
     // stays gone regardless (the sid is dismissed durably), but the tmux session may still be running —
@@ -15928,7 +15983,10 @@ bot.on('callback_query:data', async ctx => {
     let live = 0
     for (const t of rows) {
       const pane = await paneForSession(t.sessionId).catch(() => null)
-      if (pane && await paneAlive(pane).catch(() => false)) { void closeSessionPane(pane, 'group-gone-close-all'); live++ }
+      if (pane && await paneAlive(pane).catch(() => false)) {
+        recordEndRequest({ sid: t.sessionId, name: t.name, cwd: t.cwd }, { by: 'bridge', op: 'group-gone' })
+        void closeSessionPane(pane, 'group-gone-close-all'); live++
+      }
       if (t.threadId == null) removeTopic(t.sessionId)   // post-demotion every row is headless; the row IS the session
     }
     process.stderr.write(`groupGone: mass close — ${rows.length} row(s), ${live} live pane(s)\n`)
@@ -17035,6 +17093,9 @@ bot.on('callback_query:data', async ctx => {
     }
     const label = await paneLabel(paneId)
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
+    const exitSid = await sessionForPane(paneId).catch(() => null)
+    if (exitSid) recordEndRequest({ sid: exitSid, name: getTopicBySession(exitSid)?.name ?? label, cwd: await paneCwd(paneId).catch(() => '') || '' },
+      { by: 'owner', surface: 'exit-button', userId: String(ctx.from?.id ?? '') })
     await exitSessionPane(paneId, 'user-confirmed-exit')
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -17064,6 +17125,8 @@ bot.on('callback_query:data', async ctx => {
     const pane = await paneForSession(pending.sessionId).catch(() => null)
     const alive = !!pane && await paneAlive(pane).catch(() => false)
     updateTopic(pending.sessionId, { killedAt: Date.now() })
+    recordEndRequest({ sid: pending.sessionId, name: pending.name, cwd: topic?.cwd ?? '' },
+      { by: 'owner', surface: 'exit-command', userId: String(ctx.from?.id ?? '') })
     markSessionEnding(pending.sessionId)
     if (pane && alive) {
       if (topic?.threadId != null) markTopicClosePending(pending.sessionId)
@@ -17477,7 +17540,9 @@ bot.on('callback_query:data', async ctx => {
     // permission check, the teardown wait, fresh-vs-resume, un-closing the row, the ledger); a sid
     // is passed rather than a name because 162 tombstones share a handful of names.
     await ctx.answerCallbackQuery({ text: 'Reopening…' }).catch(() => {})
-    const r = await runSessionReopen(lane.sessionId, arg, 'chat')
+    // `force: true` — the owner-closed gate exists to stop an AGENT undoing his decision unseen; a tap
+    // on the card that names the session is the human making it again, with the row in front of him.
+    const r = await runSessionReopen(lane.sessionId, arg, 'chat', true)
     await ctx.reply(r.ok ? r.text : `❌ ${r.text}`).catch(() => {})
     return
   }
@@ -18128,7 +18193,7 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       // confirmation, and without it the gesture looks ignored for however long the target stays busy.
       if (msgId != null && verb === 'watch') void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.watching).catch(() => {})
       const r = verb === 'kill' ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
-        : verb === 'reopen' ? await runSessionReopen(laneSid, parsed.name, 'chat')
+        : verb === 'reopen' ? await runSessionReopen(laneSid, parsed.name, 'chat', parsed.force)
         : await runSessionWatch(laneSid, parsed.name, 'chat', chatId)
       await reply(r.text)
       return true
@@ -22966,6 +23031,10 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       // session that merely vanished, and the row (with its agentSessionId) went; the next session in
       // that folder then adopted this one's transcript. It also gives ✕ the same `tg reopen` window.
       updateTopic(sid, { killedAt: Date.now() })
+      // …and it must be recorded as the OWNER's, not merely as a kill: this surface is his, and it is
+      // the one `tg kill`'s ledger row cannot speak for.
+      recordEndRequest({ sid, name: topic?.name ?? sid, cwd: topic?.cwd ?? '' },
+        { by: 'owner', surface: 'miniapp', userId: String(userId) })
       void closeSessionPane(pane, 'webapp-close')   // escalates for up to ~20s — never hold the HTTP request open for it
       return null
     }

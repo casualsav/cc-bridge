@@ -362,7 +362,7 @@ const reaper = (() => {
 })()
 
 test('reapDeadAsk takes its wording from reapReasonText and keeps no copy of the sentence', () => {
-  expect(reaper).toContain('reapReasonText(p)')
+  expect(reaper).toContain('reapReasonText(p, ')   // v0.5.173: it now passes the end attribution in
   expect(reaper).not.toContain("'never delivered — target session ended'")
 })
 

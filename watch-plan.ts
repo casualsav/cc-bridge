@@ -65,8 +65,12 @@ const ago = (ms: number): string => {
 
 // Every text says "watch closed", because the one thing a caller must never have to wonder about is
 // whether a second one is still coming.
-export function watchNoticeText(w: BusWatch, outcome: WatchOutcome, now: number): string {
+export function watchNoticeText(w: BusWatch, outcome: WatchOutcome, now: number, endPhrase?: string): string {
   const age = ago(Math.max(0, now - w.armedAt))
+  // session-end.ts's one predicate, passed in so this file stays pure. It replaces the bare verb
+  // "ended" on both `gone` notices — a watcher deciding what to do next needs to know whether the
+  // target was closed on purpose or fell over. No record keeps the wording exactly as it shipped.
+  const ended = endPhrase ?? 'ended'
   // A caused notice names the caller's own command verbatim, because the caller is SEQUENCING behind it:
   // "the /compact you sent to @weather has completed" is actionable where "@weather is at a prompt" sends
   // them back to probe what it means. The failure modes carry the command too — a `tg slash` submitter
@@ -77,7 +81,7 @@ export function watchNoticeText(w: BusWatch, outcome: WatchOutcome, now: number)
       case 'prompt':
         return `(the ${cmd} you sent to @${w.targetName} has completed — it is back at a prompt after ${age}. Watch closed.)`
       case 'gone':
-        return `(@${w.targetName} ended before the ${cmd} you sent it completed — the outcome is unknown. Watch closed.)`
+        return `(@${w.targetName} ${ended} before the ${cmd} you sent it completed — the outcome is unknown. Watch closed.)`
       case 'timeout':
         return `(the ${cmd} you sent to @${w.targetName} has not returned it to a prompt in ${age} — watch closed. Check it with \`tg roster\`, or re-arm with \`tg watch @${w.targetName}\`.)`
     }
@@ -86,7 +90,7 @@ export function watchNoticeText(w: BusWatch, outcome: WatchOutcome, now: number)
     case 'prompt':
       return `(@${w.targetName} is at a prompt — the watch you armed ${age} ago has fired. Watch closed.)`
     case 'gone':
-      return `(@${w.targetName} ended without reaching a prompt — nothing left to wait for. Watch closed.)`
+      return `(@${w.targetName} ${ended} without reaching a prompt — nothing left to wait for. Watch closed.)`
     case 'timeout':
       return `(@${w.targetName} has not reached a prompt in ${age} — watch closed. Re-arm with \`tg watch @${w.targetName}\` if you still need it.)`
   }

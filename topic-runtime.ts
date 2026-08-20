@@ -20,6 +20,7 @@ import {
 import { focus, offMcpPanes, sessions, isChatUnreachable } from './state.ts'
 import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
 import { chatForLaneSession, dmLanesOn, listLanes } from './dm-lanes.ts'
+import { recordEndObserved, clearSessionEnd, getSessionEnd, endAttributionText } from './session-end.ts'
 
 // The bridge is in forum-topics mode whenever this module runs, so channel.threads (present iff
 // caps.threads === 'forum') is always defined — the `!` on threads.* calls reflects that invariant.
@@ -411,16 +412,26 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   if (!sid) return
   if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
   if (isSessionRestarting(sid)) return    // a restart owns this session; its pane is allowed to be missing right now
+  // The ending is RECORDED here — above every branch below, because each of them destroys the state a
+  // later reader would need (the headless branch removes the row outright), and behind every guard
+  // above, because this is the only line in the file that may run on positive evidence of death alone.
+  // It never overwrites a request already on file: see planEndRecord.
+  const endRow = getTopicBySession(sid)
+  recordEndObserved({
+    sid,
+    name: endRow?.name ?? (chatIdForDmChatSession(sid) ? 'chat' : sid === getGeneralSession() ? 'general' : sid),
+    cwd: endRow?.cwd ?? '',
+  }, 'pane-gone')
   // A dead DM chat lane is reaped in EVERY mode: it lives only in its DM, so it needs no group and no
   // topic. This used to sit below an `isTopicMode()` return, which made the event path to chatLaneLost
   // dead in DM mode — the one mode chat lanes exist in (audit D7).
   const chatOwner = chatIdForDmChatSession(sid)
-  if (chatOwner) { await chatLaneLost(chatOwner); return }
+  if (chatOwner) { await chatLaneLost(chatOwner, sid); return }
   // Everything from here needs a bound group (forum topics / the General anchor).
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
-  if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
+  if (sid === getGeneralSession()) { await generalAnchorLost(group, sid) ; return }   // anchor died — no topic to close
   const t = getTopicBySession(sid)
   if (!t) return
   // Headless: there is no Telegram topic to reap, so the registry row IS the whole session — drop it
@@ -434,6 +445,10 @@ export async function closeTopicForPane(pane: string): Promise<void> {
 // flag alone leaves the Telegram tab closed until outbound happens to flow (ensureTopicFor's lazy
 // reopen), which reads as "revive didn't work". Used by every revive path.
 export async function reopenSessionTopic(sessionId: string): Promise<void> {
+  // Rule 3, and it sits ABOVE every guard below on purpose — a headless or DM-mode revive returns from
+  // this function without touching a thread, and it is just as much a revive. A session that came back
+  // has no ending; leaving the record would report a LATER crash as the close somebody made before it.
+  clearSessionEnd(sessionId)
   if (!isTopicMode()) return
   closePendingSids.delete(sessionId)   // an explicit revive overrides a pending user-close
   const group = getGroupChatId()
@@ -449,25 +464,25 @@ export async function reopenSessionTopic(sessionId: string): Promise<void> {
 
 // The General-anchored session ended: clear the anchor (General reverts to following focus) and
 // offer a one-tap re-anchor of whatever is focused now. Never silently inherit — the user decides.
-export async function generalAnchorLost(group: string): Promise<void> {
+export async function generalAnchorLost(group: string, sessionId?: string): Promise<void> {
   if (!getGeneralSession()) return   // already cleared (event path + reconcile backstop can both fire)
   setGeneralSession(null)
   await channel.sendText(group,
-    '🏁 <b>The session anchored to General ended.</b>\nGeneral now follows the focused session. Tap to anchor the current one here instead.',
+    `🏁 <b>The session anchored to General ended</b> — it ${escapeHtml(endAttributionText(sessionId ? getSessionEnd(sessionId) : null))}.\nGeneral now follows the focused session. Tap to anchor the current one here instead.`,
     { buttons: [[{ text: '📌 Claim General', data: 'claimgeneral' }]], silent: true }).catch(() => {})
 }
 
 // A DM chat lane's session ended: drop the binding and tell its owner directly (there's no topic to
 // close — the lane lives only in that DM). Mirrors generalAnchorLost, minus the re-anchor button:
 // the lane just re-provisions itself on the owner's next message (ensureChatLane).
-async function chatLaneLost(chatId: string): Promise<void> {
+async function chatLaneLost(chatId: string, sessionId?: string): Promise<void> {
   // Say it in the log. Dropping this binding is the single most consequential thing this file does to
   // an owner's surface — `tg send` starts refusing while text relay keeps working, which reads as
   // "half the bridge is broken" — and until now it happened in complete silence, so the 2026-07-30
   // investigation could not even tell WHEN the lane was unbound.
   process.stderr.write(`daemon: chat lane for chat ${chatId} lost its session — binding dropped (dmChat entry removed)\n`)
   clearDmChatSession(chatId)
-  await channel.sendText(chatId, '💤 Chat session ended — your next message starts a fresh one.').catch(() => {})
+  await channel.sendText(chatId, `💤 Chat session ended — it ${escapeHtml(endAttributionText(sessionId ? getSessionEnd(sessionId) : null))}. Your next message starts a fresh one.`).catch(() => {})
 }
 
 // A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
@@ -503,7 +518,7 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
     { text: '🗑 Delete topic', data: `topicdel:${t.threadId}` },
     { text: '🗑 Always delete', data: `topicdelalways:${t.threadId}` },
   ]]
-  await channel.sendText(group, '🏁 <b>Session ended</b> — topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
+  await channel.sendText(group, `🏁 <b>Session ended</b> — it ${escapeHtml(endAttributionText(getSessionEnd(sessionId)))}. Topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.`,
     { threadId: String(t.threadId), buttons: kb, silent: true }).catch(() => {})
   try {
     await channel.threads!.close(group, String(t.threadId))
@@ -623,6 +638,11 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)
+    // This is the backstop for deaths the event path never saw — a session that exited while the daemon
+    // was down or restarting. All it can honestly say is that the session is gone NOW, so it says that
+    // and nothing about when. A request already on file still wins (planEndRecord); the TTL there is
+    // what stops a two-day-old kill from claiming this.
+    recordEndObserved({ sid: t.sessionId, name: t.name, cwd: t.cwd }, 'noticed-late')
     // Headless: nothing to close in Telegram. A row killed on purpose is kept (closed, so it renders
     // on no surface) for the undo window — `tg reopen` needs its cwd + conversation id, and dropping
     // it here is what made the undo expire ~85s after a kill. Everything else drops as before.
@@ -662,7 +682,7 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     const misses = (topicMissCounts.get(sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(sessionId, misses); continue }
     topicMissCounts.delete(sessionId)
-    await chatLaneLost(chatId)
+    await chatLaneLost(chatId, sessionId)
   }
   if (!group) return
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
@@ -672,7 +692,7 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     else {
       const misses = (topicMissCounts.get(anchor) ?? 0) + 1
       if (misses < 2) topicMissCounts.set(anchor, misses)
-      else { topicMissCounts.delete(anchor); await generalAnchorLost(group) }
+      else { topicMissCounts.delete(anchor); await generalAnchorLost(group, anchor) }
     }
   }
 }

@@ -196,10 +196,16 @@ export function formatStopReason(items: { id: number; fromName: string }[]): str
 //
 // The ONE-item string is a preserved control, byte-for-byte what shipped before coalescing, so the
 // common single-ask death cannot drift as a side effect of adding the multi-ask shape.
-export function closureNoticeText(target: string, items: { id: number; text: string }[]): string {
+//
+// `endPhrase` is session-end.ts's one predicate, passed in so this file stays pure. It replaces the bare
+// verb "ended" — the word the chat lane read on 2026-08-20 before reopening a session the owner had
+// deliberately closed. Absent (no record) keeps the byte-for-byte control above.
+export function closureNoticeText(target: string, items: { id: number; text: string }[], endPhrase?: string): string {
   const gist = (t: string) => { const f = deTag(t.replace(/\s*\n\s*/g, ' ')).trim(); return f.length > 80 ? f.slice(0, 80) + '…' : f }
-  if (items.length === 1) return `(@${deTag(target)} ended with your ask ${items[0].id} unanswered: "${gist(items[0].text)}")`
-  return `(@${deTag(target)} ended; your asks ${items.map(i => i.id).join(', ')} closed unanswered:\n`
+  const ended = endPhrase ?? 'ended'
+  // The comma rides on the phrase, so the no-record string stays the byte-for-byte control it was.
+  if (items.length === 1) return `(@${deTag(target)} ${ended}${endPhrase ? ',' : ''} with your ask ${items[0].id} unanswered: "${gist(items[0].text)}")`
+  return `(@${deTag(target)} ${ended}; your asks ${items.map(i => i.id).join(', ')} closed unanswered:\n`
     + items.map(i => `${i.id} — ${gist(i.text)}`).join('\n') + ')'
 }
 

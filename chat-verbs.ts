@@ -49,7 +49,7 @@ export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'schedule', re: /^\s*@schedule(?=\s|$)/i },
 ]
 
-// `@kill <name> [force]` / `@reopen <name|sid-prefix>` — a verb whose whole argument is a session
+// `@kill <name> [force]` / `@reopen <name|sid-prefix> [force]` — a verb whose whole argument is a session
 // name. Returns null when the text is not that verb at all.
 //
 // Junk after the name is REFUSED rather than ignored: `@kill web now please` is a typo or a
@@ -63,14 +63,16 @@ export type ParsedNameVerb =
 export function parseNameVerb(raw: string, verb: 'kill' | 'reopen' | 'watch'): ParsedNameVerb | null {
   const head = new RegExp(`^\\s*@${verb}(?=\\s|$)`, 'i').exec(raw)
   if (!head) return null
-  const usage = verb === 'kill' ? 'usage: @kill <name> [force]' : `usage: @${verb} <name>`
+  const usage = verb === 'watch' ? 'usage: @watch <name>' : `usage: @${verb} <name> [force]`
   const rest = raw.slice(head[0].length).trim()
   if (!rest) return { kind: 'error', error: usage }
   const parts = rest.split(/\s+/)
   const name = parts[0]!
   if (name.startsWith('-') || name.startsWith('@')) return { kind: 'error', error: `'${name}' is not a session name — ${usage}` }
   const extra = parts.slice(1)
-  const force = verb === 'kill' && extra.length === 1 && /^(force|--force)$/i.test(extra[0]!)
+  // `reopen` takes it too since v0.5.173: reopening a session the OWNER closed is refused once, and
+  // the second, explicit call is how the caller says it meant it — the same shape `kill` already uses.
+  const force = verb !== 'watch' && extra.length === 1 && /^(force|--force)$/i.test(extra[0]!)
   if (extra.length && !force) return { kind: 'error', error: `I only understood the name "${name}" — ${usage}` }
   return { kind: 'name', name, force }
 }
@@ -95,6 +97,9 @@ export const undoGesture = (g: Gestures, name: string): string =>
   g === 'cli' ? `\`tg reopen ${name}\`` : `"@reopen ${name}"`
 export const forceGesture = (g: Gestures, name: string): string =>
   g === 'cli' ? `re-run as \`tg kill ${name} --force\`` : `send "@kill ${name} force"`
+// The same second-call gesture for `reopen`, whose refusal is the owner-closed gate (session-end.ts).
+export const reopenForceGesture = (g: Gestures, name: string): string =>
+  g === 'cli' ? `re-run as \`tg reopen ${name} --force\`` : `send "@reopen ${name} force"`
 // The chat forms are QUOTED, never backticked, and that is not a style choice: these strings go to
 // the owner inside a PLAIN Telegram message, where a backtick is a backtick. He read one live on
 // 2026-08-13 — "a self-contained task belongs in a fresh `@launch` instead", markers and all. Its

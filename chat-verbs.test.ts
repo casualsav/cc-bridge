@@ -121,7 +121,10 @@ test('junk after the name is REFUSED, never trimmed to the first word', () => {
   // ends something he did not mean to end.
   expect(parseNameVerb('@kill web now please', 'kill')).toEqual(
     { kind: 'error', error: 'I only understood the name "web" — usage: @kill <name> [force]' })
-  expect(parseNameVerb('@reopen web force', 'reopen')).toMatchObject({ kind: 'error' })   // no force on reopen
+  // `reopen` takes `force` since v0.5.173 — it is the second, explicit call past the owner-closed
+  // refusal, the same shape `kill` already used. `watch` still refuses it: nothing there to force.
+  expect(parseNameVerb('@reopen web force', 'reopen')).toMatchObject({ kind: 'name', name: 'web', force: true })
+  expect(parseNameVerb('@watch web force', 'watch')).toMatchObject({ kind: 'error' })
   expect(parseNameVerb('@kill', 'kill')).toEqual({ kind: 'error', error: 'usage: @kill <name> [force]' })
   expect(parseNameVerb('@kill @web', 'kill')).toMatchObject({ kind: 'error' })
 })

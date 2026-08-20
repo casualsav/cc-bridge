@@ -1092,10 +1092,22 @@ export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boo
 // that landed, and reported as "never delivered" (2026-08-18). `pastedAt` is what separates "nothing
 // of ours ever reached its box" from "it went in and we never got to prove it was read", and the
 // asker's next move differs: only the first is safe to re-issue blind.
-export function reapReasonText(p: Pick<BusPending, 'injected' | 'pastedAt'>): string {
-  if (p.injected) return 'delivered but the target session ended before answering'
-  if (p.pastedAt != null) return 'pasted into its pane but never confirmed — the target session ended inside the confirmation window'
-  return 'never delivered — target session ended'
+// `endPhrase` is `endAttributionText`'s one predicate (session-end.ts), passed in rather than looked up
+// so this file stays free of the store. Absent — no record, an ending nobody observed — leaves the
+// wording exactly as it shipped: "unattributed" is the honest floor, not a gap to fill with a guess.
+export function reapReasonText(p: Pick<BusPending, 'injected' | 'pastedAt'>, endPhrase?: string): string {
+  // No record keeps all three strings byte for byte — they are the controls this file already carried,
+  // and the confirmation-window clause on the middle one is the v0.5.172 lineage (ack 772).
+  if (!endPhrase) {
+    if (p.injected) return 'delivered but the target session ended before answering'
+    if (p.pastedAt != null) return 'pasted into its pane but never confirmed — the target session ended inside the confirmation window'
+    return 'never delivered — target session ended'
+  }
+  // With one, the phrase lands LAST: several of them carry their own trailing clause ("… — nobody asked
+  // the bridge to end it"), and anything continuing after it read as a sentence about the wrong thing.
+  if (p.injected) return `delivered but never answered — the target ${endPhrase}`
+  if (p.pastedAt != null) return `pasted into its pane but never confirmed, inside the confirmation window — the target ${endPhrase}`
+  return `never delivered — the target ${endPhrase}`
 }
 
 // The asker ENDED the target itself, so "@X ended with your ask N unanswered" is telling a session
@@ -1208,7 +1220,9 @@ export function depthExceeded(depth: number): boolean { return depth > depthLimi
 // `hidden` — off the roster and the fleet surfaces, still resolvable by name (a dev self-test stub).
 // resolveEndpoint deliberately ignores it: hiding an endpoint must never make it unreachable, or the
 // hide becomes a delete with extra steps.
-export type BusEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean; hidden?: boolean }
+// `endedBy` is session-end.ts's rendered predicate, carried on the endpoint (populated by the daemon's
+// busEndpoints for CLOSED rows only) so resolveEndpoint can say WHO ended a session instead of guessing.
+export type BusEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean; hidden?: boolean; endedBy?: string }
 
 // An endpoint name is a topic's display name, minus the auto-appended " · <branch>" and " #<n>"
 // sibling suffixes (mirrors topic-runtime's title base), lower-cased for case-insensitive matching.
@@ -1245,12 +1259,23 @@ export function resolveEndpoint(name: string, endpoints: BusEndpoint[]): { kind:
   // so a name never loses to an id.
   const byId = endpoints.filter(e => !e.closed && e.id.toLowerCase() === want)
   if (byId.length === 1) return { kind: byId[0].kind, id: byId[0].id }
-  const closed = endpoints.some(e => (e.closed && normalizeEndpointName(e.name) === want) || (e.closed && e.id.toLowerCase() === want))
+  const closedRows = endpoints.filter(e => e.closed && (normalizeEndpointName(e.name) === want || e.id.toLowerCase() === want))
+  const closed = closedRows.length > 0
   // The moment of choice. A down endpoint used to read as a plumbing fault, and the reflex it
   // produced was `tg reopen` — which resumed a big FINISHED session to deliver a brand-new
   // self-contained task, paying a full backlog replay for context the task never needed. So the
   // error states the trade instead of the fault: a closed session is usually closed on purpose.
-  if (closed) return { error: `endpoint "${want}" exists but isn't running — a session that is down was usually closed on purpose, its work done. For a self-contained task use \`tg spawn\` (fresh context, starts now); \`tg reopen\` is for resuming THIS session's unfinished work and replays its entire backlog at full token cost first.` }
+  //
+  // "usually" was a GUESS, and this is the surface an agent hits first — before any dead letter. With a
+  // record it states the fact instead, which is what makes the `tg reopen` decision below an informed
+  // one. Newest row wins when several closed rows share a name; no record keeps the old sentence.
+  if (closed) {
+    const said = closedRows.find(e => e.endedBy)?.endedBy
+    const lead = said
+      ? `endpoint "${want}" isn't running — it ${said}.`
+      : `endpoint "${want}" exists but isn't running — a session that is down was usually closed on purpose, its work done.`
+    return { error: `${lead} For a self-contained task use \`tg spawn\` (fresh context, starts now); \`tg reopen\` is for resuming THIS session's unfinished work and replays its entire backlog at full token cost first.` }
+  }
   return { error: `no endpoint named "${want}" — try \`tg roster\` to list them` }
 }
 
@@ -1304,7 +1329,10 @@ export type LedgerEntry = {
   // carrying it sit in live ledger.jsonl files, so the type still describes real data.
   // `btw` is an aside (tg btw): delivered mid-turn, no id, no pending row — so it appears here and in
   // digests as history, and nowhere in the pending registry.
-  kind: 'ask' | 'ack' | 'answer' | 'btw' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate' | 'answer-unconfirmed'
+  // `end` is what the bridge CONCLUDED about a session's ending, written from the session-end record —
+  // one row per ending, always attributed. `kill` is its sibling and stays: that one records that an
+  // ending was ASKED for (actor in `from`), which is a different fact and one askerKilledTarget reads.
+  kind: 'ask' | 'ack' | 'answer' | 'btw' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate' | 'answer-unconfirmed' | 'end'
   from: string
   to?: string
   id?: number

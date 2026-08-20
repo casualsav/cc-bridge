@@ -615,6 +615,25 @@ message and its file ping together). Worker topic tabs are quiet — chosen, not
 API never echoes `disable_notification` back, so evidence stops at the payload we build
 (unit-asserted) plus the live classification.
 
+**AN ENDING SAYS WHO ENDED IT, and a REQUEST is never overwritten by an OBSERVATION** (v0.5.173,
+2026-08-20). The class: the owner closed @hourlyedge from the mini app at 07:29:09Z — a path that
+stamped `killedAt` and wrote no actor anywhere — so 61s later the dead letter read "the target session
+ended", the chat lane reopened it at 07:32:39Z replaying 6.1 MB at Fable rates, and undid that 63s
+later; its own re-kill then overwrote the `killedAt`, erasing even the timing. `session-end.ts` is the
+one writer (record + the `end` ledger row) and `endAttributionText` the one renderer for all nine
+surfaces. Three things are load-bearing and each reads as a simplification to remove: every deliberate
+close ends, if it has to, in `tmux kill-pane`, so the observation after a kill is shaped exactly like a
+crash and **must not win** (`planEndRecord`); a request older than `END_INTENT_TTL_MS` claims no later
+death, or a kill that never took reports a crash days on as itself; and `reopenSessionTopic` **clears**
+the record above every guard, or a reopened-then-crashed session reads as owner-closed forever. The
+reopen gate is `by:'owner'` ONLY — an agent undoing its own kill is routine and `unattributed` is the
+pane-death recovery path, which this must never block. Proof: `session-end.test.ts` (source-bound
+control — `CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts + topic-runtime.ts>` must fail exactly its five
+call-site tests) and the live run in `$(tg shared)/bridgeend-2026-08-20/`. Measured against claude
+2.1.238: a `SessionEnd` hook fires on `/exit` (`prompt_input_exit`), on `tmux kill-pane` (`other`) and
+on **`/clear`** — which is not an ending at all — and not on SIGKILL; consuming it without whitelisting
+the reason would retire a live session on every `/clear` (`PROBE-sessionend.md`, gated, unbuilt).
+
 ## Handoff
 
 `HANDOFF.md` at the root of the repo you are working in — one file, unfinished work only. Write

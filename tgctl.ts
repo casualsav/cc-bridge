@@ -20,6 +20,7 @@
 //   tgctl cost|context|status|mcp|hooks <name>  read that session's CLI panel (prompt restored afterwards)
 //   tgctl spawn  <name> [--dir p [--create]] [--account id] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
+//   tgctl reopen <name> [--force]               relaunch it (--force: past the owner-closed refusal)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
@@ -136,8 +137,10 @@ const HELP: Record<string, string> = {
   kill:    'tg kill <name> [--force]   end a session you spawned (a chat lane may end any worker). Undo with tg reopen.\n' +
            '  A session with background shells still running refuses once and names them — killing it kills them.\n' +
            '  --force closes anyway; that second, explicit call is how a script says it meant it.',
-  reopen:  'tg reopen <name>   bring a closed session back up — same folder, same name, same topic,\n' +
-           '  resuming its own conversation where it left off',
+  reopen:  'tg reopen <name> [--force]   bring a closed session back up — same folder, same name, same topic,\n' +
+           '  resuming its own conversation where it left off.\n' +
+           '  A session the OWNER closed is refused once, naming who closed it and what the replay costs;\n' +
+           '  --force reopens it anyway. A crash or an agent kill needs no --force.',
   wait:    'tg wait <reason|-> | --clear   say what you are blocked on, so the roster shows it instead of\n' +
            '  reading you as idle: "CI run 18832", "@taste to answer". One line. It clears itself when your\n' +
            '  next turn starts, so you never have to remember to unset it.',
@@ -239,7 +242,7 @@ if (BUS.has(cmd)) {
                     name = cmd;       args = { pane, to: pos[0] }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0], ...flags }; break   // --force: close past the background-shell warning
-    case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
+    case 'reopen':  name = 'reopen';  args = { pane, name: pos[0], ...flags }; break   // --force: reopen past the owner-closed refusal
     case 'watch':   name = 'watch';   args = { pane, name: pos[0] }; break   // one arg, no options, on purpose
     // A reason short enough to read on a card is an argv string, so `-` stays available but is not
     // the documented shape here (nothing in a wait reason wants Markdown).
