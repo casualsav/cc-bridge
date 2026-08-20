@@ -132,8 +132,13 @@ test('SOURCE: the 0 anchor comes from a POSITIVE record read, never from "resolu
   expect(fn).toContain('paneTranscriptUnwritten(pane) ? 0 : undefined')
   // The distinction this rests on: a REFUSAL (unknown owner, unreadable registry, an older CLI that
   // writes no record) keeps the tail, because those files can be enormous and already scrolled past.
-  const probe = src.slice(src.indexOf('function paneTranscriptUnwritten('))
-  expect(probe).toContain("recordedTranscript(row && rowIsLive(row) ? row : null, existsSync).kind === 'unwritten'")
+  // The positive read itself: the CLI's own record, via the same call transcriptForPane's STEP 2
+  // makes. (Shared with the refresh seam gate since v0.5.184 — both need the CURRENT conversation
+  // rather than the pane's @tg_transcript stamp, which a `/clear` leaves pointing at the old one.)
+  const probe = src.slice(src.indexOf('function recordedConversation('))
+  expect(probe).toContain('recordedTranscript(row && rowIsLive(row) ? row : null, existsSync)')
+  expect(probe).toContain("if (rec.kind === 'unwritten') return { kind: 'unwritten' }")
+  expect(src).toContain("const paneTranscriptUnwritten = (pane: string): boolean => recordedConversation(pane).kind === 'unwritten'")
 })
 
 // ---- unreadable is not absent: the false alarm that reached the owner's DM -----------------------

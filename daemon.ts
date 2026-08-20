@@ -46,6 +46,7 @@ import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } fr
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
 import { planResumeOptions, planResumeCardText, planResumeOutcome, planResumeCardMint, resumePickerSig, paneGlance, type ResumeOption } from './resume-picker-card.ts'
+import { planRefreshSeam, refreshSummaryHeld } from './refresh-seam.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
@@ -4724,15 +4725,22 @@ async function transcriptSizeForPane(pane: string): Promise<number | undefined> 
   } catch { return undefined }
 }
 
-// "The CLI has a live record for this pane, and the conversation it names has not been written yet."
-// Deliberately the same two calls `transcriptForPane`'s STEP 2 makes, so the two readings cannot
-// drift apart in meaning — only in when they are asked.
-function paneTranscriptUnwritten(pane: string): boolean {
+// The conversation the CLI's OWN RECORD names for this pane. Deliberately the same two calls
+// `transcriptForPane`'s STEP 2 makes, so the readings cannot drift apart in meaning — only in when
+// they are asked. Used by the delivery proof's anchor and by the refresh seam gate, both of which
+// need the CURRENT conversation rather than the pane's `@tg_transcript` stamp: a `/clear` mints a new
+// conversation and re-stamps only at the next UserPromptSubmit, so the stamp can name a conversation
+// the session has already discarded (measured live 2026-08-20).
+function recordedConversation(pane: string): { kind: 'unwritten' } | { kind: 'file'; file: string } | { kind: 'unknown' } {
   try {
     const row = rowForPane(pane, readRegistryRows(listAccounts().map(a => a.configDir)))
-    return recordedTranscript(row && rowIsLive(row) ? row : null, existsSync).kind === 'unwritten'
-  } catch { return false }
+    const rec = recordedTranscript(row && rowIsLive(row) ? row : null, existsSync)
+    if (rec.kind === 'file') return { kind: 'file', file: rec.file }
+    if (rec.kind === 'unwritten') return { kind: 'unwritten' }
+    return { kind: 'unknown' }
+  } catch { return { kind: 'unknown' } }
 }
+const paneTranscriptUnwritten = (pane: string): boolean => recordedConversation(pane).kind === 'unwritten'
 
 // The sweep. Promotes a pasted ask to delivered on proof, and REPORTS one that never arrived — it
 // never re-pastes, because nothing can see the CLI's queue and a retry cannot tell "swallowed" from
@@ -12124,10 +12132,10 @@ function refreshSpawnModel(sid: string | null): string {
 // only changes the wording and keeps the summary quiet.
 async function settleRestartedSessions(
   targets: RestartTarget[],
-  opts: { installed: string | null; onlyStale: boolean; auto: boolean },
+  opts: { installed: string | null; onlyStale: boolean; auto: boolean; held?: { name: string; why: string }[] },
   say: (t: string, kb?: InlineKeyboard) => Promise<unknown>,
 ): Promise<void> {
-  const { installed, onlyStale, auto } = opts
+  const { installed, onlyStale, auto, held = [] } = opts
   // A PANE BACK AT A PROMPT PROVES THE SESSION IS UP — NEVER THAT IT MOVED TO THE NEW BUILD, and the
   // whole point of a stale sweep is the second claim. The health check below cannot tell the two
   // apart: a restart that declined leaves the untouched session sitting at its own prompt, which
@@ -12168,11 +12176,15 @@ async function settleRestartedSessions(
       const behind = targets.filter(t => !moved.includes(t)).map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
       return `⚠️ ${behind} ${n - moved.length === 1 ? 'is' : 'are'} up and unharmed but still on the old build — the refresh declined or didn't take. The next sweep retries.`
         + (moved.length ? `\n\n♻️ ${moved.length} of ${n} moved onto <b>v${escapeHtml(installed ?? '?')}</b>.` : '')
+        + refreshSummaryHeld(held, escapeHtml)
         + parkedNote
     }
     return (auto
-      ? `♻️ Auto-refreshed ${n === 1 ? 'one idle session' : `${n} idle sessions`} onto <b>v${escapeHtml(installed ?? '?')}</b>.`
+      // "at a clean seam" is the claim now, and it is the whole rule in four words: these had nothing
+      // to lose. `refreshSummaryHeld` names the ones that did.
+      ? `♻️ Auto-refreshed ${n === 1 ? 'one session' : `${n} sessions`} at a clean seam onto <b>v${escapeHtml(installed ?? '?')}</b>.`
       : `✅ All ${n === 1 ? 'done — the session is' : `${n} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`)
+      + refreshSummaryHeld(held, escapeHtml)
       + parkedNote
   }
   // A session is "back up" if its tracked pane is at a prompt — OR if the session is live and
@@ -12440,6 +12452,9 @@ async function holdFor(pane: string, holds: Record<string, RefreshHold>): Promis
 
 async function autoRefreshStaleSessions(panes: string[], installed: string): Promise<void> {
   const targets: RestartTarget[] = []
+  // NOT `held`: that name is taken inside the loop by the refresh-hold read, and shadowing it makes
+  // `.push` resolve to the hold object (or to null after its narrowing) instead of this array.
+  const withContext: { name: string; why: string }[] = []
   const holds = loadRefreshHolds()
   for (const pane of panes) {
     try {
@@ -12489,9 +12504,24 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
       }
       const sid = await sessionForPane(pane, false).catch(() => null)
       const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
-      // One completed turn is the line between the two lanes: below it there is no conversation to
-      // resume, so the session is relaunched fresh instead.
-      targets.push({ pane, sid, name, cwd, id: file && latestFinalReply(file) ? agentSessionId(file) : null })
+      // THE SEAM GATE (refresh-seam.ts, owner's ruling 2026-08-20). Every gate above asks whether the
+      // pane is free to type into; this one asks whether there is anything here worth money. An IDLE
+      // session with a loaded conversation is the most expensive thing this sweep can touch, and it
+      // used to be its favourite target. Only a session with nothing to lose is refreshed — which is
+      // the same rule for a fresh spawn, a `/clear`ed pane and a session between pieces of work.
+      const rec = recordedConversation(pane)
+      const seam = planRefreshSeam({
+        conversation: rec.kind === 'file' ? (latestFinalReply(rec.file) ? 'loaded' : 'empty') : rec.kind,
+        ctxPct: contextPct(parseStatusline(cap), file),
+      })
+      if (!seam.refresh) {
+        withContext.push({ name, why: seam.why })
+        process.stderr.write(`daemon: auto-refresh HOLD on @${name} (${pane}) — ${seam.why}\n`)
+        continue
+      }
+      // Nothing to resume, by construction: the seam gate refuses anything with a completed turn, so
+      // this lane is always the FRESH relaunch. `id` stays null and says so.
+      targets.push({ pane, sid, name, cwd, id: null })
     } catch {}
   }
   if (!targets.length) return
@@ -12511,14 +12541,16 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
   for (const t of targets) {
     try {
       const st = { briefDelivered: true, declined: false }
-      const now = t.id ? await restartPaneSessionCore(t.pane, t.id, undefined, undefined, undefined, st) : await relaunchFreshSession(t)
+      // Always the fresh lane: the seam gate refuses anything with a conversation, so there is
+      // nothing here to `--resume`. The tapped "♻️ Restart all" flow still resumes — that one is a
+      // human choosing to spend the reload, which is exactly the choice the sweep may not make.
+      const now = await relaunchFreshSession(t)
       if (now === 'untouched' || st.declined) { staleSessionNotified.delete(t.pane); continue }
       attempted.push(t)
       if (now) t.pane = now
-      if (!t.id && now) await declineFableForOpus(now, t.sid)
+      if (now) await declineFableForOpus(now, t.sid)
     } catch { attempted.push(t) }   // it threw mid-restart — that session HAS been disturbed
   }
-  if (!attempted.length) return
   const group = isTopicMode() ? getGroupChatId() : null
   const dests = group ? [String(group)] : loadAccess().allowFrom.map(String)
   const say = async (text: string, kb?: InlineKeyboard): Promise<void> => {
@@ -12526,7 +12558,12 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
       await channel.sendText(chat, text, { ...(kb ? { buttons: kbToButtons(kb) } : {}), silent: true }).catch(() => {})
     }
   }
-  await settleRestartedSessions(attempted, { installed, onlyStale: true, auto: true }, say)
+  // Nothing moved and nothing to report: a sweep that refreshed no one and held no one is silent, as
+  // it always was. A sweep that HELD sessions says nothing either — the daily stale notice already
+  // offers him the tap, and repeating "still on the old build" every hour is the noise this trades
+  // against. The held list is named only where a card is being sent anyway.
+  if (!attempted.length) return
+  await settleRestartedSessions(attempted, { installed, onlyStale: true, auto: true, held: withContext }, say)
 }
 
 function updateDashboardKeyboard(): InlineKeyboard {

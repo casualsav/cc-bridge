@@ -281,6 +281,27 @@ falls through to the unknown-command relay, which types it into the live TUI whe
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
 guidance and touches no pane.
 
+**THE AUTO-REFRESH SWEEP RESTARTS ONLY AT A CLEAN SEAM — "idle" was never the question** (v0.5.184,
+owner's ruling 2026-08-20: *"If there is context sitting there, it should not run, for that very reason
+that it costs money to bring that transcript back up… it should not have that behavior of restarting an
+idle session that has context sitting in it."*). Every gate the sweep had asked "is this pane free to
+type into"; none asked "is there anything here worth money", so an idle 242k-token session was its
+favourite target — that is how @hourlystudy was restarted and stranded on a resume picker for five
+hours. `planRefreshSeam` (`refresh-seam.ts`) refreshes only a session whose CURRENT conversation is
+`unwritten` or `empty`; `loaded` and `unknown` both hold, and the sweep's resume lane is GONE
+(`relaunchFreshSession` only — resuming a conversation stays a human tap, which is him choosing to
+spend the reload). Two things are load-bearing and each was measured, not reasoned: the conversation
+comes from the CLI's own record (`recordedConversation`, shared with the delivery-proof anchor) and NOT
+the `@tg_transcript` stamp, because a `/clear` mints a new conversation and re-stamps only at the next
+UserPromptSubmit — the stamp names one the session has already discarded; and the decision must NOT key
+on context %, because a fresh spawn reads 20% and a pane three seconds after `/clear` reads 19% (system
+prompt + CLAUDE.md + memory), so `ctxPct > 0` refuses every seam there is. Fresh spawns need no refresh
+at all — `spawnSession` execs `claude` from PATH, verified live: a session spawned after the 2.1.238
+install runs 2.1.238. The summary says what it left alone (`refreshSummaryHeld`). Proof:
+`refresh-seam.test.ts` (source-bound; four call-site tests must fail against a pre-0.5.184 `daemon.ts`)
+and `bun scripts/refresh-seam-probe.ts`, which runs the real predicate over every live pane — it is how
+the ctx% version was caught and it is the instrument to re-run before changing this rule.
+
 **`/exit` is a REQUEST, not a keystroke: the restart lanes READ the CLI's answer, and every `/exit`
 the daemon types leaves a log line** (v0.5.169, 2026-08-20). A session whose turn CONCLUDED while a
 subagent, background shell or scheduled task keeps running passes every "is this pane free to type
