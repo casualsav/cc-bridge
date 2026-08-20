@@ -295,12 +295,19 @@ export function readWait(sid: string, anchor: string | null, now = Date.now()): 
 
 // ---- the state machine ----
 
-export type WaitWhy = 'said' | 'ask' | 'proc'
+export type WaitWhy = 'blocked' | 'said' | 'ask' | 'proc'
 export type SessionWait = { why: WaitWhy; label: string }
 export type SessionState = 'working' | 'errored' | 'waiting' | 'unreported' | 'idle'
 
 // One card's state. Order is the design: a busy pane beats every wait signal, because a session
 // that asked someone and moved on is working — the open ask is a fact about it, not its state.
+//
+// `blocked` is the ONE signal above `working`, and it has to be: the surfaces infer busy from the
+// capture, and a blocking modal is busy-shaped by construction (no input box ⇒ `!onNormalPrompt`).
+// So a session parked on one reads as working precisely BECAUSE it is stopped — the inversion that
+// showed @hourlystudy as `🟡 · busy` for three hours on the resume picker (2026-08-20). It is a
+// `waiting` state rather than a fourth colour: nothing about it is a new kind of card, and the mini
+// app's dot has a standing ruling against a fourth semantic colour (webapp/CLAUDE.md).
 // (daemon.ts's roster already records why an open ask must never DECIDE busy; it stays a suffix.)
 // `unreported` sits below `waiting` and cannot collide with it: unreportedWorkMarker suppresses
 // itself while an inbound ask is open.
@@ -315,6 +322,9 @@ export type SessionState = 'working' | 'errored' | 'waiting' | 'unreported' | 'i
 // fact. They never stack — one row, one label.
 export function sessionState(args: {
   working: boolean
+  // A screen that blocks the session until a human answers it (prompt.ts's detectBlockedScreen).
+  // Optional, so every pre-existing caller reads as `null` — same shape of addition as apiError.
+  blocked?: { label: string } | null
   // The last turn's upstream failure (transcript.ts's lastTurnApiError), or null on a normal
   // conclusion. Optional so every pre-existing caller (and the truth-table's generated rows) is
   // unaffected by this addition — omitted reads as null, same as passing it explicitly.
@@ -324,6 +334,7 @@ export function sessionState(args: {
   proc: string | null        // childWaitLabel
   unreported: { briefer: string; since: number } | null
 }): { state: SessionState; wait: SessionWait | null } {
+  if (args.blocked) return { state: 'waiting', wait: { why: 'blocked', label: args.blocked.label } }
   if (args.working) return { state: 'working', wait: null }
   if (args.apiError) return { state: 'errored', wait: null }
   if (args.said) return { state: 'waiting', wait: { why: 'said', label: args.said } }

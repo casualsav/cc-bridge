@@ -143,7 +143,10 @@ export interface SessionCard {
   // Two nullable fields rather than one shared "detail", because each means exactly one thing: `wait`
   // is populated only while waiting, `unreported` only while unreported. A single overloaded field
   // would need `state` read alongside it to be interpretable at all.
-  wait: { why: 'said' | 'ask' | 'proc'; label: string } | null
+  // `blocked` is a screen the session cannot answer for itself (the resume picker, the login menu).
+  // It rides `waiting` deliberately — amber dot, "⏳ waiting: <label>" — rather than minting a state
+  // the client would have to learn: webapp/CLAUDE.md's ruling is that the dot carries no fourth colour.
+  wait: { why: 'blocked' | 'said' | 'ask' | 'proc'; label: string } | null
   unreported: { briefer: string } | null
   // The upstream HTTP status the last turn died with (529, 500, …), when known. Optional/nullable so
   // a payload from an older daemon, or any card literal built before this field existed, still type-

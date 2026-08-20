@@ -1,0 +1,50 @@
+  approved — note it as done-under-class in your report.
+  2. Push main at your next clean boundary — 5 commits and a unit edit are sitting local; the owner's remote is the durability line.
+  3. For M2/M3: KAUS is your stated weak station (fattest outside-band tail, 0.375 escape rate). Make sure the ledger and any eventual rule table carry per-station rates rather than pooled where KAUS is involved — a
+  pooled 0.90 that is 0.97 KLAX / 0.83 KAUS quietly overstates KAUS notifications near the bar.
+
+  Answer this with M2's result when it lands (or fold it into the ack you already planned and answer here after) — plus pin-raise verification and the push hash.</tg>
+  ↩ reply with: tg answer 884 "<summary>"  ·  a final text block does NOT reach the asker
+
+● 884 landed; its riders are already done (pins acad80c, push in sync, station-scoped rates in the M2 ledger). I'll answer it with the M2 result as soon as the ghost audit returns, since that audit decides how the one
+  apparent pocket gets described.
+
+✻ Worked for 5s
+
+● Agent "Build hourly study frame" finished · 18m 11s
+
+● The pocket was a ghost: 90 of the 92 "wins" had yes_ask = 0.00 with yes_bid = 0.00 — permanently unquoted rungs, a second spelling of "no ask". Guarded, ledger regenerated: M2 fails its own line at 99.3% or worse, and
+  the two eras now agree. Committing M2 and answering 884.
+
+  Ran 3 shell commands
+
+● Both asks are answered and the lane is at a clean boundary: nine commits on main, all pushed (f98edf9), HANDOFF records that M2 closed the notifier question at message speed and that phase 3 waits on the owner's choice
+  between the lag-0 measurement and the weekly rebuild. Nothing further is independent of that decision, so I'm parked until it comes back through @chat.
+
+✻ Brewed for 50m 16s
+
+❯ <tg @chat ack=890>M2 accepted, and the ghost audit is the best work in it — a 26/32 pocket that survives to the report would have become a losing notifier; catching that 90 of 92 "wins" were unquoted 0¢ rungs is
+  exactly the honesty the ledger exists for. Your recommendation not to build on these rules is endorsed: the gate fired, that's the plan working, not failing. The (a)/(b)/stop fork is the owner's and I'm putting it to
+  him now with your framing — knowability, not criteria. Hold at this boundary; nothing new until his word comes back through me.</tg>
+  (acknowledgment — no answer needed, nothing is waiting on you)
+
+● Holding at this boundary. Summary of where things stand for whoever reads next:
+
+  - Study outcome: M1 confirmed the owner's thesis (band entered 0–2 min ago settles on the entered side 90.5%, decaying to the flip by ~20 min; IEM per-minute truth replicates it). M2 showed the market already prices it
+    by the time the 1-minute print reaches us — decided sides were under 50¢ on 0.2% of looks with a real book. The one apparent pocket was unquoted 0¢ rungs. The notifier is not built, by the plan's own gate.
+  - Shipped and live: memory pins on three units, guard memory-pressure line, charter amendment, mesh archive widened to the four study rings (rows landing), 61-row tenths backfill, weather-hourly-watch stopped, study
+    modules (frame / M1 / prices / M2) — nine commits, all pushed to origin/main (f98edf9).
+  - Waiting on the owner: (a) measure the edge at lag 0/30/60/90 s, (b) weekly rebuild as the book era deepens, or stop. HANDOFF carries this plus the wethr tier review due 2026-08-23.
+
+✻ Sautéed for 7s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  This session is 10h 21m old and 242.3k tokens.
+
+  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again
+
+  Enter to confirm · Esc to cancel

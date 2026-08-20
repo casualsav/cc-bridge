@@ -642,6 +642,29 @@ export function isResumeSessionPrompt(paneText: string): boolean {
   return !!detectResumeSessionPrompt(paneText)
 }
 
+// ---- Screens that BLOCK a session until a human answers them ----
+//
+// The bridge relays these two as buttons and deliberately answers neither — one is a usage-cost
+// choice, the other needs a credential. So the pane sits on them indefinitely, and every status
+// surface that reads a capture sees a screen with no input box and calls the session BUSY
+// (`tg roster`'s composite ends in `!onNormalPrompt(cap)`). That is the wrong word for the one state
+// where nothing reaches the session at all: @hourlystudy was restarted onto CLI 2.1.238 by the
+// auto-refresh sweep at 19:33:50Z on 2026-08-20, landed on the resume picker, and read as
+// `🟡 … · busy` for the next three hours while its statusline — model, ε:, ctx% — sat behind the
+// modal. The owner, who had parked it and touched nothing, is who noticed.
+//
+// The list's ground truth is `editorHeld` in daemon.ts: a screen that HOLDS an inbound message is a
+// screen the session cannot be reached on, so it must not read as busy. Deliberately NOT here:
+// the unrecognised/editor screen (that third hold branch is transient-prone on a one-shot capture,
+// and `detectStuckScreen` already cards it on its own), and every prompt the daemon answers itself
+// (usage-limit choice, plugin scope, onboarding) — those clear without anyone being told.
+export type BlockedScreen = { kind: 'resume' | 'login'; label: string }
+export function detectBlockedScreen(paneText: string): BlockedScreen | null {
+  if (isResumeSessionPrompt(paneText)) return { kind: 'resume', label: 'resume picker' }
+  if (detectLoginPrompt(paneText)) return { kind: 'login', label: 'login menu' }
+  return null
+}
+
 // The CLI's answer to `/exit` when the session still has work running — a subagent, a background
 // shell, a scheduled task. It is the one screen that turns a restart into a wedge, and the reason it
 // needs its own predicate rather than riding the generic gates: those already refuse it correctly

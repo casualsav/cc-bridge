@@ -44,7 +44,7 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen } from './prompt.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
@@ -8288,6 +8288,12 @@ async function handleCall(
           const busy = subs > 0 || (cap
             ? (tfile ? turnInProgress(tfile) : false) || detectWorking(cap) || !onNormalPrompt(cap)
             : true)
+          // …and the one screen that makes that composite lie. `!onNormalPrompt(cap)` is the last term
+          // above, so a modal the session cannot answer is indistinguishable from a running turn — see
+          // detectBlockedScreen. It outranks `busy` inside sessionState, so this stays a read, not a
+          // branch: a blocked pane's model/ε:/ctx% are missing from the row for the same reason, and
+          // the label is what explains all three at once.
+          const blocked = cap ? detectBlockedScreen(cap) : null
           // Work this session was briefed on and never reported back. This used to be typed into its
           // pane, which cost it a real turn at its own context size and model rates on every install;
           // computed here it costs nothing until someone is already reading the roster.
@@ -8314,6 +8320,7 @@ async function handleCall(
           // a waiting agent reads "idle · waiting: gh run watch" rather than silently as done.
           const { state: waitState, wait } = sessionState({
             working: busy,
+            blocked,
             apiError,
             said: tfile ? readWait(e.id, turnAnchorUuid(tfile)) : null,
             ask: openOutboundAsk(listPending(), e.id, p => askerAlreadyResolved(p, wctx.ledger)),
@@ -8321,14 +8328,19 @@ async function handleCall(
             unreported: null,
           })
           const errored = waitState === 'errored'
-          const state = `${busy ? ' · busy' : errored ? ` · errored${apiError?.status ? ` (${apiError.status})` : ''}` : ' · idle'}`
+          // A blocked session says so INSTEAD of busy/idle, and names its own lever: this row is the
+          // orchestrator's decision surface, and the whole failure was that nobody knew there was
+          // anything to do. The relayed card is a silent message in a worker's topic tab.
+          const stuck = wait?.why === 'blocked'
+          const state = `${stuck ? ` · blocked: ${wait!.label} — answer it (\`tg keys @${nm} enter\`); nothing reaches it until then`
+              : busy ? ' · busy' : errored ? ` · errored${apiError?.status ? ` (${apiError.status})` : ''}` : ' · idle'}`
             + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
-            + `${wait ? ` · waiting: ${wait.label}` : ''}`
+            + `${wait && !stuck ? ` · waiting: ${wait.label}` : ''}`
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
             + `${queued ? ` · ${queued} queued` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
             + `${handoffNote ? ` · ${handoffNote}` : ''}`
-          rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${effort}${pct}${state}${flair}`)
+          rows.push(`${stuck ? '⛔' : busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${effort}${pct}${state}${flair}`)
         }
         // The RECENTLY-ENDED tail. An ended session leaves this list entirely (the loop above filters
         // `!e.closed`), so the orchestrator's own roster showed nothing at all about @hourlyedge on
@@ -22176,7 +22188,10 @@ async function waitContext(): Promise<WaitCtx> {
 //
 // `marker` rides out with the state because the card needs the briefer's name for its own row, and
 // recomputing it there would mean reading the transcript's concluded work twice.
-function readSessionState(sid: string, tfile: string | null, working: boolean, panePid: number | undefined, ctx?: WaitCtx): {
+// `cap` is the pane capture the caller has already taken — passed rather than re-captured so the
+// blocked read and the `working` read above it describe the same instant. Both surfaces feed it for
+// the same reason this function exists at all: a card that opened onto a header disagreeing with it.
+function readSessionState(sid: string, tfile: string | null, working: boolean, panePid: number | undefined, ctx?: WaitCtx, cap?: string): {
   state: SessionState; wait: SessionWait | null; marker: ReturnType<typeof unreportedWorkMarker>; errorStatus: number | null
 } {
   // The same marker `tg roster` prints. Its own gate suppresses it while an INBOUND ask is open, so
@@ -22194,6 +22209,7 @@ function readSessionState(sid: string, tfile: string | null, working: boolean, p
   return {
     ...sessionState({
       working,
+      blocked: cap ? detectBlockedScreen(cap) : null,
       apiError,
       said: tfile ? readWait(sid, turnAnchorUuid(tfile)) : null,
       ask: openOutboundAsk(listPending(), sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
@@ -22324,7 +22340,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // cannot see, and guessing "still thinking" for them is how the verb creeps back over the line.
   const status = working && preTool ? parseWorkingStatus(cap) : null
   const panePid = ctx?.panePids.get(pane)
-  const read = readSessionState(row.sid, tfile, working, panePid, ctx)
+  const read = readSessionState(row.sid, tfile, working, panePid, ctx, cap)
   const marker = read.marker
   ;({ state, wait } = read)
   return {
@@ -22959,7 +22975,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // list-panes — on the 3s poll of the ONE session a human is looking at, which is why it is taken
   // here rather than folded into the fleet poll the list already runs.
   const ctx = await waitContext()
-  const { state } = readSessionState(sid, file, working, ctx.panePids.get(pane), ctx)
+  const { state } = readSessionState(sid, file, working, ctx.panePids.get(pane), ctx, cap)
   return { sid, name: row.name, working, state, chat: isChatLaneSession(sid), ...dial, items, ...(status && (paneWorking || working) ? { status } : {}) }
 }
 

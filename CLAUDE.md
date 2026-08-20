@@ -204,6 +204,27 @@ asks **`paneRunsTypedInput`** (`prompt.ts`) instead. The class cost a silently-q
 *and then complete* (the completion watch read the same screen). Fixed v0.4.385 at three sites;
 fixture is that incident's own capture in `prompt-queued.test.ts`.
 
+**AND `!onNormalPrompt` IS NOT "BUSY" — a screen the session cannot answer is busy-SHAPED, which is
+the inversion `blocked` exists to break** (v0.5.176, 2026-08-20). Every status surface infers work
+from a capture and every one of those composites ends in `!onNormalPrompt(cap)`, so a modal with no
+input box reads as a running turn precisely BECAUSE the session is stopped: the auto-refresh sweep
+relaunched idle @hourlystudy onto CLI 2.1.238 at 19:33:50Z, it landed on the resume-cost picker, and
+for the next three hours the roster read `🟡 … · busy` with model and ctx% gone and ε: on
+`?(last-known)` — one fact (the statusline is behind the modal) presenting as three defects, on a
+session nobody had touched since 10:30Z. `detectBlockedScreen` (`prompt.ts`) names the class and
+`sessionState` ranks it ABOVE `working`. Three things are load-bearing: the list's ground truth is
+`editorHeld` — **a screen that HOLDS an inbound message must never read as busy** — which is what keeps
+it from drifting into "every modal"; the unrecognised/editor screen is the named exclusion
+(transient-prone on a one-shot capture, and `detectStuckScreen` cards it already); and it is a
+`waiting` state, not a fourth colour, because the mini-app dot has a standing ruling against one
+(`webapp/CLAUDE.md`) — the roster spends its own glyph, the card says `⏳ waiting: resume picker`.
+Proof: `blocked-screen.test.ts` — the real wedged pane as `fixtures/pane-resume-wedge.txt`, with the
+shipped busy composite asserted TRUE on it as the known-answer control, and a source-bound half
+(`CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts>` must fail exactly its five call-site tests). **Still
+open, and the bigger half:** the sweep that caused it counts that picker as a successful bring-up
+(`paneBackUp`, deliberate) and cards "♻️ Auto-refreshed 2 idle sessions", while `relayResumeChoice`
+puts the only lever in a worker topic's silent card — six of them went unread. HANDOFF carries it.
+
 **A submit is verified against the input BOX, never against the pane's mood.** `submitLanded`
 (`prompt.ts`) reads `inputBoxOccupant` on a STYLED capture and nothing else — text still in the box is
 a delivery that did not take, whatever the spinner says. It short-circuited on `detectWorking ||
