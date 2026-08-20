@@ -221,7 +221,9 @@ test('the version claim is re-read before it is made', () => {
   // "♻️ Auto-refreshed one idle session onto v2.1.237" was one Escape away from being said about a
   // session still running 2.1.235: the health check asks whether the pane is at a prompt, and a
   // declined restart leaves it at one. Only the panes that actually carry the build may be claimed.
-  const settle = bodyOf('async function settleRestartedSessions(', 2600)
+  // Widened from 2600 when v0.5.182 added the parked-session note between the two claims — this
+  // window is a budget over one function, not a fact about it.
+  const settle = bodyOf('async function settleRestartedSessions(', 4200)
   expect(settle).toContain('paneRunningClaudeVersion(t.pane)')
   expect(settle).toContain('const moved = await onNewBuild()')
   expect(settle).toContain('still on the old build')

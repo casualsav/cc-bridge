@@ -12141,17 +12141,39 @@ async function settleRestartedSessions(
     for (const t of targets) { if ((await paneRunningClaudeVersion(t.pane).catch(() => null)) === installed) moved.push(t) }
     return moved
   }
+  // A PANE AT THE RESUME PICKER COUNTS AS BACK UP — deliberately, and `paneBackUp` must keep doing it
+  // (`waitForPaneBackUp` shares it, and a spawn wrongly declared dead double-spawns). The process
+  // really did restart onto the new build, so the version claim below is true. What was NOT true is
+  // what a reader takes from it: @hourlystudy was carded "♻️ Auto-refreshed 2 idle sessions onto
+  // v2.1.238" at 19:35Z on 2026-08-20 and then sat unusable for five hours. So the exception belongs
+  // HERE, in the summary, the same way `onNewBuild` already names a session left on the old build.
+  const parkedTargets = async (): Promise<{ name: string; label: string }[]> => {
+    const out: { name: string; label: string }[] = []
+    for (const t of targets) {
+      const cap = await capturePane(t.pane).catch(() => '')
+      const b = cap ? detectBlockedScreen(cap) : null
+      if (b) out.push({ name: t.name, label: b.label })
+    }
+    return out
+  }
   const allBackUp = async (): Promise<string> => {
     const n = targets.length
     const moved = await onNewBuild()
+    const parked = await parkedTargets()
+    const parkedNote = parked.length
+      ? `\n\n⛔ Not usable yet: ` + parked.map(p => `<b>${escapeHtml(p.name)}</b> is parked on its ${escapeHtml(p.label)}`).join('; ')
+        + `. Nothing reaches ${parked.length === 1 ? 'it' : 'them'} until that is answered — the card to do it is in this chat.`
+      : ''
     if (moved.length < n) {
       const behind = targets.filter(t => !moved.includes(t)).map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
       return `⚠️ ${behind} ${n - moved.length === 1 ? 'is' : 'are'} up and unharmed but still on the old build — the refresh declined or didn't take. The next sweep retries.`
         + (moved.length ? `\n\n♻️ ${moved.length} of ${n} moved onto <b>v${escapeHtml(installed ?? '?')}</b>.` : '')
+        + parkedNote
     }
-    return auto
+    return (auto
       ? `♻️ Auto-refreshed ${n === 1 ? 'one idle session' : `${n} idle sessions`} onto <b>v${escapeHtml(installed ?? '?')}</b>.`
-      : `✅ All ${n === 1 ? 'done — the session is' : `${n} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`
+      : `✅ All ${n === 1 ? 'done — the session is' : `${n} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`)
+      + parkedNote
   }
   // A session is "back up" if its tracked pane is at a prompt — OR if the session is live and
   // prompt-ready in SOME pane. A restart can move a session to a new pane we lost track of, and a

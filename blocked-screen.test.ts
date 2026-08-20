@@ -160,3 +160,21 @@ test('call site: both mini-app surfaces hand it their capture', () => {
   expect(daemon).toContain('readSessionState(row.sid, tfile, working, panePid, ctx, cap)')
   expect(daemon).toContain('readSessionState(sid, file, working, ctx.panePids.get(pane), ctx, cap)')
 })
+
+// ---- the refresh summary must not claim a parked session came back ------------------------------
+//
+// `paneBackUp` accepts the resume picker as a successful bring-up ON PURPOSE — `waitForPaneBackUp`
+// shares it and a spawn wrongly declared dead double-spawns — so the sweep carded "♻️ Auto-refreshed
+// 2 idle sessions onto v2.1.238" at 19:35Z on 2026-08-20 about @hourlystudy, which then sat unusable
+// for five hours. The version claim is true; what a reader takes from it was not. The exception
+// belongs in the summary, beside the one `onNewBuild` already makes.
+test('call site: the summary names a session it left parked, and does not touch paneBackUp', () => {
+  const settle = between('async function settleRestartedSessions(', 'async function restartAllStaleSessions(')
+  expect(settle).toContain('const parkedTargets = async ()')
+  expect(settle).toContain('detectBlockedScreen(cap)')
+  expect(settle).toContain('⛔ Not usable yet:')
+  // Both endings carry it: the "all back up" claim and the "still on the old build" one.
+  expect((settle.match(/parkedNote/g) ?? []).length).toBeGreaterThanOrEqual(3)
+  // paneBackUp keeps accepting the picker — changing THAT is the double-spawn regression.
+  expect(between('async function paneBackUp(', '\n}')).toContain('isResumeSessionPrompt(cap)')
+})
