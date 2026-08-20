@@ -45,6 +45,7 @@ import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { runRestartExit } from './refresh-exit.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -8824,13 +8825,52 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
 // Enter is split out behind a settle gate: a batched `/exit`+Enter can outrun a NON-focused topic
 // pane's TUI and leave the command typed-but-unsubmitted (the topic-pane paste→submit race), so the
 // topic gets marked closed while the session keeps running — and its next outbound reopens the tab.
-async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<void> {
-  // Trace EVERY session exit with its reason + call site. A session exiting on its own has been
-  // reported (the General session, unprompted) — this makes the next occurrence diagnosable: the
-  // log shows which path typed /exit (or, if there's NO exitSessionPane log around the death, it
-  // was claude crashing on its own, not the bridge).
+// Trace EVERY session exit with its reason + call site. A session exiting on its own has been
+// reported (the General session, unprompted) — this makes the next occurrence diagnosable: the
+// log shows which path typed /exit (or, if there's NO exit log around the death, it was claude
+// crashing on its own, not the bridge).
+//
+// THE READING "no log ⇒ not the bridge" IS ONLY TRUE WHILE EVERY `/exit` COMES THROUGH HERE. It was
+// false from the day the restart lanes were written: `restartPaneSessionCore` and
+// `relaunchFreshSession` send `agentExitKeys` directly, and on 2026-08-20 one of them typed `/exit`
+// into a working @hourlyedge with nothing in the log to say so — four lanes were investigated before
+// the code answered it. They now trace through here too (see exitForRestart), which is why this is a
+// separate function and not a line inside exitSessionPane: the `exitSessionPane(<pane>)` text is the
+// grep anchor for all three sites, and `site` names whichever one actually typed.
+// Ground truth for the enumeration: `grep -n agentExitKeys daemon.ts`.
+function traceExit(pane: string, reason: string): void {
   const site = (new Error().stack ?? '').split('\n').slice(2, 4).map(l => l.trim()).join(' <- ')
   process.stderr.write(`daemon: exitSessionPane(${pane}) reason=${reason} | ${site}\n`)
+}
+
+// The restart lanes' exit: type the agent's exit keys, wait for it to go — and, if the CLI answers
+// with its background-work confirmation instead of exiting, DISMISS THAT DIALOG AND REPORT BACK.
+//
+// `'declined'` means the session has work running that `/exit` would stop. The pane is left exactly
+// as it was found, at its own prompt, on its old build — the caller must treat that as "not now",
+// never as a failed restart.
+//
+// ESCAPE, NEVER ENTER. Option 1 is "Exit and stop tasks" and it is PRESELECTED, so the one keystroke
+// that looks like "confirm what we asked for" is the destructive branch: it stops the subagents and
+// background shells the dialog exists to protect. Escape returns the pane to its prompt with that
+// work intact (measured, 2026-08-20).
+//
+// The loop itself lives in refresh-exit.ts with its primitives injected, so the live probe and the
+// unit test drive the REAL decision instead of a copy of it. This binds tmux to it and nothing else.
+async function exitForRestart(pane: string, kind: AgentKind, reason: string): Promise<'exited' | 'declined'> {
+  traceExit(pane, reason)
+  const outcome = await runRestartExit({
+    sendKeys: keys => sendKeys(pane, keys),
+    capture: () => capturePane(pane).catch(() => ''),
+    agentLive: () => paneClaudeLive(pane),
+    settle: () => waitForSettle(pane, 200, 1500),
+  }, agentExitKeys(kind), agentInterruptKeys(kind))
+  if (outcome === 'declined') process.stderr.write(`daemon: restart exit(${pane}) reason=${reason} DECLINED — the CLI reports background work still running; escaped the confirmation, session left untouched\n`)
+  return outcome
+}
+
+async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<void> {
+  traceExit(pane, reason)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   const run = async () => {
     const [first, ...rest] = agentExitKeys(await paneAgentKind(pane))
@@ -11409,7 +11449,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
 // `onExited` fires once the /exit has actually landed, for a caller driving a self-editing status
 // message — the gap between "typed /exit" and "resumed" is the long part, and a card that sits on
 // its first phase through it reads as stalled.
-async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }, harnessOverride?: HarnessProfile, onExited?: () => void): Promise<string | null> {
+async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean; declined?: boolean }, harnessOverride?: HarnessProfile, onExited?: () => void): Promise<string | null> {
   const currentAgent = await paneAgentKind(pane)
   const agent = agentOverride ?? currentAgent
   const preCap = await capturePane(pane).catch(() => '')
@@ -11444,6 +11484,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
   let relaunched = false           // the in-place relaunch line actually put an agent back in the pane
+  let declined = false             // the CLI refused the exit: background work is running (see exitForRestart)
   let launchVerified = harnessOverride === undefined && harness.provider === 'anthropic'
   setPaneRestarting(pane, true)
   // The sid shield, held for the WHOLE flow — including the branch below where /exit takes the pane
@@ -11453,8 +11494,9 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   if (sid) setSessionRestarting(sid, true)
   try {
     const run = async () => {
-      await sendKeys(pane, agentExitKeys(currentAgent))
-      for (let i = 0; i < 40 && await paneClaudeLive(pane); i++) await waitForSettle(pane, 200, 1500)
+      // A declined exit is not a failed restart: the agent never left, so `onExited` must not fire
+      // and nothing below may type into what is still a live composer.
+      if (await exitForRestart(pane, currentAgent, 'restart-in-place') === 'declined') { declined = true; return }
       onExited?.()   // the agent is gone (or the pane with it) — everything after this is the resume
       if (!(await paneAlive(pane))) return   // exit closed the pane — respawn below, nothing to type into
       if (id === null) {
@@ -11498,6 +11540,14 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       }
     }
     await (watcher ? watcher.withInjection(run) : run())
+    // The exit was DECLINED — the session is up, at its own prompt, untouched, on its old build.
+    // FIRST, ahead of every other post-run branch: each one below reasons about a pane the agent has
+    // LEFT, and this is the one case where it never did. Reported through `status.declined` rather
+    // than the return value, because `null` is what all ~15 of this function's callers already read
+    // as "the restart did not happen" and a distinct truthy sentinel would be taken for a pane id by
+    // the `if (!(await restartPaneSessionCore(…)))` sites. Only the auto-refresh sweep needs the
+    // distinction, and only to un-mark the pane so a later sweep retries it.
+    if (declined) { if (status) status.declined = true; return null }
     if (!launchVerified && await paneAlive(pane)) return null
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
@@ -11806,9 +11856,31 @@ async function settleRestartedSessions(
   say: (t: string, kb?: InlineKeyboard) => Promise<unknown>,
 ): Promise<void> {
   const { installed, onlyStale, auto } = opts
-  const allBackUp = () => auto
-    ? `♻️ Auto-refreshed ${targets.length === 1 ? 'one idle session' : `${targets.length} idle sessions`} onto <b>v${escapeHtml(installed ?? '?')}</b>.`
-    : `✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`
+  // A PANE BACK AT A PROMPT PROVES THE SESSION IS UP — NEVER THAT IT MOVED TO THE NEW BUILD, and the
+  // whole point of a stale sweep is the second claim. The health check below cannot tell the two
+  // apart: a restart that declined leaves the untouched session sitting at its own prompt, which
+  // reads as "back up" on the first pass. On 2026-08-20 that was one Escape away from carding
+  // "♻️ Auto-refreshed one idle session onto v2.1.237" about @hourlyedge, which is still running
+  // 2.1.235 today. So the version is re-READ before it is claimed, per pane, from the same function
+  // the sweep used to call it stale in the first place.
+  const onNewBuild = async (): Promise<RestartTarget[]> => {
+    if (!onlyStale || !installed) return targets   // "restart all" makes no version claim to verify
+    const moved: RestartTarget[] = []
+    for (const t of targets) { if ((await paneRunningClaudeVersion(t.pane).catch(() => null)) === installed) moved.push(t) }
+    return moved
+  }
+  const allBackUp = async (): Promise<string> => {
+    const n = targets.length
+    const moved = await onNewBuild()
+    if (moved.length < n) {
+      const behind = targets.filter(t => !moved.includes(t)).map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
+      return `⚠️ ${behind} ${n - moved.length === 1 ? 'is' : 'are'} up and unharmed but still on the old build — the refresh declined or didn't take. The next sweep retries.`
+        + (moved.length ? `\n\n♻️ ${moved.length} of ${n} moved onto <b>v${escapeHtml(installed ?? '?')}</b>.` : '')
+    }
+    return auto
+      ? `♻️ Auto-refreshed ${n === 1 ? 'one idle session' : `${n} idle sessions`} onto <b>v${escapeHtml(installed ?? '?')}</b>.`
+      : `✅ All ${n === 1 ? 'done — the session is' : `${n} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`
+  }
   // A session is "back up" if its tracked pane is at a prompt — OR if the session is live and
   // prompt-ready in SOME pane. A restart can move a session to a new pane we lost track of, and a
   // large/slow resume can lag the one pane we're watching; checking the SESSION (not just the pane)
@@ -11830,7 +11902,7 @@ async function settleRestartedSessions(
     if (pending.size) await sleep(3000)
   }
   const down = [...pending]
-  if (!down.length) { await say(allBackUp()); return }
+  if (!down.length) { await say(await allBackUp()); return }
   // Second chance, AUTOMATIC (no tap needed): if the session is already live in a pane, just adopt
   // it — NEVER spawn a twin. Otherwise anything whose pane is gone gets respawned from scratch in its
   // folder — `--resume` puts its conversation back, the preset stamp keeps its topic. A zero-turn
@@ -11858,7 +11930,10 @@ async function settleRestartedSessions(
   }
   const still = [...lost, ...retried.filter(t => pending2.has(t))]
   if (!still.length) {
-    await say(auto ? allBackUp() : `✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''} (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
+    // Same verified text, plus the detail this branch alone has to add — the respawn note rides
+    // BEHIND the version claim rather than restating it, so there is one place that decides what may
+    // be said about the build.
+    await say(await allBackUp() + `\n\n(${down.length === 1 ? 'One was' : `${down.length} were`} respawned in a fresh pane, conversations intact.)`)
     return
   }
   const kb = new InlineKeyboard()
@@ -11940,11 +12015,14 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   setPaneRestarting(t.pane, true)
   try {
     const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
-    const run = async () => {
-      await sendKeys(t.pane, agentExitKeys('claude'))
-      for (let i = 0; i < 40 && await paneClaudeLive(t.pane); i++) await waitForSettle(t.pane, 200, 1500)
-    }
+    let declined = false
+    const run = async () => { declined = await exitForRestart(t.pane, 'claude', 'relaunch-fresh') === 'declined' }
     await (watcher ? watcher.withInjection(run) : run())
+    // Same answer this lane already gives when the agent never left: the session is up and unchanged,
+    // so the next sweep tries again. A zero-turn session with background work is a corner of a corner
+    // — the check is here because it costs one branch and the alternative is a wedged pane nobody
+    // asked to wedge.
+    if (declined) return 'untouched'
     // A shell-backed pane (`cc-bridge` in the owner's own window) survives /exit — relaunch INTO it
     // rather than spawning a window beside it and leaving an orphaned shell still stamped with this
     // session. The stale transcript stamp goes first, or discovery relays the dead conversation's
@@ -12058,6 +12136,29 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
       const cwd = await paneCwd(pane).catch(() => null)
       const file = cwd ? await transcriptForPane(pane, cwd) : null
       if (file && turnInProgress(file)) continue
+      // EVERY GATE ABOVE ANSWERS "is this pane free to type into". `/exit` asks a different question —
+      // "is this session free to END" — and the two diverge for exactly one shape: a turn that
+      // CONCLUDED while the work it started keeps running. That is an orchestrator's resting state
+      // between subagent waves, which is why @hourlyedge was the pane this found on 2026-08-20: its
+      // turn ended at 04:31:02 with a subagent launched 6s earlier still in `tool_use`, `safeToType`
+      // was true, and the sweep typed `/exit` into it 2 minutes later.
+      //
+      // `liveSubagents` reads the same `file` already resolved above and is the composite the rest of
+      // the daemon already uses for "busy" (see the paneFreedom read and the mini-app work rows) — it
+      // was simply never asked here. It is NOT sufficient on its own: a background shell and a
+      // scheduled task leave no subagent file, and the probe that reproduced this had only a shell.
+      // The unconditional guard is exitForRestart's post-`/exit` dialog read; this one is the cheap
+      // pre-gate that keeps the common case from ever typing the keystroke.
+      //
+      // Deliberately NOT added to `paneSafeToType`, the sibling gate for scheduled messages: a live
+      // subagent is no reason to withhold a MESSAGE from a session, and gating that on it would
+      // silently stop scheduled deliveries to every orchestrator. Destroying a session and typing
+      // into one are different questions; this is the answer to only the first.
+      const subs = file ? liveSubagents(file) : 0
+      if (subs > 0) {
+        process.stderr.write(`daemon: auto-refresh skipping pane ${pane} — ${subs} subagent(s) still running; /exit would stop them\n`)
+        continue
+      }
       const sid = await sessionForPane(pane, false).catch(() => null)
       const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
       // One completed turn is the line between the two lanes: below it there is no conversation to
@@ -12074,11 +12175,16 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
   // that session is still UP on the old build. Reporting it as refreshed would be a lie, and leaving
   // it marked would retire it until the next binary, so an untouched pane is un-marked and dropped
   // from the summary entirely: a silent skip, retried next sweep, exactly like a failed safety gate.
+  // A decline AFTER the keystroke — the CLI answering `/exit` with its background-work dialog, which
+  // exitForRestart then escapes — belongs in the same bucket for the same reason: the session is up,
+  // unchanged, and still stale. It arrives as `status.declined` because `null` is the only return the
+  // core's other callers can safely read (see restartPaneSessionCore).
   const attempted: RestartTarget[] = []
   for (const t of targets) {
     try {
-      const now = t.id ? await restartPaneSessionCore(t.pane, t.id) : await relaunchFreshSession(t)
-      if (now === 'untouched') { staleSessionNotified.delete(t.pane); continue }
+      const st = { briefDelivered: true, declined: false }
+      const now = t.id ? await restartPaneSessionCore(t.pane, t.id, undefined, undefined, undefined, st) : await relaunchFreshSession(t)
+      if (now === 'untouched' || st.declined) { staleSessionNotified.delete(t.pane); continue }
       attempted.push(t)
       if (now) t.pane = now
       if (!t.id && now) await declineFableForOpus(now, t.sid)

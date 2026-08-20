@@ -170,8 +170,12 @@ const SHIPPED: [string, (src: string) => boolean][] = [
   ['the cross-engine brief waits for a pane that RUNS typed input, not merely one showing a prompt',
     s => bodyOf(s, 'typeBriefIntoPane').includes('paneReadyForFirstDelivery(')
       && !bodyOf(s, 'typeBriefIntoPane').includes('onNormalPrompt(')],
+  // The exit itself moved into `exitForRestart` on 2026-08-20 (it now escapes the CLI's
+  // background-work dialog instead of walking away from it) — the gate this control guards is
+  // unchanged and still has to come first, so the needle follows the keystroke to its new home
+  // rather than the control being dropped. See refresh-exit-guard.test.ts.
   ['the unattended refresh will not type /exit onto a busy pane or somebody\'s draft',
-    s => ordered(bodyOf(s, 'relaunchFreshSession'), 'paneReadyForFirstDelivery(preCap)', "agentExitKeys('claude')")],
+    s => ordered(bodyOf(s, 'relaunchFreshSession'), 'paneReadyForFirstDelivery(preCap)', "exitForRestart(t.pane, 'claude'")],
 ]
 const PENDING: [string, (src: string) => boolean][] = []
 

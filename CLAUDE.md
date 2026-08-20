@@ -230,6 +230,27 @@ falls through to the unknown-command relay, which types it into the live TUI whe
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
 guidance and touches no pane.
 
+**`/exit` is a REQUEST, not a keystroke: the restart lanes READ the CLI's answer, and every `/exit`
+the daemon types leaves a log line** (v0.5.169, 2026-08-20). A session whose turn CONCLUDED while a
+subagent, background shell or scheduled task keeps running passes every "is this pane free to type
+into" gate — `safeToType` true, `turnInProgress` false, `fixtures/pane-idle-bg-work.txt` — and that is
+an orchestrator's resting state, so the stale-session sweep typed `/exit` into a working @hourlyedge,
+got the background-work confirmation back, and walked away from a pane it had wedged; nothing in
+daemon.log said so, because both restart-lane exits bypassed `exitSessionPane`'s tracer whose whole
+premise is "no log ⇒ not the bridge". Three things are load-bearing and each reads as a tidy-up:
+`autoRefreshStaleSessions` pre-gates on `liveSubagents` but **`paneSafeToType` deliberately does NOT**
+(a live subagent is no reason to withhold a scheduled MESSAGE — ending a session and typing into one
+are different questions); `runRestartExit` (`refresh-exit.ts`) checks the dialog on EVERY settle and
+sends **Escape, never Enter** — option 1 "Exit and stop tasks" is preselected, so the confirming
+keystroke is the destructive one — reporting `declined` out-of-band via `status.declined` because
+`null` is what all ~15 callers of `restartPaneSessionCore` already read as "no restart"; and
+`settleRestartedSessions` re-reads `paneRunningClaudeVersion` before naming a version, since a pane
+back at a prompt proves the session is UP, never that it MOVED. Proof:
+`bun scripts/refresh-exit-guard.ts` (two real panes; `--cache <dir>` runs the loop the old build
+shipped and must FAIL there, wedging its own probe session), unit + source-bound control in
+`refresh-exit-guard.test.ts` (`CC_BRIDGE_SRC_DIR=<dir of HEAD's daemon.ts>` must fail exactly its five
+call-site tests).
+
 ## Outbound
 
 **A pane's transcript is resolved by IDENTITY — the stamp, then the CLI's own

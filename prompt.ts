@@ -642,6 +642,30 @@ export function isResumeSessionPrompt(paneText: string): boolean {
   return !!detectResumeSessionPrompt(paneText)
 }
 
+// The CLI's answer to `/exit` when the session still has work running — a subagent, a background
+// shell, a scheduled task. It is the one screen that turns a restart into a wedge, and the reason it
+// needs its own predicate rather than riding the generic gates: those already refuse it correctly
+// (paneAcceptsText/onNormalPrompt/paneRunsTypedInput are all false on it, measured), so a lane that
+// has just typed `/exit` walks away from a pane it has broken without ever learning what it is
+// looking at. That is what happened to @hourlyedge on 2026-08-20.
+//
+// Keyed on the two OPTION ROWS, line-anchored and numbered, never on the header or the item list:
+// the header wording varies with what is running, and this repo's own sessions display that prose on
+// screen while discussing this incident — an unanchored substring match would classify a transcript
+// as a dialog. Whoever reads this must not "simplify" it back to a bare /Exit and stop tasks/ test.
+//
+//    ❯ 1. Exit and stop tasks
+//      2. Move to background and exit
+//      3. Stay
+//
+// Fixtures: fixtures/pane-exit-confirm.{txt,ansi} — plain AND styled, because the live paths capture
+// both and the two must classify the same.
+export function isExitConfirmDialog(paneText: string): boolean {
+  const lines = paneLines(paneText)
+  return lines.some(l => /^\s*[❯>]?\s*1\.\s+Exit and stop tasks\s*$/.test(l))
+    && lines.some(l => /^\s*[❯>]?\s*2\.\s+Move to background and exit\s*$/.test(l))
+}
+
 // ---- External editor / pager detection ----
 // Some pane states CAPTURE the keyboard, so the bridge's normal "type the message + Enter" lands in
 // the wrong place and the user is silently stranded (e.g. the plan prompt's "ctrl+g to edit" opens

@@ -1,0 +1,40 @@
+
+[38;5;174m╭───[39m [38;5;174mClaude Code[39m [38;5;246mv2.1.237[39m [38;5;174m─────────────────────────────────────────────────────────────────────────────────────────────╮
+│[39m                                                    [2m[38;5;174m│[0m [1m[38;5;174mTips for getting started[0m                                        [38;5;174m│
+│[39m                  [1mWelcome back Sal![0m                 [2m[38;5;174m│[0m Ask Claude to create a new app or clone a repository            [38;5;174m│
+│[39m                                                    [2m[38;5;174m│[0m [38;5;174m───────────────────────────────────────────────────────────────[39m [38;5;174m│
+│[39m                      [38;5;174m ▐[48;5;16m▛███▛█[39m[49m                      [2m[38;5;174m│[0m [1m[38;5;174mWhat's new[0m                                                      [38;5;174m│
+│[39m                      [38;5;174m▝▜[48;5;16m█████[49m█▀[39m                     [2m[38;5;174m│[0m Fixed prompt caching for sessions using an LLM gateway or cust… [38;5;174m│
+│[39m                      [38;5;174m  ▝▝ ▝▝  [39m                     [2m[38;5;174m│[0m Added a built-in "Concise" output style: Claude leads with res… [38;5;174m│
+│[39m    [38;5;246mHaiku 4.5 · Claude Max · suchag@gmail.com's [39m    [2m[38;5;174m│[0m Added `ANTHROPIC_DEFAULT_MODEL` environment variable: sets the… [38;5;174m│
+│[39m    [38;5;246mOrganization[39m                                    [2m[38;5;174m│[0m [3m[38;5;246m/release-notes for more[0m                                         [38;5;174m│
+│[39m              [38;5;246m/…/scratchpad/exitprobe[39m               [2m[38;5;174m│[0m                                                                 [38;5;174m│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+[39m [38;5;220m⚠[39m [38;5;220mYour login expires in 3 days[38;5;246m · run /login to renew[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mUse the Bash tool with run_in_background=true to run: sleep 900 . Then reply with exactly: started[39m
+
+[49m  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m●[39m started
+
+[38;5;246m✻[39m [38;5;246mBaked for 4s · 1 shell still running[39m
+
+
+
+
+
+
+
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[38;5;153mBackground work is running[0m
+   [38;5;246mThe following will stop when you exit:[39m
+
+   [1mshell[0m[38;5;246m · sleep 900[39m
+
+   [38;5;153m❯[39m [38;5;246m1. [38;5;153mExit and stop tasks[39m
+     [38;5;246m2. [39mMove to background and exit
+     [38;5;246m3. [39mStay
+
+   [3m[38;5;246mEnter to confirm · Esc to cancel[0m
