@@ -517,7 +517,7 @@ closed (v0.5.172): the proof scans from the transcript size RECORDED at the past
 64 KB back-window because the block can precede the stamp), never a fixed tail — answer 896's block was
 pushed out of the old 512 KB tail by the asker's own 606 KB first tool result within ten seconds
 (2026-08-20; `confirm-scan.test.ts` replays it, control included).** Answering a row that was never delivered is allowed and logged (`answered undelivered`,
-ledger `undelivered: true`).
+ledger `undelivered: true`). Proof: `answer-path.test.ts` (source-bound), `agent-bus-persist.test.ts`.
 
 **A FAILED READ IS NOT A MISSING BLOCK, and the warning that fires says what it checked** (v0.5.181,
 2026-08-20). `transcriptCarries` answered `false` both for "the conversation does not carry the block"
@@ -533,7 +533,7 @@ it. Two things read as tidy-ups and are not: `readable` defaults TRUE in `planIn
 caller that has not distinguished the two failures keeps its old meaning exactly; and the re-verify is
 at the DEADLINE only, so the ordinary sweep still costs one read. Proof: `confirm-scan.test.ts`
 (source-bound; the control is the single boolean giving `unconfirmed` for both failures). The
-`unverifiable` branch has never fired live — HANDOFF carries what to watch for. Proof: `answer-path.test.ts` (source-bound), `agent-bus-persist.test.ts`.
+`unverifiable` branch has never fired live — HANDOFF carries what to watch for.
 
 **The SENDER's chevron card is drawn when the message is SENT — a confirmation EDITS it, never draws
 one.** It lived in `onAskConfirmed` until v0.5.168, so a queued ask was invisible on the sender's
