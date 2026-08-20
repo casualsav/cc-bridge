@@ -96,7 +96,10 @@ feed half of `transcript.ts`.
   `~/.claude/cc-bridge.md`, imported by one `@cc-bridge.md` line in the user's global CLAUDE.md);
   `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — the DM chat agent.
 - `ACCESS.md`, `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet changes live —
-  the spawn-a-throwaway recipe, the traps, what is NOT yet verified).
+  the spawn-a-throwaway recipe, the traps, what is NOT yet verified). **After any Claude Code
+  version bump, run `bun scripts/refresh-exit-guard.ts`** — the restart lanes' `/exit` guard reads a
+  CLI dialog by its option rows, so a reworded screen disarms it with every unit test still green
+  (HANDOFF.md carries why nothing else would notice).
 
 ## Supervision
 

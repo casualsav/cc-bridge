@@ -8839,7 +8839,11 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
 // grep anchor for all three sites, and `site` names whichever one actually typed.
 // Ground truth for the enumeration: `grep -n agentExitKeys daemon.ts`.
 function traceExit(pane: string, reason: string): void {
-  const site = (new Error().stack ?? '').split('\n').slice(2, 4).map(l => l.trim()).join(' <- ')
+  // THREE frames, not the two this took when it lived inside exitSessionPane: moving the capture one
+  // function deeper shifted the window, and the first live line after v0.5.169 read
+  // `at exitSessionPane <- at closeSessionPane` where it used to name `runSessionKill` — the frame
+  // that says WHO asked. `reason=` still carries the why; this restores the who.
+  const site = (new Error().stack ?? '').split('\n').slice(2, 5).map(l => l.trim()).join(' <- ')
   process.stderr.write(`daemon: exitSessionPane(${pane}) reason=${reason} | ${site}\n`)
 }
 
