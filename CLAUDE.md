@@ -651,6 +651,24 @@ exit, so `healSessionEndHook`'s coverage boundary is the next restart, not the r
 `/exit`, `tg kill`, `tmux kill-pane` and a `/clear` control that kept both open asks and the roster row
 (`PROBE-sessionend.md`).
 
+**THE CONTEXT WATERMARK IS "HIGHEST RUNG DELIVERED", NEVER "DETECTED" — the arming is level-triggered**
+(v0.5.175, 2026-08-20). @wayback's 50% crossing was SEEN at 17:58:05Z and held (`pendingCtxNudge`, an
+in-memory Map — the pane was mid-turn), the 18:33:36Z restart for v0.5.172 destroyed the hold, and the
+persisted watermark — stamped at detection — went on answering "already warned at 50", so
+`planContextWarn` returned null for every reading from 57% to 64% and nothing could re-arm it; the
+session closed at 19:55:18Z never nudged, with one log line saying the feature had worked. `ctxWarn` is
+now stamped only by `stampCtxDelivered`, at two sites in `flushCtxNudge` (after `createPending`, and on
+`drop` where there is nobody to tell), so every sweep re-derives what is owed from the CURRENT reading
+and losing the hold costs one sweep. Three things are load-bearing: the `next === 0` reset stays in
+`maybeWarnContext` (a `/compact` that already happened is not a notice to send); the `drop` branch MUST
+stamp or the level-triggered arming re-derives and re-logs forever; and the `CTX_NUDGE_TO_CHAT=false`
+revert path stays EDGE-triggered — it cards immediately and has no hold to lose, so re-arming it every
+sweep would card the owner every 25s. There is no window gate: `CTX_WARN_STEPS = [50, 75]` is one ladder
+for every session, and both rungs fired on a 200k probe. Proof: `ctx-nudge-restart.test.ts` (source-bound
+control must fail its three call-site tests against HEAD; `tickPreFix` is the known-answer control that
+reproduces the loss) and the live run — crossing held at 21:01:13Z with the watermark unstamped, daemon
+killed at 21:01:30Z, re-armed at 21:01:58Z, `ctx nudge ask 949` delivered at 21:03:13Z.
+
 ## Handoff
 
 `HANDOFF.md` at the root of the repo you are working in — one file, unfinished work only. Write

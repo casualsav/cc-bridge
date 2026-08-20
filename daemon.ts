@@ -6451,12 +6451,43 @@ const CTX_NUDGE_TO_CHAT = true
 // Keyed by session; a later rung overwrites an unsent earlier one (only the newest reading matters).
 const pendingCtxNudge = new Map<string, { step: number; label: string }>()
 
+// `ctxWarn` is the watermark of the highest rung actually DELIVERED — never merely detected.
+//
+// It used to be stamped here, at detection, and that is what ate @wayback's nudge on 2026-08-20: the
+// crossing fired at 17:58:05Z into a mid-turn pane, so the notice was HELD in `pendingCtxNudge` — an
+// in-memory Map — and the 18:33:36Z restart for v0.5.172 destroyed the hold while the persisted
+// watermark went on remembering "already warned at 50". The session ran to 64% and was closed at
+// 19:55:18Z having never been nudged, with the log line saying the feature had worked.
+//
+// So the arming is LEVEL-TRIGGERED now: every sweep re-derives what is owed from the current reading
+// against the delivered watermark, and re-arms the hold. Losing the hold — to a restart, a missed
+// sweep, a session that stays busy for hours — costs one sweep, not the notice.
+function stampCtxDelivered(sid: string, step: number): void {
+  if ((ctxWarn.get(sid) ?? 0) >= step) return
+  ctxWarn.set(sid, step)
+  saveUsageNotifState()
+}
+
 function maybeWarnContext(sid: string, pane: string | null, pct: number | null, label: string): void {
-  const { warn, next } = planContextWarn(ctxWarn.get(sid) ?? 0, pct)
-  if ((ctxWarn.get(sid) ?? 0) !== next) { if (next === 0) ctxWarn.delete(sid); else ctxWarn.set(sid, next); saveUsageNotifState() }
+  const prev = ctxWarn.get(sid) ?? 0
+  const { warn, next } = planContextWarn(prev, pct)
+  // Falling back under the first rung re-arms the whole ladder, and THAT is stamped here rather than
+  // at delivery: it is a `/compact` or `/clear` that has already happened, not a notice to be sent.
+  if (next === 0 && prev !== 0) { ctxWarn.delete(sid); saveUsageNotifState() }
   if (!warn) return
+  if (CTX_NUDGE_TO_CHAT) {
+    // Once per (session, rung) per hold — the arming repeats every sweep by design, and a log line
+    // repeating with it would bury the one that says the notice actually went out.
+    if (pendingCtxNudge.get(sid)?.step !== warn) {
+      process.stderr.write(`daemon: context warn fired threshold=${warn} (pct=${pct}) for ${label} [${sid}] — held until it is idle\n`)
+    }
+    pendingCtxNudge.set(sid, { step: warn, label })
+    return
+  }
+  // The one-line-revert card path stays EDGE-triggered: it fires immediately and has no hold to lose,
+  // so re-arming it every sweep would card the owner once per sweep.
+  if (prev !== next) { ctxWarn.set(sid, next); saveUsageNotifState() }
   process.stderr.write(`daemon: context warn fired threshold=${warn} (pct=${pct}) for ${label} [${sid}]\n`)
-  if (CTX_NUDGE_TO_CHAT) { pendingCtxNudge.set(sid, { step: warn, label }); return }
   void (async () => {
     const own = await outboundTargetsFor(pane).catch(() => [])
     const targets = own.length ? own : await fleetSurfaceFor(pane)
@@ -6482,7 +6513,10 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
     { exists: !!lane, isSelf: lane === sid },
   )
   if (plan === 'none' || plan === 'hold') return          // hold: still mid-turn, try again next sweep
-  if (plan === 'drop' || !held || !lane) { pendingCtxNudge.delete(sid); return }
+  // 'drop' = there is nobody to tell (no orchestrator lane, or the lane IS this session). Stamped as
+  // delivered even though nothing was sent: the arming is level-triggered now, so leaving it unstamped
+  // would re-derive and re-log this same rung on every sweep for the life of the session.
+  if (plan === 'drop' || !held || !lane) { pendingCtxNudge.delete(sid); if (held) stampCtxDelivered(sid, held.step); return }
   pendingCtxNudge.delete(sid)
   // What it just finished, so the compact-vs-clear call can be made without a round trip. Idle, so
   // the last final reply IS the state of the work; one transcript read per nudge (rare by design).
@@ -6507,6 +6541,9 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
     `Levers: \`tg slash ${held.label} "/compact"\` keeps the thread, \`tg slash ${held.label} "/clear"\` empties it. Answer this ask with what you did and why.`,
   ].filter(Boolean).join('\n\n')
   const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0, sysKind: 'ctx-nudge' }, Date.now())
+  // The rung is stamped delivered HERE and nowhere earlier — the pending row is durable from this line
+  // on, so a restart during the reads above costs a re-derive on the next sweep instead of the notice.
+  stampCtxDelivered(sid, held.step)
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
   await tryDeliverAsk(p).catch(() => {})   // 'busy' just means the lane is mid-turn — the 15s sweep retries
