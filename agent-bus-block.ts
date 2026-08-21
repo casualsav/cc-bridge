@@ -101,7 +101,10 @@ const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: 'Notified', b
 // asks to a busy @weatherpad sat 8–22 minutes with nothing on the owner's surface at all
 // (2026-08-19). Default false, deliberately: the ~120 asks a day that land on the first attempt draw
 // exactly the header they always drew.
-export const QUEUED_MARK = ' · ⏳ queued'
+// The glyph carries it alone — owner's ruling 2026-08-21: "remove the word queued for the messages
+// with the Chevron when it's queued, just leave the ⌛ emoji". The word was redundant with the
+// hourglass and it read as status text on a header that is otherwise a sentence about who was messaged.
+export const QUEUED_MARK = ' · ⏳'
 // The SENDER's surface: "Messaged @kam" / "Notified @kam" / "Informed @kam" / "Answered @kam".
 export function busSentHeader(verb: BusVerb, to: string, queued = false): string {
   return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>${queued ? QUEUED_MARK : ''}`

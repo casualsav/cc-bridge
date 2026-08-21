@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, busSentHeader, busGotHeader } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, busSentHeader, busGotHeader, QUEUED_MARK } from './agent-bus-block.ts'
 
 const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"  ·  a final text block does NOT reach the asker`
 
@@ -194,6 +194,17 @@ test('busSentHeader: each verb names itself, so a sender-side card says which of
   // meant that element, not a character.
   expect(['ask', 'ack', 'btw', 'answer'].some(v => busSentHeader(v as 'ask', 'kam').includes('↓'))).toBe(false)
   expect(new Set(['ask', 'ack', 'btw', 'answer'].map(v => busSentHeader(v as 'ask', 'kam'))).size).toBe(4)
+})
+
+// Owner's ruling, 2026-08-21: "remove the word queued … just leave the ⌛ emoji". Pinned as the
+// absence of a WORD rather than as the literal string, so the marker can be restyled and this still
+// fails the moment status prose comes back onto a chevron header.
+test('the queued marker is the glyph and nothing else — no word on either surface', () => {
+  expect(QUEUED_MARK).not.toMatch(/[A-Za-z]/)
+  expect(busSentHeader('ask', 'kam', true)).toBe(`Messaged <b>@kam</b>${QUEUED_MARK}`)
+  expect(busGotHeader('ask', 'chat', 'kam', true)).toBe(`<b>@chat</b> messaged <b>@kam</b>${QUEUED_MARK}`)
+  // …and the un-queued header is byte-identical to what it always drew.
+  expect(busSentHeader('ask', 'kam', false)).toBe('Messaged <b>@kam</b>')
 })
 
 test('busGotHeader: the target-side card names the sender and distinguishes ack from ask', () => {

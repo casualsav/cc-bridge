@@ -20,7 +20,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { busSentHeader, busGotHeader } from './agent-bus-block.ts'
+import { busSentHeader, busGotHeader, QUEUED_MARK } from './agent-bus-block.ts'
 import { planSenderCardOnConfirm } from './agent-bus.ts'
 
 // The source-bound half reads a directory, not a fixed path, so the control is re-runnable rather
@@ -37,7 +37,9 @@ test('a queued card names its state, and the delivered header is the one that wa
   expect(busSentHeader('ask', 'weatherpad')).toBe('Messaged <b>@weatherpad</b>')
   expect(busSentHeader('ask', 'weatherpad', true)).toContain('Messaged <b>@weatherpad</b>')
   expect(busSentHeader('ask', 'weatherpad', true)).not.toBe(busSentHeader('ask', 'weatherpad'))
-  expect(busSentHeader('ask', 'weatherpad', true)).toMatch(/queued/i)
+  // The marker is a GLYPH, not a word — owner's ruling 2026-08-21. What it has to do is distinguish
+  // the two headers, which the hourglass does on its own.
+  expect(busSentHeader('ask', 'weatherpad', true)).toContain(QUEUED_MARK)
 })
 
 test('every verb can carry the marker, and no verb carries it by default', () => {
@@ -45,7 +47,7 @@ test('every verb can carry the marker, and no verb carries it by default', () =>
   // must look exactly as they looked last night, or the fix is a regression for the common case.
   for (const v of ['ask', 'ack', 'btw', 'answer'] as const) {
     expect(busSentHeader(v, 'kam')).not.toMatch(/queued/i)
-    expect(busSentHeader(v, 'kam', true)).toMatch(/queued/i)
+    expect(busSentHeader(v, 'kam', true)).toContain(QUEUED_MARK)
   }
 })
 
