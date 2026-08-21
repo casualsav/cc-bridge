@@ -185,7 +185,7 @@ test('SOURCE R-4: the spawn’s founding message is confirmed too — it never w
   expect(sites.filter(l => l.includes('pending.id'))).toHaveLength(3)   // hermes ×2 + openclaw
   expect(sites.filter(l => l.includes('cur.id'))).toHaveLength(1)       // onAskConfirmed, behind the proof
   // …and the spawn closure now records a paste rather than a delivery.
-  expect(daemon).toContain('if (p) markPastedAt(p.id, Date.now(), await transcriptSizeForPane(newPane))')
+  expect(daemon).toContain('if (p) markPastedAt(p.id, Date.now(), anchor)')
 })
 
 test('SOURCE control: the TTL still re-arms at injection, so the answer window starts on delivery', () => {

@@ -165,6 +165,9 @@ export type BusPending = {
   // The target transcript's byte size when the paste was recorded — where the proof scan is anchored
   // (ask-parity.ts `confirmScanStart`). Absent on rows an older build minted: those keep the tail read.
   pastedSize?: number
+  // …and WHICH conversation that size was measured in. An offset means nothing in another file, and
+  // after a `/clear` the proof reads another file (ask 985, 2026-08-21 — ask-parity.ts `anchorSizeFor`).
+  pastedFile?: string
   // R-4: the confirmation window closed with no proof, and the asker has been told. TERMINAL — the row
   // is never re-pasted, because nothing can see the CLI's queue and a retry cannot tell "swallowed"
   // from "about to run". Without this the unconfirmed row fell straight back into the delivery queue
@@ -300,6 +303,7 @@ export type AnswerInFlight = {
   answererSid?: string  // when the answerer is a bridged Claude session (a hermes name has none)
   pastedAt: number
   pastedSize?: number   // the asker transcript's size at the paste — the proof scan's anchor (ask-parity.ts)
+  pastedFile?: string   // …and the conversation it was measured in; a `/clear` makes the size a stranger's
 }
 
 const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {}, answers: {} })
@@ -340,6 +344,7 @@ function rebuildPending(e: unknown): BusPending | null {
       // must not re-paste a block that is already on its way into the target's conversation.
       ...(typeof p.pastedAt === 'number' ? { pastedAt: p.pastedAt } : {}),
       ...(typeof p.pastedSize === 'number' ? { pastedSize: p.pastedSize } : {}),
+      ...(typeof p.pastedFile === 'string' ? { pastedFile: p.pastedFile } : {}),
       ...(typeof p.unconfirmedAt === 'number' ? { unconfirmedAt: p.unconfirmedAt } : {}),
       ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
       // "Told once" has to mean once across restarts too — this box ships several times an hour, and
@@ -418,6 +423,7 @@ export function loadBus(): BusState {
       if (!row || typeof a.id !== 'number' || typeof a.askerSid !== 'string' || typeof a.pane !== 'string' || typeof a.pastedAt !== 'number') continue
       answers[k] = { id: a.id, row, askerSid: a.askerSid, pane: a.pane, answerer: typeof a.answerer === 'string' ? a.answerer : '', pastedAt: a.pastedAt,
         ...(typeof a.pastedSize === 'number' ? { pastedSize: a.pastedSize } : {}),
+        ...(typeof a.pastedFile === 'string' ? { pastedFile: a.pastedFile } : {}),
         ...(typeof a.answererSid === 'string' ? { answererSid: a.answererSid } : {}) }
     }
     store = {
@@ -585,6 +591,7 @@ export function markInjected(id: number, now: number): void {
   p.expiresAt = now + ASK_TTL_MS
   delete p.pastedAt   // proved arrived; the confirmation sweep has no further business with this row
   delete p.pastedSize
+  delete p.pastedFile
   save()
 }
 
@@ -593,12 +600,16 @@ export function markInjected(id: number, now: number): void {
  * turns this into `injected` once the ask block appears in the target's transcript, or reports it
  * unconfirmed and clears it (`markPastedAt(id, null)`) — never silently promotes it.
  */
-export function markPastedAt(id: number, at: number | null, pastedSize?: number): void {
+export function markPastedAt(id: number, at: number | null, anchor?: { size?: number; file?: string }): void {
   ensureLoaded()
   const p = store.pending[String(id)]
   if (!p) return
-  if (at == null) { if (p.pastedAt == null) return; delete p.pastedAt; delete p.pastedSize }
-  else { p.pastedAt = at; if (pastedSize != null) p.pastedSize = pastedSize; else delete p.pastedSize }
+  if (at == null) { if (p.pastedAt == null) return; delete p.pastedAt; delete p.pastedSize; delete p.pastedFile }
+  else {
+    p.pastedAt = at
+    if (anchor?.size != null) p.pastedSize = anchor.size; else delete p.pastedSize
+    if (anchor?.file) p.pastedFile = anchor.file; else delete p.pastedFile
+  }
   save()
 }
 

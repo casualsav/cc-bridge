@@ -145,6 +145,23 @@ export function confirmScanStart(size: number, pastedSize: number | undefined): 
   return Math.max(0, size - CONFIRM_TAIL_BYTES)
 }
 
+// AN OFFSET IS ONLY MEANINGFUL IN THE FILE IT WAS MEASURED ON, so the anchor carries that file's path
+// and the scan discards the size the moment the conversation is a different one. Ask 985 (2026-08-21):
+// @dailyadapter was `/clear`ed, the ask was pasted 44s later, and the size stamped at the paste was
+// the PRE-clear conversation's 4.29 MB. Two minutes on, the proof read the post-clear conversation —
+// correctly — but started 112 KB into a 178 KB file, and the block was at byte 2,315. Twice, and then
+// it told the owner's DM that the CLI had eaten a brief the session was already executing.
+//
+// A conversation that is not the one measured has no anchor at all, and 0 is the honest one: a `/clear`
+// mints the file, so nothing can precede the paste in it. An anchor with no file (an older build's
+// row, or the v0.5.180 unwritten-conversation 0) keeps its size exactly as it meant it.
+export type PasteAnchor = { file?: string; size?: number }
+export function anchorSizeFor(anchor: PasteAnchor | undefined, file: string): number | undefined {
+  if (!anchor || anchor.size == null) return undefined
+  if (anchor.file && anchor.file !== file) return 0
+  return anchor.size
+}
+
 export function fileCarries(file: string, carries: (text: string) => boolean, pastedSize?: number): boolean {
   const size = statSync(file).size
   const start = confirmScanStart(size, pastedSize)

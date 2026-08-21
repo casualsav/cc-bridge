@@ -120,7 +120,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript, recordedTranscript, fallbackIsCrowded } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
-import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, CONFIRM_WINDOW_MS, type ProofRead } from './ask-parity.ts'
+import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, anchorSizeFor, CONFIRM_WINDOW_MS, type ProofRead, type PasteAnchor } from './ask-parity.ts'
 import { paneFreedom, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions } from './delivery-log.ts'
@@ -4578,6 +4578,17 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     const digest = since > 0 && !resubmitting ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeIds: new Set(listPending().filter(p => p.toSid === cur.toSid && !p.expiredAt).map(p => p.id)), excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
     const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
     if (dig) block = `${dig}\n${askBlock}`
+    // THE ANCHOR IS TAKEN BEFORE THE PASTE, and that is the whole of it: the block cannot be written
+    // into a conversation before the paste that carries it, so a size measured here is a LOWER BOUND
+    // on the block's own offset and the proof can never start past it. Measured after — as it was
+    // until v0.5.186 — it is a size the CLI has already moved on from: the message's own attachments
+    // are written at the same instant as the block (20,065 bytes on a live probe, 42,893 for ask 985)
+    // and the turn's first tool result lands seconds later, before the submit is even verified. Ask
+    // 985's anchor was 75,552 against a marker at 2,132 — 9 KB past the back-window that had been
+    // absorbing this all along, so every sweep for 120s read a conversation from beyond the block it
+    // was looking for and the bus told the owner's DM the CLI had eaten a brief the session was
+    // already executing (2026-08-21).
+    const anchor = await transcriptAnchorForPane(pane)
     const outcome = resubmitting ? await resubmitPane(pane) : await busDeliverOutcome(pane, block)
     // 'unsubmitted' = the block IS in this pane's box; remember which box, so the next attempt Enters
     // instead of pasting. 'failed' = nothing reached it, so forget any earlier memory and let the next
@@ -4614,7 +4625,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // ask block is found in the target's transcript. On 2026-08-15 this branch fired for asks 472
       // and 474 against a pane whose CLI queue then discarded them, and everything below ran on a
       // delivery that never happened.
-      markPastedAt(cur.id, Date.now(), await transcriptSizeForPane(pane))
+      markPastedAt(cur.id, Date.now(), anchor)
     }
     // 'not-landed', never 'busy': busDeliver now returns false when the block is sitting
     // unsubmitted in the box, and calling that merely-busy is the understatement this fix exists
@@ -4676,9 +4687,9 @@ function onAskConfirmed(cur: BusPending, now: number): void {
 // which answer 896's 606 KB first tool result pushed the block out of (ask-parity.ts `confirmScanStart`).
 // The needle is `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting
 // it back would false-positive on.
-const askBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAsk(t, id), pastedSize)
+const askBlockInTranscript = (sid: string, id: number, anchor?: PasteAnchor): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAsk(t, id), anchor)
 // Unit 3: an ANSWER's proof — the `re=<id>` block in the ASKER's transcript.
-const answerBlockInTranscript = (sid: string, id: number, pastedSize?: number): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAnswer(t, id), pastedSize)
+const answerBlockInTranscript = (sid: string, id: number, anchor?: PasteAnchor): Promise<ProofRead> => transcriptCarries(sid, t => blockCarriesAnswer(t, id), anchor)
 
 // Three answers, not two. `absent` means the conversation was READ and does not carry the block;
 // `unreadable` means the proof never got to look, and the two used to share the word `false` — which
@@ -4687,15 +4698,28 @@ const answerBlockInTranscript = (sid: string, id: number, pastedSize?: number): 
 // names the check that failed, because a warning that cannot say what it checked cannot be trusted by
 // the person reading it — and because the next occurrence should identify its own guard instead of
 // being reconstructed from offsets afterwards, the way these two had to be.
+// The (file, size) pair a row recorded at its paste. Rows minted before v0.5.185 carry the size alone
+// and keep exactly the meaning they were written with (ask-parity.ts `anchorSizeFor`).
+const pasteAnchorOf = (r: { pastedSize?: number; pastedFile?: string }): PasteAnchor =>
+  ({ ...(r.pastedSize != null ? { size: r.pastedSize } : {}), ...(r.pastedFile ? { file: r.pastedFile } : {}) })
 const lastUnreadableWhy = new Map<string, string>()
-async function transcriptCarries(sid: string, carries: (text: string) => boolean, pastedSize?: number): Promise<ProofRead> {
+async function transcriptCarries(sid: string, carries: (text: string) => boolean, anchor?: PasteAnchor): Promise<ProofRead> {
   const note = (why: string): ProofRead => { lastUnreadableWhy.set(sid, why); return 'unreadable' }
   try {
     const pane = await paneForSession(sid).catch(() => null)
     if (!pane) return note('that session has no live pane, so its conversation could not be opened')
-    const file = await transcriptForPane(pane, null).catch(() => null)
+    const file = await proofTranscriptForPane(pane)
     if (!file) return note(`its transcript could not be resolved for pane ${pane} (the CLI's record refused it, or a guard declined the folder)`)
-    try { return fileCarries(file, carries, pastedSize) ? 'found' : 'absent' }
+    try {
+      if (fileCarries(file, carries, anchorSizeFor(anchor, file))) return 'found'
+      // THE CONVERSATION MAY HAVE CHANGED SINCE THE PASTE — a `/clear` mints a new one and discards the
+      // old — and a block that entered A conversation was never "accepted and discarded by the CLI".
+      // Before accusing anyone, look in the one the paste was measured against too. The verdict this
+      // costs — a delivered-then-cleared ask reported as confirmed rather than lost — is the cheaper
+      // error: the ask stays open either way, and the asker's TTL notice is the backstop.
+      if (anchor?.file && anchor.file !== file && existsSync(anchor.file) && fileCarries(anchor.file, carries, anchor.size)) return 'found'
+      return 'absent'
+    }
     catch { return note(`its transcript ${basename(file)} could not be read`) }
   } catch { return note('the proof itself failed before it could look') }
 }
@@ -4717,12 +4741,28 @@ const whyUnreadable = (sid: string): string => lastUnreadableWhy.get(sid) ?? 'th
 // `transcriptForPane` makes — and NOT "null means zero". Every other reason resolution fails still
 // yields `undefined` and keeps the tail: those are states where the file may be enormous and already
 // scrolled past, and scanning one from 0 every sweep is a cost this must not take on a guess.
-async function transcriptSizeForPane(pane: string): Promise<number | undefined> {
+async function transcriptAnchorForPane(pane: string): Promise<PasteAnchor> {
   try {
-    const file = await transcriptForPane(pane, null).catch(() => null)
-    if (file) return statSync(file).size
-    return paneTranscriptUnwritten(pane) ? 0 : undefined
-  } catch { return undefined }
+    const file = await proofTranscriptForPane(pane)
+    if (file) return { file, size: statSync(file).size }
+    return paneTranscriptUnwritten(pane) ? { size: 0 } : {}
+  } catch { return {} }
+}
+
+// The conversation a PROOF reads, at both ends of it: the one the CLI's own record names NOW.
+// `transcriptForPane` reads the pane's `@tg_transcript` stamp first (STEP 1) and caches it for 5s,
+// and a `/clear` re-stamps only at the next UserPromptSubmit — so for the moments around one, the
+// stamp names the conversation the session has already discarded. That is a correct order for a
+// RELAY, which must never cross-adopt; it is the wrong one for a proof, whose whole question is
+// "what is in this session's conversation right now". Measured on ask 985 (2026-08-21): the record
+// had followed the `/clear` to the new conversation while the stamp still named the old one.
+// A record that cannot answer (no live row, an older CLI, an unwritten conversation) falls through
+// to `transcriptForPane` unchanged — including its refusals, which is what keeps an unresolvable
+// conversation `unreadable` rather than absent.
+async function proofTranscriptForPane(pane: string): Promise<string | null> {
+  const rec = recordedConversation(pane)
+  if (rec.kind === 'file') return rec.file
+  return transcriptForPane(pane, null).catch(() => null)
 }
 
 // The conversation the CLI's OWN RECORD names for this pane. Deliberately the same two calls
@@ -4748,12 +4788,12 @@ const paneTranscriptUnwritten = (pane: string): boolean => recordedConversation(
 async function confirmInjections(): Promise<void> {
   const now = Date.now()
   for (const cur of awaitingConfirmation()) {
-    let read = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch((): ProofRead => 'unreadable')
+    let read = await askBlockInTranscript(cur.toSid, cur.id, pasteAnchorOf(cur)).catch((): ProofRead => 'unreadable')
     // RE-VERIFY BEFORE ACCUSING ANYONE (owner's ruling, 2026-08-20). Only at the deadline, so the
     // ordinary sweep still costs one read: the whole failure was a terminal verdict taken off a single
     // read that had not actually looked.
     if (read !== 'found' && now - cur.pastedAt! >= CONFIRM_WINDOW_MS)
-      read = await askBlockInTranscript(cur.toSid, cur.id, cur.pastedSize).catch((): ProofRead => 'unreadable')
+      read = await askBlockInTranscript(cur.toSid, cur.id, pasteAnchorOf(cur)).catch((): ProofRead => 'unreadable')
     const plan = planInjectionConfirm({ seen: read === 'found', readable: read !== 'unreadable', pastedAt: cur.pastedAt!, now })
     if (plan === 'wait') continue
     if (plan === 'unverifiable') {
@@ -4786,7 +4826,7 @@ async function confirmInjections(): Promise<void> {
         `⚠️ Ask ${cur.id} was pasted into <b>${escapeHtml(cur.toName)}</b>'s pane but never appeared in its conversation — the CLI took it and did not run it. Nothing was re-sent (that would duplicate). Re-send it yourself if it still matters.\n\n<i>Checked twice: its conversation was read to the end both times and does not carry the block.</i>`,
         { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', cur.id,
-      `(ask ${cur.id} was PASTED into @${cur.toName}'s pane but never entered its conversation — the CLI accepted and discarded it. Not re-sent, because nothing can see that queue and a retry would duplicate. Re-send if it still matters.)`))
+      `(ask ${cur.id} was PASTED into @${cur.toName}'s pane but never entered its conversation — the CLI accepted and discarded it. Checked twice: the conversation its own session record names was read to the end both times and does not carry the block. Not re-sent, because nothing can see that queue and a retry would duplicate. Re-send if it still matters.)`))
   }
   // Unit 3 (2026-08-16): ANSWERS get the same proof. The record is separate from the pending row (the
   // row was removed at paste, exactly as before), so nothing that reads rows learns a third state. On
@@ -4795,9 +4835,9 @@ async function confirmInjections(): Promise<void> {
   // risk, written down: a proof FALSE-NEGATIVE (answer landed, the match missed) re-opens an answered
   // ask and the re-run produces a DUPLICATE answer block. Noise; a silently lost answer was the disease.
   for (const a of listAnswersInFlight()) {
-    let read = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch((): ProofRead => 'unreadable')
+    let read = await answerBlockInTranscript(a.askerSid, a.id, pasteAnchorOf(a)).catch((): ProofRead => 'unreadable')
     if (read !== 'found' && now - a.pastedAt >= CONFIRM_WINDOW_MS)
-      read = await answerBlockInTranscript(a.askerSid, a.id, a.pastedSize).catch((): ProofRead => 'unreadable')
+      read = await answerBlockInTranscript(a.askerSid, a.id, pasteAnchorOf(a)).catch((): ProofRead => 'unreadable')
     const plan = planInjectionConfirm({ seen: read === 'found', readable: read !== 'unreadable', pastedAt: a.pastedAt, now })
     if (plan === 'wait') continue
     if (plan === 'unverifiable') {
@@ -5550,6 +5590,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const flush = flushDigestFor(cur.fromSid)
   const answerBlock = formatAnswerBlock(answerer, cur.id, deliveredBody, refs)
   removePending(cur.id)   // the point of no return: from here a failure RESTORES the row (putPending) explicitly
+  const anchor = await transcriptAnchorForPane(askerPane)   // BEFORE the paste — see tryDeliverAsk
   const outcome = await busDeliverOutcome(askerPane, flush ? `${flush.block}\n${answerBlock}` : answerBlock).catch(() => 'failed' as PasteOutcome)
   const ok = outcome === 'landed'
   // Only on a landed paste, for the same reason every other markSeen is gated on one.
@@ -5593,8 +5634,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   if (!('error' in answered)) void notifyAskSent(answered.id, cur.fromName, body, 'answer', cur.fromSid)
   appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs, ...(opts.undelivered ? { undelivered: true } : {}) })
   // Pasted, not proved: confirmInjections promotes it on transcript proof or re-opens the ask.
-  const pastedSize = await transcriptSizeForPane(askerPane)
-  recordAnswerPasted({ id: cur.id, row: cur, askerSid: cur.fromSid, pane: askerPane, answerer, pastedAt: Date.now(), ...(pastedSize != null ? { pastedSize } : {}), ...(opts.answererSid ? { answererSid: opts.answererSid } : {}) })
+  recordAnswerPasted({ id: cur.id, row: cur, askerSid: cur.fromSid, pane: askerPane, answerer, pastedAt: Date.now(), ...(anchor.size != null ? { pastedSize: anchor.size } : {}), ...(anchor.file ? { pastedFile: anchor.file } : {}), ...(opts.answererSid ? { answererSid: opts.answererSid } : {}) })
   const waited = Math.round(gate.waitedMs / 1000)
   process.stderr.write(`daemon: ${label} (${askerPane}) ${queuedMidTurn ? `QUEUED-MID-TURN (non-Claude answerer, waited ${waited}s: ${gate.why})` : waited >= 2 ? `DELIVERED after ${waited}s wait` : 'DELIVERED'}${opts.undelivered ? ` — row was never delivered to @${cur.toName} (answered undelivered)` : ''}\n`)
   return `answered @${cur.fromName} (ask ${cur.id})${waited >= 2 ? ` (waited ${waited}s for their prompt)` : ''}${late ? ' (late — delivered after the timeout)' : ''}`
@@ -10172,6 +10212,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // Logging only (unit 2): the paste below goes ahead exactly as it always did — this names the
       // case where it goes ahead against a REPL that never showed a prompt in 45s.
       if (!promptSeen) process.stderr.write(`daemon: founding ${p ? `ask ${p.id}` : 'message'} → @${topicName} (${newPane}): no prompt within 45s of spawn — pasting anyway\n`)
+      const anchor = await transcriptAnchorForPane(newPane)   // BEFORE the paste — see tryDeliverAsk
       // busDeliver serializes on the same inject chain as human inbound, so the block can't
       // interleave with a message the owner types into the new topic mid-boot.
       // On the ask path, `from=owner` for the same reason the flag exists: the founding message is the
@@ -10188,7 +10229,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // never through tryDeliverAsk, so it used to arm the answer window straight off the paste — the
       // exact shape of ask 428 on 2026-08-15, whose brief sat unsubmitted in a fresh REPL for 15
       // minutes while the bus counted it delivered. confirmInjections promotes it on transcript proof.
-      if (p) markPastedAt(p.id, Date.now(), await transcriptSizeForPane(newPane))
+      if (p) markPastedAt(p.id, Date.now(), anchor)
       // The human path's equivalent, and it is armed for the same reason on the same instant: the new
       // session's first reply is his, and a reply that beats its own route reaches only that session's
       // own surface. Off the block that was pasted, never rebuilt beside it (owner-reply.ts).

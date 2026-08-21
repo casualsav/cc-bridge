@@ -556,6 +556,29 @@ at the DEADLINE only, so the ordinary sweep still costs one read. Proof: `confir
 (source-bound; the control is the single boolean giving `unconfirmed` for both failures). The
 `unverifiable` branch has never fired live — HANDOFF carries what to watch for.
 
+**THE PROOF'S ANCHOR IS TAKEN BEFORE THE PASTE, AND IT NAMES THE CONVERSATION IT WAS MEASURED IN**
+(v0.5.186, 2026-08-21). Measured after — as it was from v0.5.172 — it is a size the CLI has already
+moved past: it writes the message's OWN attachments at the same instant as the block (42,893 bytes for
+ask 985; 20,065 and 29,924 on two live probe deliveries) and the turn's first tool result seconds
+later, before the submit is even verified. Ask 985's marker sat at byte 2,132 of a conversation
+`/clear` had minted 45s earlier and the anchor was 75,552, so the proof read the RIGHT conversation
+starting 10,016 bytes past the block, said absent at every sweep and twice at the v0.5.181 deadline,
+and told the owner's DM the CLI had eaten a brief @dailyadapter answered five minutes later. The 64 KB
+back-window had been absorbing that overshoot all along; a `/clear` is what makes it lethal, because
+the marker lands at byte ~2,000 with the whole re-attached context on top of it. An anchor taken
+before the paste is a lower bound on the block's own offset, by construction. Two things ride with it
+and both were the leading hypothesis first, so keep them: the anchor carries its FILE (`pastedFile`,
+`anchorSizeFor`) and is discarded — start 0 — in any other conversation, and a proof resolves what the
+CLI's record names NOW (`proofTranscriptForPane`), never the pane stamp, checking the paste-time
+conversation too before accusing anyone. Both owner-facing surfaces of that verdict name their checks;
+until now the pane-block copy still carried the pre-0.5.181 sentence, which is what he quoted back.
+Proof: `confirm-scan.test.ts` (byte-for-byte replay with the after-the-paste anchor as the control;
+source-bound half must fail against HEAD **and** against the deployed 0.5.185) and
+`bun scripts/clear-anchor-probe.ts margin <askId> <pane>`, which prints the anchor, the block's offset
+and both builds' verdicts for one live delivery. Also measured there, and it retires the obvious
+suspicion: the `@tg_transcript` stamp does NOT lag a `/clear` on CLI 2.1.238 — stamp and record flip
+within the same second (`$(tg shared)/bridgeclear-2026-08-21/`).
+
 **The SENDER's chevron card is drawn when the message is SENT — a confirmation EDITS it, never draws
 one.** It lived in `onAskConfirmed` until v0.5.168, so a queued ask was invisible on the sender's
 surface for as long as the target stayed busy: three asks to a busy @weatherpad sat 8–22 minutes with

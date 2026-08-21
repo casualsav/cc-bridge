@@ -54,7 +54,7 @@ test('awaitAnswerable: the record first, the screen for what it cannot see, wedg
 test('proof: confirmInjections walks the answers map against the ASKER transcript and re-opens on no proof', () => {
   const c = fn('confirmInjections')
   expect(c).toContain('for (const a of listAnswersInFlight())')
-  expect(c).toContain('answerBlockInTranscript(a.askerSid, a.id, a.pastedSize)')
+  expect(c).toContain('answerBlockInTranscript(a.askerSid, a.id, pasteAnchorOf(a))')
   expect(c).toContain('if (!getPending(a.id)) putPending(a.row)')
   expect(c).toContain("kind: 'answer-unconfirmed'")
   expect(c).toContain('CONFIRMED in its transcript after')

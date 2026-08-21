@@ -311,7 +311,7 @@ test('the founding message wears the human envelope, and the ask is what the rev
   // `markPastedAt`, not `markInjected`, since R-4 (2026-08-15): the founding closure records a PASTE
   // and confirmInjections promotes it on transcript proof. Ask 428 took this path and sat unsubmitted
   // in a fresh REPL for fifteen minutes while the bus counted it delivered.
-  for (const guarded of ['if (p) removePending(p.id)', 'if (p) markPastedAt(p.id, Date.now(), await transcriptSizeForPane(newPane))', 'if (p) busInFlight.delete(p.id)'])
+  for (const guarded of ['if (p) removePending(p.id)', 'if (p) markPastedAt(p.id, Date.now(), anchor)', 'if (p) busInFlight.delete(p.id)'])
     expect(spawn).toContain(guarded)
   // Both blocks are built from ONE expression, so the bytes armed and the bytes pasted cannot diverge.
   expect(spawn).toContain('ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)')
