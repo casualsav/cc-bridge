@@ -1,0 +1,28 @@
+**Unit 4 landed — tg v0.5.198, deployed and live** (`9d58f23`, pushed). Both daemons on 0.5.198.
+
+**What changed**
+- `credentialSyncDirsFor` (`common.ts`): the default instance keeps main + scout + its registry; **every other instance gets its own registry and nothing else**. Production dirs are filtered by **value**, not merely left un-added — `listAccounts()` prepends main, so a non-default instance naming `~/.claude` in its own registry must not get there by the back door.
+- `canSourceCredentials` re-derives through the same scoped list, so on a non-default instance a production dir is not a candidate **source** either, even if something hands it in as a destination.
+- The sync line names the **instance**.
+- **(a)** the `backupFailed` ordering bug — @bridgeaccts is right, and the failure mode is worse than it reads: a destination whose permissions break the backup usually breaks the **write** too, so the write throws into the catch, `updated` never gets the dir, and the daemon announced "OVERWROTE … WITHOUT a backup" about a dir it never touched. A false alarm claiming credentials were destroyed is its own incident. Both are now recorded only after the write lands. I kept the **converse** with its own test — failed backup, *successful* write — because there the token really is gone and it must still be said.
+- **(b)** `lotest` removed from the canary's `accounts.json`. Its config dir is left on disk, which is what `removeAccount` means; prod's registry is untouched at `['chat']`. Note it had been **recreated** at 06:27Z by `healAccountConfigs` reseeding a `settings.json` for the still-registered row — no credentials file, so it was never a live sync participant, but that is why it reappeared after the owner deleted it.
+
+**Verified live vs reviewed**
+- *Live, and it is the whole case in one file* — the canary's own log, before and after:
+  `05:16:19 credential sync updated 1 dir(s): /home/ubuntu/.claude`
+  `05:59:19 credential sync updated 2 dir(s): /home/ubuntu/.claude, /home/ubuntu/.claude-scout`
+  `07:03:59 credential sync [instance test]: /home/ubuntu/.claude-chat → 1 dir(s): …isoprobe`
+  The first two are the **canary** writing the production login. The third is after the fix: instance named, and only its own dir. Produced with a registered throwaway holding a **24h-expired** token, per your standing rule — so even a total scoping failure could not have elected it and poisoned anything.
+- *Live, on real state:* `bun scripts/credential-instance-probe.ts --cache <ver>` reads the actual `accounts.json` of every instance and reports the canary as **LEAK against 0.5.197** and **ok against 0.5.198**. Prod logged the probe **zero** times.
+- *Unit:* `credentials-poison.test.ts` now 21 tests. The instance fixture uses a **fresh, unexpired, inside-the-window** token so the plausibility bound cannot be what saves it — only the scoping can — and its control reproduces 0.5.197's dir list and watches it poison production with that same fixture. **Three source-bound call-site tests fail against the deployed 0.5.197 bytes.** Full suite 2523/0, `tsc` clean.
+- *Reviewed only:* the `unregistered` refusal branch (unit-tested; by construction the daemon cannot now produce a dir that is in the sync list but not in the scoped set — it guards a future caller), and the reworded refusal hint.
+
+**Uncertain:** the scoping is keyed on `INSTANCE_ID`, which `resolveInstanceId` derives from the state-dir basename. A future instance whose state dir is named `telegram` under a different root would resolve to `1` and be treated as production. Not reachable today — `STATE_DIR` comes from `TELEGRAM_STATE_DIR` or the default — but it is the assumption the guard rests on, so I am naming it rather than leaving it implicit.
+
+**On the handoff prune — I did part of it and stopped, deliberately.** I rewrote my own section (both owner decisions are now actioned, so they are gone) and added your two open items with evidence: the Slack/Discord copies at `plugins/claude-slack/prompt.ts:796` and its Discord twin, still ending `isRecognizedPrompt` at `isPluginInstallUserScope` with `grep -c detectAuthCodeScreen` = **0** in both, last regenerated at v0.4.54 (`4aed7e9`), 644 diff lines behind; and the drill-in, with the transcript proven correct and two named candidate mechanisms — `recentConversation(file, 14)` (`transcript.ts:1019` → `daemon.ts:23577`) being a **window** of the last 14 items, so its oldest row is not the session's first message, and the ~15s at 06:06:49 where my session had no transcript yet.
+
+**But the file is 990 lines, not smaller, and I did not cut other sessions' sections.** They self-declare LANDED/COMPLETE but their bodies are retained *residue*, not finished work — "Unit 1 — SHIPPED AND ROLLED BACK THE SAME HOUR. Read this before re-attempting it" is a live warning, "Unit 4b … EXPIRY leg awaits one natural observation" is genuinely open. Deleting those is the same class as moving a sibling's uncommitted files, and I can't verify their residue without doing their work. The candidates, with sizes, if you want them cut: **THE BUILD** (295 lines, L3), **End-of-session attribution** (70, L921), **Transcript cross-adopt** (18, L903). Say which and I'll do it; otherwise it should go to whoever owns them.
+
+Real dirs re-hashed after every step, still `b4e131e74c72b1a7` across all five; no stray backups in any real dir; both registries back to `['chat']`; probe dir deleted. HANDOFF.md is gitignored so it is not in any commit — updated on disk only.
+
+Tree is clean at `9d58f23` and ready for @bridgeaccts.
