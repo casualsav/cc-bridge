@@ -532,6 +532,84 @@ export function detectLoginPrompt(paneText: string): { options: PromptOption[] }
   return footerIsLive(lines, lastOpt) ? { options: opts } : null
 }
 
+// ---- The sign-in URL / code-entry screen (the screen AFTER a login method is picked) ----
+//
+// detectLoginPrompt above is the login METHOD MENU and nothing else — every one of its anchors is
+// menu wording. The screen that follows it has no menu and no numbered options: a `Login` heading,
+// "Browser didn't open? …", the authorize URL, and a `Paste code here if prompted >` box. Nothing in
+// this file matched it, so on 2026-08-21 it fell through isRecognizedPrompt into detectStuckScreen
+// and the owner — already locked out of every session on the box — was carded "🧩 … is waiting on a
+// screen I don't recognize" every 75 seconds instead of being handed the link.
+//
+// It had been diagnosed once already, and fixed in the wrong place: daemon.ts's recognizedScreen
+// gained an extractAuthUrl term ("that fired a spurious unrecognised-screen card mid-login") while
+// this list, which is what the watchdog vetoes on, never learned about the screen at all.
+
+const URL_CHARS = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$/
+// The authorize ENDPOINT, not the word "oauth" — see extractAuthUrl.
+const AUTH_URL_START = /https?:\/\/\S*oauth\/authorize/i
+
+/**
+ * The sign-in URL on this screen, rebuilt from however many lines it wrapped across, or null.
+ *
+ * Claude Code prints the link inside its bordered box where it soft-wraps: `capture-pane -J` rejoins
+ * only tmux's own wraps, and the box borders + padding split the URL regardless, so a plain regex
+ * grabs the first line and truncates mid-value. Strip ANSI and box-drawing, find the line the URL
+ * starts on, then append following lines that are pure URL characters until it ends.
+ *
+ * SCOPED TO `oauth/authorize`, READ FROM THE BOTTOM, AND ELLIPSIS-REFUSING — all three are the
+ * owner's real 2026-08-21 capture, and none of them was in the version this replaces. A bus digest
+ * sat directly above the live login box carrying a QUOTED, TRUNCATED copy of the link:
+ *
+ *     ✓ mimo→chat #61: Here's the link — … https://claude.com/cai/oauth…
+ *
+ * The old scan (first line matching /oauth|authorize/, top-down) returned that 29-character stub. It
+ * satisfied every caller — the screen read as "recognised", and a card built from it would have
+ * carried a DEAD LINK to the one person who could not get back in. `oauth/authorize` excludes the
+ * stub by itself; scanning upward means the live box outranks anything quoted above it even if a
+ * future quote keeps the whole path; and a candidate still carrying `…` is refused rather than
+ * relayed truncated, because a broken sign-in link is worse than no card at all. Fixture:
+ * fixtures/pane-auth-code-screen.txt.
+ */
+export function extractAuthUrl(paneText: string): string | null {
+  const lines = stripAnsi(paneText)
+    .split('\n')
+    .map(l => l.replace(/[─-╿]/g, '').replace(/\s+$/, '').trim())
+  for (let start = lines.length - 1; start >= 0; start--) {
+    if (!AUTH_URL_START.test(lines[start]!)) continue
+    const head = lines[start]!.match(/https?:\/\/\S+/)
+    if (!head) continue
+    let url = head[0]
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i]!
+      if (!l || !URL_CHARS.test(l)) break
+      url += l
+    }
+    if (url.includes('…')) continue   // a quoted, truncated copy — never relay a link that cannot work
+    return url
+  }
+  return null
+}
+
+// The CLI's own two lines on this screen. Anchored on WORDING plus the URL as corroboration, never on
+// the URL alone: this project's own sessions discuss authorize links routinely, and a reply that
+// merely prints one must not read as a pane sitting on the login screen — the same false-positive
+// detectFirstRunScreen's comment warns about. footerIsLive keeps a scrolled-up past login out.
+const AUTH_CODE_ANCHOR = /paste code here if prompted|browser didn'?t open\?\s*use the url below to sign in/i
+export function detectAuthCodeScreen(paneText: string): boolean {
+  const lines = paneLines(paneText)
+  const anchorIdx = lines.findLastIndex(l => AUTH_CODE_ANCHOR.test(l))
+  if (anchorIdx === -1) return false
+  return footerIsLive(lines, anchorIdx) && !!extractAuthUrl(paneText)
+}
+
+// Either screen of a login episode: the method menu, or the code box after it. This is the predicate
+// anything that TYPES should ask — the two are one episode to a sender, and holding on only the first
+// half is what let the owner's "Hello" be typed into a pane that could not run it.
+export function onAuthScreen(paneText: string): boolean {
+  return !!detectLoginPrompt(paneText) || detectAuthCodeScreen(paneText)
+}
+
 // ---- Claude Code's first-run wizard ----
 // The three screens a brand-new install sits on before it can accept a message: the theme picker
 // ("Let's get started." / "Choose the text style that looks best with your terminal"), the
@@ -677,13 +755,20 @@ export function isResumeSessionPrompt(paneText: string): boolean {
 // key: on CLI 2.1.238 the resume picker opens on "Resume from summary", so a bare Enter throws the
 // conversation away, and `tg keys @name enter` is the obvious lever and a trap (@chat caught this
 // before anyone pressed it, 2026-08-20). A login menu takes no keystroke at all.
-export type BlockedScreen = { kind: 'resume' | 'login'; label: string; recover: string }
+export type BlockedScreen = { kind: 'resume' | 'login' | 'auth-code'; label: string; recover: string }
 
 export function detectBlockedScreen(paneText: string): BlockedScreen | null {
   const resume = detectResumeSessionPrompt(paneText)
   if (resume) return { kind: 'resume', label: 'resume picker', recover: resumeRecovery(resume) }
   if (detectLoginPrompt(paneText)) {
     return { kind: 'login', label: 'login menu', recover: 'it needs a sign-in, not a keystroke' }
+  }
+  // The code box after the menu. It holds inbound (daemon.ts's login hold), so by editorHeld — this
+  // list's ground truth — it must not read as busy. No keystroke reaches it: the code is ~50
+  // characters of free text and the tg keys vocabulary is enter/esc/arrows/digits, so the recovery
+  // names the one surface that can carry it.
+  if (detectAuthCodeScreen(paneText)) {
+    return { kind: 'auth-code', label: 'sign-in code', recover: 'reply to the 🔑 sign-in card with the code — no keystroke can type one' }
   }
   return null
 }
@@ -1259,6 +1344,10 @@ export function waitingPromptSignature(paneText: string): string | null {
 export function isRecognizedPrompt(paneText: string): boolean {
   return !!detectPermissionPrompt(paneText) || !!detectUserPrompt(paneText) || !!detectResumeSessionPrompt(paneText)
     || !!detectLoginPrompt(paneText) || isUsageLimitChoice(paneText) || isPluginInstallUserScope(paneText)
+    // The code-entry screen. Its absence here is what carded the owner "🧩 … a screen I don't
+    // recognize" every 75s while he was locked out (2026-08-21) — daemon.ts's recognizedScreen had
+    // learned this screen and this list had not. auth-screen-sites.test.ts holds the two together.
+    || detectAuthCodeScreen(paneText)
 }
 
 // ---- Catch-all "stuck at an UNRECOGNIZED interactive screen" detector (agent-bus v2) ----
@@ -1282,12 +1371,22 @@ const STUCK_CHROME = new RegExp(
   'i',
 )
 
+// `state` and `code_challenge` are minted fresh by every /login attempt, and the URL carrying them
+// wraps into the tail this signature is hashed over — so a retried login was a NEW screen to
+// planStuckSweep, which re-arms (and re-alerts in full) on any signature change. That is why the
+// owner got a fresh 🧩 card every 75 seconds on 2026-08-21 and never the once-per-30-minutes re-nag:
+// the throttle only ever applies to an UNCHANGED signature. The screen being recognised now makes
+// this moot for the login case specifically; it stays because the class is not login-specific — any
+// screen quoting a rotating token would do the same — and because a signature that changes for
+// reasons the user did not cause is wrong on its own terms.
+const ROTATING_OAUTH_PARAM = /([?&](?:state|code_challenge)=)[^&\s]+/g
+
 // The stable, chrome-stripped tail (last `max` content lines) the stuck detector reasons + hashes over.
 function stuckTail(paneText: string, max = 20): string[] {
   const out: string[] = []
   for (const l of paneLines(paneText)) {
     if (!l.trim() || BOXY_LINE.test(l) || STUCK_CHROME.test(l)) continue
-    out.push(l.trimEnd())
+    out.push(l.trimEnd().replace(ROTATING_OAUTH_PARAM, '$1<rotating>'))
   }
   return out.slice(-max)
 }
@@ -1419,6 +1518,11 @@ export function paneAcceptsText(cap: string): boolean {
     detectUserPrompt(cap) || detectPermissionPrompt(cap) || isUsageLimitChoice(cap)
     || isModelSwitchConfirm(cap) || detectModelPicker(cap) || detectLoginPrompt(cap)
     || isResumeSessionPrompt(cap) || detectFirstRunScreen(cap)
+    // The code-entry screen, and it MUST be named here rather than left to detectStuckScreen below.
+    // Until 2026-08-21 this screen was refused only as a side effect of being UNRECOGNISED; teaching
+    // isRecognizedPrompt about it (which is the fix for the 🧩 pelting) removes that accident, so the
+    // two changes ship together or the second one is a regression. See auth-screen-sites.test.ts.
+    || detectAuthCodeScreen(cap)
     // feedbackSurveyOpen alone is too broad HERE: it's a lines.some() over the whole pane, so a
     // survey that has scrolled up into history keeps matching long after it stopped being live.
     // Watched on v2.1.220: a real pane sat at a completely normal prompt with the optional survey

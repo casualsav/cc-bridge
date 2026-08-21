@@ -1,0 +1,20 @@
+❯ <tg bus-digest since 17m ago>
+  · owner→chat: Enter
+  ✓ mimo→chat #59: Let me investigate what happened! Checking the cc-bridge logs and recent sessions ~ Let me check th…
+  ✓ mimo→chat #60: ⚠️  @mimo couldn't complete ask 60: its turn ended without an answer (interrupted, or tool-only)
+  ✓ mimo→chat #61: Here's the link — open it, sign in, and give me the code it gives you: https://claude.com/cai/oauth…
+  </tg>
+  <tg 15011 from=dm>Hello</tg>
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Login
+
+   Browser didn't open? Use the url below to sign in (c to copy)
+
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%
+3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=HFv9jGwNTLLtREz5J0qHPfts4dEUF_Y-hBEoY-wI-Uk&code_challenge_method=S256&state=_t3_VFioP4JBUcZTKHh8kIXVPN1zO07WT
+20aAEMwgac
+
+
+   Paste code here if prompted >
+
+   Esc to cancel

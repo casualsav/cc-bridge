@@ -45,7 +45,7 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, detectAuthCodeScreen, onAuthScreen, extractAuthUrl, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
 import { planResumeOptions, planResumeCardText, planResumeOutcome, planResumeCardMint, resumePickerSig, paneGlance, type ResumeOption } from './resume-picker-card.ts'
 import { planRefreshSeam, refreshSummaryHeld } from './refresh-seam.ts'
 import { runRestartExit } from './refresh-exit.ts'
@@ -6351,7 +6351,11 @@ function recognizedScreen(cap: string): boolean {
     || !!detectLoginPrompt(cap) || isUsageLimitChoice(cap) || isSubmitScreen(cap) || isPluginInstallUserScope(cap)
     // The sign-in URL / paste-code screen (post login-method pick): already relayed as the auth-url
     // card, so it must not read as "stuck" — that fired a spurious unrecognised-screen card mid-login.
-    || !!extractAuthUrl(cap)
+    // Now the NAMED detector rather than "a URL appears somewhere on this pane": the loose test was
+    // true of any session that had merely printed an authorize link, and "recognised" here means
+    // "safe to type into", which such a pane is and a login screen is not. The hold below is what
+    // makes that distinction matter.
+    || detectAuthCodeScreen(cap)
 }
 
 // Inbound held back because its pane was on a captured screen (editor/pager or an unrecognised
@@ -6373,7 +6377,7 @@ async function flushEditorHeld(paneId: string): Promise<void> {
 const loginHeldPanes = new Set<string>()
 function clearLoginHoldIfDone(paneId: string | null, cap: string): void {
   if (!paneId || !loginHeldPanes.has(paneId)) return
-  if (detectLoginPrompt(cap) || !onNormalPrompt(cap)) return   // still signing in / mid-screen
+  if (onAuthScreen(cap) || !onNormalPrompt(cap)) return   // still signing in / mid-screen (either screen of the episode)
   loginHeldPanes.delete(paneId)
   forgetDecision(`login:${paneId}`)   // a later login episode on this pane is a new story
   process.stderr.write(`daemon: login finished on ${paneId} — delivering ${editorHeld.get(paneId)?.length ?? 0} held message(s)\n`)
@@ -6518,31 +6522,6 @@ async function drainOnce(entries: InboundLedgerEntry[]): Promise<void> {
 }
 
 // ---- Pane event dispatch ----
-
-// A sign-in URL surfaced by /login (OAuth authorize link). Claude Code prints it inside
-// its bordered box where it soft-wraps across several lines — `-J` only rejoins tmux's own
-// wraps, and the box's `│` borders + padding split the URL regardless, so a plain regex
-// grabs only the first line (truncating mid-value). Rebuild it: strip ANSI + box-drawing
-// chars, find the line that starts the authorize URL, then greedily append following lines
-// that are pure URL characters (no spaces) until the URL ends. Scoped to oauth/authorize so
-// ordinary links in Claude's replies aren't re-relayed here.
-const URL_CHARS = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$/
-function extractAuthUrl(paneText: string): string | null {
-  const lines = stripAnsi(paneText)
-    .split('\n')
-    .map(l => l.replace(/[─-╿]/g, '').replace(/\s+$/, '').trim())
-  const start = lines.findIndex(l => /https?:\/\/\S*(?:oauth|authorize)/i.test(l))
-  if (start === -1) return null
-  const head = lines[start].match(/https?:\/\/\S+/)
-  if (!head) return null
-  let url = head[0]
-  for (let i = start + 1; i < lines.length; i++) {
-    const l = lines[i]
-    if (!l || !URL_CHARS.test(l)) break
-    url += l
-  }
-  return url
-}
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
@@ -19478,15 +19457,20 @@ async function handleInbound(
     // messages" symptom on a chat lane that booted unauthenticated). Hold it in the same per-pane
     // FIFO the editor/resume screens use; a relay tick delivers it once the pane is back at a
     // prompt. The notice is once per login episode, not per message.
-    if (cap && detectLoginPrompt(cap)) {
+    if (cap && onAuthScreen(cap)) {
+      const codeBox = !detectLoginPrompt(cap)   // past the menu, at the "Paste code here if prompted" box
       editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
       // Keyed, and OUTSIDE the loginHeldPanes latch on purpose: the latch is what makes the user-facing
       // notice once-per-episode, and it would otherwise make the LOG silent for the whole episode too.
       // The guard gives the same first line plus a 5-minute reminder while the hold stands.
-      logDecision({ key: `login:${effPane}`, family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: 'login menu on screen (detectLoginPrompt)', hint: 'held in editorHeld until the session is signed in' })
+      logDecision({ key: `login:${effPane}`, family: 'human', what: `msg ${msgId ?? '?'}`, target: chat_id, pane: effPane, decision: 'HELD', predicate: codeBox ? 'sign-in code box on screen (detectAuthCodeScreen)' : 'login menu on screen (detectLoginPrompt)', hint: 'held in editorHeld until the session is signed in' })
       if (!loginHeldPanes.has(effPane)) {
         loginHeldPanes.add(effPane)
-        await ctx.reply('🔑 The session is waiting on a login — finish that first; your message is held and delivers as soon as it\'s in.',
+        // The code box gets its own sentence: at the menu there is nothing for the reader to do but
+        // tap, while here a specific thing is owed and there is a specific place to put it.
+        await ctx.reply(codeBox
+          ? '🔑 The session is waiting for a <b>sign-in code</b> — reply to the 🔑 card with it. Your message is held and delivers as soon as it\'s in.'
+          : '🔑 The session is waiting on a login — finish that first; your message is held and delivers as soon as it\'s in.',
           { parse_mode: 'HTML' }).catch(() => {})
       }
       return
@@ -22142,6 +22126,22 @@ const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<st
   loginHeldPanes, wedgeEscalated,   // Sets — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
+  // A HELD message is one the sender was PROMISED ("your message is held and delivers as soon as
+  // it's in"), and editorHeld is in-memory and pane-keyed — so until now a pane that died holding one
+  // had it deleted by this sweep, with no record anywhere and nothing told to anyone. That is what
+  // happened to the owner's msg 15011 on 2026-08-21: held at 04:29:25 by the login hold on %234
+  // (the hold WORKING), then %234 died at 05:05:37 and the message ceased to exist. The ledger does
+  // not cover this — bufferEvent is only called for inbound that never reached a pane at all — so
+  // hand them to it here, which is the mechanism built for exactly "could not deliver this". The
+  // drain then replays it if it is still fresh and surfaces it if it is not.
+  //
+  // Safe to act on because this sweep is POSITIVE evidence of death: sweepDeadPaneState returns
+  // without calling us if tmux cannot be read or reports no panes at all.
+  const stranded = editorHeld.get(paneId)
+  if (stranded?.length) {
+    for (const p of stranded) bufferEvent(p)
+    process.stderr.write(`daemon: pane ${paneId} died holding ${stranded.length} message(s) — handed to the inbound ledger rather than dropped (they were promised delivery)\n`)
+  }
   for (const m of PANE_STATE_MAPS) m.delete(paneId)
   clearResumeCard(paneId)            // the resume-card mark is PERSISTED (it must survive a restart), so it is swept here rather than in the map list above
   invalidateCapture(paneId)          // the shared capture cache is pane-keyed too — don't leak it
