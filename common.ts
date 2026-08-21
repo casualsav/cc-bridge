@@ -213,6 +213,41 @@ function backupCredentials(file: string, now: number): string | null {
   } catch { return null }
 }
 
+// The default bridge instance's id. `resolveInstanceId` (daemon.ts) derives it from the state dir:
+// `…/channels/telegram` is "1", `…/channels/telegram-test` is "test".
+export const DEFAULT_INSTANCE_ID = '1'
+
+/**
+ * Which config dirs may THIS bridge instance converge — and the answer for a non-default instance is
+ * "its own registry, and nothing else".
+ *
+ * Until v0.5.198 this was `[main, scout, ...listAccounts()]` for every instance, main and scout
+ * hardcoded regardless of which bridge was asking. That is how the 2026-08-21 lockout actually
+ * reached production: the fabricated `lotest` token was registered in the CANARY's accounts.json
+ * (`…/channels/telegram-test`), and the canary daemon — a test instance, on a test bot, with its own
+ * everything — dutifully wrote it into `~/.claude` and `~/.claude-scout` every 60 seconds. The
+ * canary's own log carries the whole episode, including a third suppressed auth-url card on its
+ * `%273`. v0.5.195's plausibility bound stops that particular token; this stops the CLASS, which is
+ * a test instance holding write access to the production login at all (owner's ruling, 2026-08-21:
+ * "a non-default instance must NEVER write production config dirs").
+ *
+ * The production dirs are filtered out by VALUE, not merely left un-added: a non-default instance
+ * whose registry names `~/.claude` outright must not get there by the back door, and `accountDirs`
+ * arrives with main already prepended by `listAccounts()`.
+ */
+export function credentialSyncDirsFor(p: {
+  instanceId: string
+  mainConfigDir: string
+  scoutConfigDir: string
+  accountDirs: string[]   // listAccounts().map(a => a.configDir) — main first, then this instance's registry
+}): string[] {
+  if (p.instanceId === DEFAULT_INSTANCE_ID) {
+    return [...new Set([p.mainConfigDir, p.scoutConfigDir, ...p.accountDirs])]
+  }
+  const production = new Set([p.mainConfigDir, p.scoutConfigDir])
+  return [...new Set(p.accountDirs.filter(d => !production.has(d)))]
+}
+
 // Converge a set of config dirs' .credentials.json onto the freshest live token. SYMMETRIC: any dir
 // may be the refresher; the tick after a refresh propagates that token to every other dir, so rotation
 // in one config dir can no longer strand the others (the shared-login failure of 2026-08-01/02). The
@@ -236,8 +271,14 @@ export function syncCredentials(configDirs: string[], opts: CredentialSyncOption
       const cur = readFileSync(f, 'utf8')
       if (srcText === null) srcText = readFileSync(src, 'utf8')
       if (cur === srcText) continue   // byte-identical — no rewrite, no mtime churn
-      if (!backupCredentials(f, now)) backupFailed.push(f)
+      // Both recorded only AFTER the write lands. Ordered the other way (v0.5.195) a dir whose
+      // permissions broke the backup would usually break the write too — the write throws into the
+      // catch below, `updated` never gets it, and `backupFailed` already has it — so the daemon
+      // reported "OVERWROTE … WITHOUT a backup" for a dir it had not touched. A false alarm about
+      // destroyed credentials is its own incident. (@bridgeaccts, reviewing 71467d5.)
+      const backedUp = backupCredentials(f, now)
       writeFileSync(f, srcText, { mode: 0o600 })
+      if (!backedUp) backupFailed.push(f)
       updated.push(f)
     } catch { /* unreadable dest — leave it; next tick retries */ }
   }

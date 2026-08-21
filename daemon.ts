@@ -17,7 +17,7 @@ import {
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE, anchorCwd, cwdFaultHint, stableCwd,
-  hasLiveOauthCredentials, credentialsCopyDecision, blankedCredentialsAlert, syncCredentials, MAX_SOURCE_LIFETIME_MS,
+  hasLiveOauthCredentials, credentialsCopyDecision, blankedCredentialsAlert, syncCredentials, MAX_SOURCE_LIFETIME_MS, credentialSyncDirsFor,
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock, tokenLockPath } from './token-lock.ts'
@@ -21733,17 +21733,21 @@ setInterval(() => canaryMainCredentials(), 60_000).unref()
 // refresh time (observed via strace), so overwriting a live process's file IS picked up at its next
 // refresh — the sync genuinely self-heals, no restart required.
 function credentialSyncDirs(): string[] {
-  const dirs = new Set<string>([MAIN_ACCOUNT.configDir, SCOUT_CONFIG_DIR])
-  for (const a of listAccounts()) dirs.add(a.configDir)
-  return [...dirs]
+  return credentialSyncDirsFor({
+    instanceId: INSTANCE_ID,
+    mainConfigDir: MAIN_ACCOUNT.configDir,
+    scoutConfigDir: SCOUT_CONFIG_DIR,
+    accountDirs: listAccounts().map(a => a.configDir),
+  })
 }
 // May this dir be the token every other dir is overwritten with? A SECOND, independent read of the
-// registry, taken at selection time rather than trusted from the list above — so a dir that reached
-// credentialSyncDirs some other way (a future caller, a stale set) can still be converged but can
-// never be the source. main and scout are the two dirs that are legitimately not registry rows.
+// registry, taken at SELECTION time rather than trusted from the caller's list — so a dir that
+// reached syncCredentials some other way (a future caller, a stale set) can still be converged but
+// can never be the source. It re-derives through credentialSyncDirsFor, so the instance scoping
+// holds here too: on a non-default instance a production dir is not a candidate source either, even
+// if something hands it in as a destination.
 function canSourceCredentials(configDir: string): boolean {
-  return configDir === MAIN_ACCOUNT.configDir || configDir === SCOUT_CONFIG_DIR
-    || listAccounts().some(a => a.configDir === configDir)
+  return credentialSyncDirs().includes(configDir)
 }
 function syncFleetCredentials(): void {
   try {
@@ -21760,10 +21764,12 @@ function syncFleetCredentials(): void {
         process.stderr.write(`daemon: credential source REFUSED ${dir} — ${
           why === 'implausible' ? `expiresAt is beyond ${MAX_SOURCE_LIFETIME_MS / 86_400_000}d, which is not a token this fleet mints; it will never be propagated`
           : why === 'expired' ? 'its token has already expired, so it cannot be the freshest anything'
-          : 'it is not a registered account dir (accounts.json) — it may receive the fleet token, never supply it'}\n`)
+          : `it is not in instance ${INSTANCE_ID}'s own sync set — either not a registered account dir (accounts.json), or a production dir this non-default instance may not touch`}\n`)
       },
     })
-    if (updated.length) process.stderr.write(`daemon: credential sync: ${src?.replace(/\/\.credentials\.json$/, '')} → ${updated.length} dir(s): ${updated.map(f => f.replace(/\/\.credentials\.json$/, '')).join(', ')}\n`)
+    // The INSTANCE is on the line because the 2026-08-21 propagation came from the canary and nothing
+    // in either log said which bridge had written the bytes.
+    if (updated.length) process.stderr.write(`daemon: credential sync [instance ${INSTANCE_ID}]: ${src?.replace(/\/\.credentials\.json$/, '')} → ${updated.length} dir(s): ${updated.map(f => f.replace(/\/\.credentials\.json$/, '')).join(', ')}\n`)
     // A backup that could not be written is the one failure that only matters on the day it is needed,
     // so it is never swallowed — the sync still converges the dir (leaving it stale is its own outage).
     for (const f of backupFailed) process.stderr.write(`daemon: credential sync: OVERWROTE ${f.replace(/\/\.credentials\.json$/, '')} WITHOUT a backup — the token it replaced is gone; check that dir's permissions\n`)

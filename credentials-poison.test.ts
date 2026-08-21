@@ -17,11 +17,11 @@
 //
 // Run: bun test credentials-poison.test.ts
 import { test, expect, afterAll } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { freshestCredentials, syncCredentials, MAX_SOURCE_LIFETIME_MS, type SourceRefusal } from './common.ts'
+import { freshestCredentials, syncCredentials, credentialSyncDirsFor, DEFAULT_INSTANCE_ID, MAX_SOURCE_LIFETIME_MS, type SourceRefusal } from './common.ts'
 
 const H = 60 * 60 * 1000
 const D = 24 * H
@@ -203,4 +203,168 @@ test('all-implausible is no-source, not fall-back-to-the-least-bad', () => {
   const { src, updated } = syncCredentials([only, dir('other', FAKE)])
   expect(src).toBeNull()
   expect(updated).toEqual([])
+})
+
+// ---- instance isolation (v0.5.198) ---------------------------------------------------------------
+//
+// How the 2026-08-21 token ACTUALLY reached production, established after the fact from the canary's
+// own log: `lotest` was registered in the CANARY's accounts.json (`…/channels/telegram-test`), not
+// prod's, and the canary daemon wrote it into ~/.claude and ~/.claude-scout every 60 seconds because
+// credentialSyncDirs hardcoded both dirs for every instance. A test bridge, on a test bot, with its
+// own state dir, held write access to the production login.
+//
+// v0.5.195's plausibility bound stops that particular token. This stops the class. Owner's ruling:
+// "a non-default instance must NEVER write production config dirs."
+
+const MAIN = '/home/x/.claude'
+const SCOUT = '/home/x/.claude-scout'
+
+test('a NON-DEFAULT instance syncs only its own registry — never a production dir', () => {
+  const dirs = credentialSyncDirsFor({
+    instanceId: 'test',
+    mainConfigDir: MAIN, scoutConfigDir: SCOUT,
+    accountDirs: [MAIN, '/home/x/.claude-chat', '/home/x/.claude-lotest'],   // listAccounts() prepends main
+  })
+  expect(dirs).not.toContain(MAIN)
+  expect(dirs).not.toContain(SCOUT)
+  expect(dirs).toEqual(['/home/x/.claude-chat', '/home/x/.claude-lotest'])
+})
+
+test('…and filters production dirs by VALUE, so naming one in the registry is not a back door', () => {
+  const dirs = credentialSyncDirsFor({
+    instanceId: 'test', mainConfigDir: MAIN, scoutConfigDir: SCOUT,
+    accountDirs: [MAIN, SCOUT, '/home/x/.claude-probe'],
+  })
+  expect(dirs).toEqual(['/home/x/.claude-probe'])
+})
+
+test('CONTROL: the DEFAULT instance still syncs main → scout → its registry', () => {
+  const dirs = credentialSyncDirsFor({
+    instanceId: DEFAULT_INSTANCE_ID,
+    mainConfigDir: MAIN, scoutConfigDir: SCOUT,
+    accountDirs: [MAIN, '/home/x/.claude-chat'],
+  })
+  expect(dirs).toEqual([MAIN, SCOUT, '/home/x/.claude-chat'])
+})
+
+test('the incident, end to end: a canary registry cannot elect into or write a production dir', () => {
+  // The fixture the owner asked for: the throwaway token is FRESH and VALID-LOOKING — inside the 30d
+  // window, unexpired — so the plausibility bound cannot be what saves us here. Only the scoping can.
+  const now = Date.now()
+  const main = dir('main', tok(now + 2 * H, 'PRODUCTION'))
+  const scout = dir('scout', tok(now + 2 * H, 'PRODUCTION'))
+  const canaryOwn = dir('canary-chat', tok(now + 3 * H, 'CANARY'))
+  const lotest = dir('lotest', tok(now + 20 * H, 'THROWAWAY'))   // freshest of all, and entirely plausible
+  const before = [main, scout].map(hash)
+
+  const dirs = credentialSyncDirsFor({
+    instanceId: 'test', mainConfigDir: main, scoutConfigDir: scout,
+    accountDirs: [main, canaryOwn, lotest],
+  })
+  const { src, updated } = syncCredentials(dirs, { now, canSource: d => dirs.includes(d) })
+
+  // It wins inside its own instance — that is correct and is what the sync is for.
+  expect(src).toBe(credFile(lotest))
+  expect(updated).toEqual([credFile(canaryOwn)])
+  // …and the production dirs were never even candidates.
+  expect(dirs).not.toContain(main)
+  expect(dirs).not.toContain(scout)
+  expect([main, scout].map(hash)).toEqual(before)
+  expect(readFileSync(credFile(main), 'utf8')).toContain('PRODUCTION')
+  expect(readFileSync(credFile(scout), 'utf8')).toContain('PRODUCTION')
+})
+
+test('CONTROL: the pre-0.5.198 dir list poisons production with that same fixture', () => {
+  // credentialSyncDirs exactly as 0.5.197 shipped it: main + scout + every registry row, whichever
+  // instance is asking. If this stops poisoning, the test above has stopped proving anything.
+  const now = Date.now()
+  const main = dir('main', tok(now + 2 * H, 'PRODUCTION'))
+  const scout = dir('scout', tok(now + 2 * H, 'PRODUCTION'))
+  const lotest = dir('lotest', tok(now + 20 * H, 'THROWAWAY'))
+  const preFixDirs = [...new Set([main, scout, main, lotest])]
+
+  const { src, updated } = syncCredentials(preFixDirs, { now })
+
+  expect(src).toBe(credFile(lotest))
+  expect(updated.sort()).toEqual([credFile(main), credFile(scout)].sort())
+  expect(readFileSync(credFile(main), 'utf8')).toContain('THROWAWAY')   // the production login, gone
+})
+
+// ---- the backupFailed ordering bug (@bridgeaccts, reviewing 71467d5) -----------------------------
+
+test('a dir that was never written is never reported as overwritten', () => {
+  // v0.5.195 pushed to backupFailed BEFORE the write. A destination whose permissions break the
+  // backup usually breaks the write too — it throws into the catch, `updated` never gets the dir,
+  // and the daemon then logs "OVERWROTE … WITHOUT a backup" about a dir it had not touched. A false
+  // alarm claiming credentials were destroyed is its own incident.
+  const now = Date.now()
+  const src = dir('src', tok(now + 7 * H, 'NEW'))
+  const dst = dir('dst', tok(now + 2 * H, 'OLD'))
+  // BOTH permissions matter and they are different failures: a non-writable DIR stops the backup
+  // (it creates a new file), a non-writable FILE stops the overwrite. Only the dir would leave the
+  // write succeeding — which is the case where reporting the missing backup is CORRECT.
+  chmodSync(credFile(dst), 0o400)
+  chmodSync(dst, 0o500)
+  try {
+    const r = syncCredentials([src, dst], { now })
+    expect(r.updated).toEqual([])          // nothing was written…
+    expect(r.backupFailed).toEqual([])     // …so nothing may claim it was
+    expect(readFileSync(credFile(dst), 'utf8')).toContain('OLD')   // untouched
+  } finally {
+    chmodSync(dst, 0o700)
+    chmodSync(credFile(dst), 0o600)
+  }
+})
+
+test('…but a failed backup with a SUCCESSFUL write is still reported', () => {
+  // The other side of the same line: here the dir is unwritable (no backup) while the file itself is
+  // not (the overwrite lands). The token really is gone, and that must still be said out loud.
+  const now = Date.now()
+  const src = dir('src', tok(now + 7 * H, 'NEW'))
+  const dst = dir('dst', tok(now + 2 * H, 'OLD'))
+  chmodSync(dst, 0o500)   // backup cannot be created; the existing 0600 file can still be rewritten
+  try {
+    const r = syncCredentials([src, dst], { now })
+    expect(r.updated).toEqual([credFile(dst)])
+    expect(r.backupFailed).toEqual([credFile(dst)])
+    expect(readFileSync(credFile(dst), 'utf8')).toContain('NEW')
+  } finally {
+    chmodSync(dst, 0o700)
+  }
+})
+
+// ---- bound to the shipped code -------------------------------------------------------------------
+//
+// Everything above passes against a build where nothing CALLS the scoping. These bind it to the
+// daemon's dir list. Run with `CC_BRIDGE_SRC_DIR=<a dir holding 0.5.197's daemon.ts>` and exactly
+// these three must fail (watched: 3 fail against the deployed 0.5.197).
+
+const SRC = process.env.CC_BRIDGE_SRC_DIR || import.meta.dir
+const daemonSrc = readFileSync(join(SRC, 'daemon.ts'), 'utf8')
+const fnBody = (from: string, to: string): string => {
+  const a = daemonSrc.indexOf(from)
+  const b = daemonSrc.indexOf(to, a)
+  return a >= 0 && b > a ? daemonSrc.slice(a, b) : ''
+}
+
+test('call site: credentialSyncDirs goes through the instance-scoped helper', () => {
+  const body = fnBody('function credentialSyncDirs(', '\n}')
+  expect(body).toContain('credentialSyncDirsFor({')
+  expect(body).toContain('instanceId: INSTANCE_ID')
+  // The old shape hardcoded both production dirs into a Set for every instance.
+  expect(body).not.toContain('new Set<string>([MAIN_ACCOUNT.configDir, SCOUT_CONFIG_DIR])')
+})
+
+test('call site: the source check re-derives through the same scoped list', () => {
+  // Not `configDir === MAIN_ACCOUNT.configDir || …`, which allowed a production dir to be a source
+  // on ANY instance.
+  const body = fnBody('function canSourceCredentials(', '\n}')
+  expect(body).toContain('credentialSyncDirs().includes(configDir)')
+  expect(body).not.toContain('configDir === MAIN_ACCOUNT.configDir')
+})
+
+test('call site: the sync line names the instance', () => {
+  // Nothing in either log said which bridge had written the bytes — which is why the canary was not
+  // suspected for hours.
+  expect(fnBody('function syncFleetCredentials(', '\n}')).toContain('[instance ${INSTANCE_ID}]')
 })
