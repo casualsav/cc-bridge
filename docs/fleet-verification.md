@@ -17,6 +17,16 @@ moment it happens, and an ask that can never be answered has no other way to rea
 For a NON-bridge question (does this model id work?) a one-shot is fine, but run it as
 `env -u TMUX -u TMUX_PANE claude -p …` or it re-stamps the parent session's transcript.
 
+**A `--probe` spawn is HEADLESS — it has no topic, so NO owner-facing card is ever drawn for it**
+(measured 2026-08-21, chasing the bus-mirror split). Nothing addressed to or from a probe reaches a
+chevron card, a mirror or the group: `outboundTargetsFor` finds no targets and the surface code
+returns early, silently and correctly. So a probe proves the PANE half of anything — the paste, the
+transcript, the delivery proof — and can prove nothing at all about a card, a mirror, a split, a
+notification or a route. For those, watch real fleet traffic (the daemon log names the surface), or
+use the canary bot's own chat with `richmsg.ts`'s `callTelegram`, whose `sendMessage` response
+carries back the exact text Telegram stored (`scripts/bus-split-probe.ts` does this and diffs it).
+Headless is per session and worth checking before designing a repro: `topics.json` → `headless`.
+
 ## `tg roster` "busy" is not pane state
 
 It means the session has an **outstanding ask**, not that its pane is working. A session sitting at
@@ -125,6 +135,18 @@ any bus or owner card.
 Restore what the rig wrote: `dmChat` back to `{}`, `scheduled-messages.json` and
 `owner-replies.json` to `[]`, then `tg kill` both sessions (a session bound as the chat lane refuses
 `tg kill` until the binding is gone AND the daemon has reloaded it).
+
+## Probe recipes added 2026-08-21
+
+- `bun scripts/clear-anchor-probe.ts margin <askId> <pane>` — for one live delivery: where the proof
+  starts reading, where the ask block actually is, and the verdict BOTH the current and the pre-fix
+  anchors produce. `watch <pane> --for <s> --out <f>` samples the pane stamp against the CLI's session
+  record across a `/clear` (they agree within a second on CLI 2.1.238 — the stale-stamp theory is dead).
+- `bun scripts/bus-split-probe.ts` — sends a long body to the CANARY chat in parts, reads back the text
+  Telegram stored for each, reassembles and diffs. Deletes what it sent unless `--keep`.
+- `bun scripts/paste-size-probe.ts --pane <id> [--legacy]` — how big a payload can reach a pane's input
+  box, per primitive. `--legacy` is the control and must FAIL at 16,343 bytes; it exits non-zero if it
+  ever succeeds everywhere, so "the old way was fine" cannot come back green.
 
 ## Where to look
 
