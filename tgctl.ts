@@ -23,6 +23,7 @@
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name> [--force]               relaunch it (--force: past the owner-closed refusal)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
+//   tgctl decide "<title>" [--options "A|B"]    put ONE decision to the owner as a card (chat lane only)
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
@@ -166,6 +167,15 @@ const HELP: Record<string, string> = {
            '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.\n' +
            '  --correct "claim → truth" records ONE claim you found false: it stays under the brief, survives\n' +
            '  every refresh, and goes into the next scout — cheaper than a re-scout and it does not lose the rest.',
+  decide:  'tg decide "<title>" [--options "Approve|Hold"] | tg decide --close <id> [choice] | tg decide --list\n' +
+           '  put ONE decision in front of the owner: a card in his DM whose title is the question and whose\n' +
+           '  buttons ARE the options (Approve | Hold unless you name your own, up to four). Nothing else is\n' +
+           '  on the card — the tap is the whole answer.\n' +
+           '  His tap comes back as a <tg decision=N choice=…> block; a native reply to the card arrives with\n' +
+           '  `decides=N` in its envelope, and a bare "Approved" while exactly one is open carries the hint.\n' +
+           '  Only a DM chat lane can open one — a session with no chat of its own has nowhere to put the card.\n' +
+           '  --close <id> [choice] closes one yourself and says so on the card; --list is what is still open.\n' +
+           '  An untouched proposal expires after 24h and the card is marked expired: silence decides nothing.',
   roster:  'tg roster [--all]   who is live on the bus (--all also lists hidden endpoints, e.g. dev stubs)',
   providers:'tg providers   configured provider account ids, active/inactive state, role defaults, and models for tg spawn --account/--model',
   history: 'tg history [n]   recent agent-bus activity',
@@ -174,7 +184,7 @@ const HELP: Record<string, string> = {
 }
 // Every verb that takes free text gets the stdin steer in its help — the shell mangles Markdown
 // bodies (see `body` above), so `-` is the documented default, not the fallback.
-const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'btw', 'answer', 'post', 'spawn'])
+const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'btw', 'answer', 'post', 'spawn', 'decide'])
 const STDIN_NOTE =
   "\nBodies: pass them on stdin — printf '%s' \"$BODY\" | tg <verb> <args> -\n" +
   'A double-quoted body is parsed by the SHELL first: `backticks` run as commands (splicing their\n' +
@@ -209,14 +219,14 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'status', 'mcp', 'hooks', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'status', 'mcp', 'hooks', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo', 'decide'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|account|model|effort|stale|correct|why)$/.exec(rest[i]!)
+    const f = /^--(dir|account|model|effort|stale|correct|why|options|close)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
@@ -262,6 +272,10 @@ if (BUS.has(cmd)) {
     // the documented shape here (nothing in a wait reason wants Markdown).
     case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
     case 'repo':    name = 'repo';    args = { pane, path: pos[0], ...flags }; break
+    // Opening one takes a TITLE (a question short enough to head a card), closing one takes an
+    // optional CHOICE — never both, so the single positional means whichever the flags say it means.
+    // `-` still works for the title: it is prose, and prose goes through stdin here like everywhere.
+    case 'decide':  name = 'decide';  args = { pane, ...(flags.close != null ? { choice: pos[0] } : { title: body(pos[0], 'decide') ?? '' }), ...flags }; break
     case 'roster':  name = 'roster';  args = { pane, ...(flags.all ? { all: true } : {}) }; break   // --all: include hidden endpoints (dev stubs)
     case 'providers': name = 'providers'; args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break

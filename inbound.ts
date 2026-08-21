@@ -48,6 +48,13 @@ export function formatChannelBlock(params: InboundParams): string {
   // wrong origin is worse than a missing one, since the missing case already has a defined reading.
   if (m.chat_type === 'private') a.push('from=dm')
   else if (m.chat_type === 'group' || m.chat_type === 'supergroup') a.push('from=group')
+  // Two HINTS, and only the chat lane's own inbound ever carries them (daemon.ts). `re=<id>` is the
+  // message THIS session sent that he long-pressed to reply to — the bridge knows it, and until now
+  // dropped it, so a perfectly anchored reply arrived unanchored. `decides=<id>` names the open `tg
+  // decide` proposal that reply belongs to. Neither BINDS anything: the lane reads them and decides,
+  // which is why a wrong guess is visible rather than silent (decisions.ts).
+  if (m.re) a.push(`re=${m.re}`)
+  if (m.decides) a.push(`decides=${m.decides}`)
   // An album repeats the attribute, one per picture, in the order they were sent:
   //   <tg 42 img="/inbox/a.jpg" img="/inbox/b.jpg">caption</tg>
   // `image_paths` is set only when there is more than one; a single photo still carries plain
