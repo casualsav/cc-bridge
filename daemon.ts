@@ -20819,6 +20819,13 @@ function lastReportsHere(names: string[], now: number): RepoState['lastReports']
   }
   return [...latest.values()].sort((a, b) => a.ageMs - b.ageMs)
 }
+// At most three report lines, live sessions first (owner's cap, 2026-08-21): the block is read before
+// every brief, and the reports are the part whose length is not bounded by anything else in it.
+const MAX_REPORT_LINES = 3
+function capReports(reports: RepoState['lastReports'], live: Set<string>): RepoState['lastReports'] {
+  const isLive = (r: RepoState['lastReports'][number]) => live.has(normalizeEndpointName(r.name))
+  return [...reports].sort((a, b) => Number(isLive(b)) - Number(isLive(a)) || a.ageMs - b.ageMs).slice(0, MAX_REPORT_LINES)
+}
 
 async function gatherRepoStateFor(real: string, rec: BriefRecord | null, missing: MissingPath[]): Promise<RepoState> {
   const now = Date.now()
@@ -20830,7 +20837,7 @@ async function gatherRepoStateFor(real: string, rec: BriefRecord | null, missing
     // Live sessions, plus the ones that ended in the last two hours: an ended session keeps OWNING its
     // dirty files for a day, but its report is news only while the lane might still be acting on it —
     // measured live on 2026-08-21, 24h of ended sessions printed thirteen report lines under one block.
-    lastReports: lastReportsHere(sessions.filter(s => s.live || (s.endedAt != null && now - s.endedAt <= RECENT_REPORT_MS)).map(s => s.name), now),
+    lastReports: capReports(lastReportsHere(sessions.filter(s => s.live || (s.endedAt != null && now - s.endedAt <= RECENT_REPORT_MS)).map(s => s.name), now), new Set(sessions.filter(s => s.live).map(s => normalizeEndpointName(s.name)))),
     capsulePaths: rec ? { total: capsulePathTokens(rec.brief).length, missing } : null,
     git: async args => { try { return (await exec('git', args, { cwd: real, timeout: 5000 })).stdout } catch { return null } },
     now,
