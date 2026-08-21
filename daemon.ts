@@ -167,7 +167,7 @@ import {
   assertSendable, chunk, coerceReaction, ownerChatId,
 } from './calls.ts'
 import { planOwnerFileSend, type OwnerFileVerdict } from './owner-file.ts'
-import { logoutConfirmText, logoutResultText, type LogoutPlan, type LogoutSession } from './account-logout.ts'
+import { logoutConfirmText, logoutResultText, logoutPartialText, type LogoutPlan, type LogoutSession } from './account-logout.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
@@ -15043,6 +15043,11 @@ async function chatLaneAccountNames(): Promise<string[]> {
   return [...names]
 }
 
+// The log line's MCP count, where `null` is a fact and not a zero: `mcp` is tri-state now, and
+// `null.length` would have been the crash while `(mcp ?? []).length` would quietly log "0 mcp
+// login(s)" for a file nobody could read — the same understatement the confirmation stopped making.
+const mcpLogCount = (mcp: string[] | null): string => mcp === null ? 'an unreadable number of' : String(mcp.length)
+
 // What a log-out of this account would end, computed HERE for both steps and for both surfaces — the
 // app renders the plan and never derives it, the same rule `remove-claude-plan` follows: a confirm
 // naming one set while the action takes another is exactly what a two-step flow exists to prevent.
@@ -15050,18 +15055,47 @@ async function chatLaneAccountNames(): Promise<string[]> {
 // The live sessions are NAMED, never a reason to refuse (the owner's ruling). Refusing while any
 // session is live would leave `main` — the account the coding fleet always occupies — permanently
 // unloggable-out, which is the gap this closes.
+//
+// THE SESSION SET IS THREE STORES, NOT ONE (v0.5.200). This walked `listTopics()` alone, while
+// `topic-runtime.ts`'s own inconclusive-scan guard counts topic rows ∪ DM chat lanes ∪ the General
+// anchor — and the two it missed are the ones most likely to sit on a non-`main` account. Logging
+// out `chat`, the only registered account on this box, therefore reported "no live sessions": the
+// most misleading answer available, since the lane about to die was the one it structurally could
+// not name. Enumerated as ONE list so a fourth store is a line, not a fourth copy of the walk.
+//
+// And a failed tmux read is UNKNOWN, never absence — `.catch(() => false)` silently deleted a
+// session from the warning. Counted into `unknownSessions` and said out loud instead.
 async function planAccountLogout(a: Account): Promise<LogoutPlan> {
+  const general = getGeneralSession()
+  const candidates: Array<{ sid: string; label: string }> = [
+    ...listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, label: t.name || t.sessionId.slice(0, 8) })),
+    ...listDmChatSessions().map(l => ({ sid: l.sessionId, label: 'chat lane' })),
+    ...(general ? [{ sid: general, label: 'general' }] : []),
+  ]
   const sessions: LogoutSession[] = []
-  for (const t of listTopics()) {
-    if (t.closed) continue
-    const pane = await paneForSession(t.sessionId).catch(() => null)
-    if (!pane || !(await paneAlive(pane).catch(() => false))) continue
-    const acct = await paneAccount(pane).catch(() => null)
+  const seen = new Set<string>()
+  let unknownSessions = 0
+  for (const { sid, label } of candidates) {
+    // The General anchor is also a topic row on some boxes; one pane must not be counted twice.
+    if (seen.has(sid)) continue
+    seen.add(sid)
+    // Each read is tri-state. A THROW is "could not tell"; a resolved-but-empty pane is a genuine
+    // absence (the session has no pane at all), and those are not the same fact.
+    let pane: string | null
+    try { pane = await paneForSession(sid) } catch { unknownSessions++; continue }
+    if (!pane) continue
+    let alive: boolean
+    try { alive = await paneAlive(pane) } catch { unknownSessions++; continue }
+    if (!alive) continue
+    let acct: Account | null
+    try { acct = await paneAccount(pane) } catch { unknownSessions++; continue }
     if (acct?.name !== a.name) continue
+    // A failed capture is not a claim about the turn: the session IS on this account either way, so
+    // it is listed and only the "(working)" label is withheld.
     const cap = await capturePane(pane).catch(() => '')
-    sessions.push({ name: t.name || t.sessionId.slice(0, 8), working: !!cap && detectWorking(cap) })
+    sessions.push({ name: label, working: !!cap && detectWorking(cap) })
   }
-  return { account: a.name, configDir: a.configDir, identity: await accountIdentity(a), mcp: accountMcpLogins(a), sessions }
+  return { account: a.name, configDir: a.configDir, identity: await accountIdentity(a), mcp: accountMcpLogins(a), sessions, unknownSessions }
 }
 
 async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
@@ -16925,12 +16959,22 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: `Logging out of ${name}…` }).catch(() => {})
       const plan = await planAccountLogout(acct)
       const r = await claudeLogout(acct)
-      if (!r.ok) {
-        logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed: ${r.error}` })
+      if (r.kind === 'failed') {
+        logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
         await showHtmlPanel(ctx, 'edit', `❌ Couldn't log out of <b>${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, accountsPanelKeyboard())
         return
       }
-      process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${plan.mcp.length} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+      // `partial` is NOT a failure: the file is already gone, so the row behind this panel has
+      // already gone grey. Saying "couldn't log out" over it is the contradiction G4 names.
+      if (r.kind === 'partial') {
+        // NOT logDecision: `grep "daemon: delivery "` is a contract delivery-log-sites.test.ts
+        // enumerates over refused/held/buffered/dropped, and a partial logout is none of those — it
+        // is a success with an unverified half. Its own named line instead.
+        process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
+        await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutPartialText(name, r.error))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
+        return
+      }
+      process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
       await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutResultText(name, r.said))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
       return
     }
@@ -22577,11 +22621,19 @@ async function webappProviderAccountAction(userId: string, action: Record<string
     const plan = await planAccountLogout(acct)
     if (kind === 'logout-claude-plan') return { ok: true, plan, text: logoutConfirmText(plan) }
     const r = await claudeLogout(acct)
-    if (!r.ok) {
-      logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed: ${r.error}` })
+    if (r.kind === 'failed') {
+      logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
       return { error: r.error }
     }
-    process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${plan.mcp.length} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+    // `partial` returns ok, deliberately: the app's next act is a repaint, and the row it repaints
+    // has already gone grey. Returning `error` here would leave a red bar over a signed-out row and
+    // send him looking for a logout that already happened.
+    if (r.kind === 'partial') {
+      // Its own named line, not logDecision — see the Telegram twin above.
+      process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
+      return { ok: true, text: logoutPartialText(name, r.error), partial: true }
+    }
+    process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
     return { ok: true, text: logoutResultText(name, r.said) }
   }
   // 🔑 Replace a gateway's API key. WRITE-ONLY on purpose: the existing key is never rendered, never

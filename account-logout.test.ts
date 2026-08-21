@@ -17,7 +17,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { logoutConfirmText, logoutResultText, type LogoutPlan } from './account-logout.ts'
+import { logoutConfirmText, logoutResultText, logoutPartialText, type LogoutPlan } from './account-logout.ts'
 
 const SRC = process.env.CC_BRIDGE_SRC_DIR || import.meta.dir
 const daemon = readFileSync(join(SRC, 'daemon.ts'), 'utf8')
@@ -26,7 +26,7 @@ const accounts = readFileSync(join(import.meta.dir, 'accounts.ts'), 'utf8')
 
 const P = (over: Partial<LogoutPlan> = {}): LogoutPlan => ({
   account: 'main', configDir: '/home/ubuntu/.claude', identity: 'suchag@gmail.com',
-  mcp: [], sessions: [], ...over,
+  mcp: [], sessions: [], unknownSessions: 0, ...over,
 })
 
 // ---- The confirmation says the three measured things, and promises nothing else ----------------
@@ -95,9 +95,11 @@ test('the result reports the CLI\'s own words and points at the way back in', ()
   const r = logoutResultText('main', 'Successfully logged out from your Anthropic account.')
   expect(r).toContain('Logged out of main on this box')
   // The CLI's own terminator is trimmed, not doubled — "account.." reached the first live run.
-  expect(r).toContain('— Successfully logged out from your Anthropic account. Launch it again')
+  // (The tail changed in v0.5.200: "Launch it again" named a button being retired with the whole
+  // launcher concept, so it now points at the row's own action.)
+  expect(r).toContain('— Successfully logged out from your Anthropic account. Sign in on its row')
   expect(r).not.toContain('..')
-  expect(r).toContain('Launch it again to sign in')
+  expect(r).toContain('Sign in on its row to come back')
   // A CLI that says nothing still produces a clean sentence.
   expect(logoutResultText('main', '')).not.toContain('—')
 })
@@ -152,7 +154,10 @@ test('CALL SITE: the Telegram row action is the same two steps and the same word
   expect(daemon).toContain('|out:([A-Za-z0-9_-]+)|outgo:([A-Za-z0-9_-]+))$/')
   const at = daemon.indexOf('if (acctMatch[5] || acctMatch[6]) {')
   expect(at).toBeGreaterThan(0)
-  const body = daemon.slice(at, at + 2200)
+  // Anchored on the branch's own end, never a magic length: `at + 2200` cut the slice short the
+  // moment v0.5.200 added the `partial` branch, so the test failed on code that was correct — the
+  // same trap the `main GETS THE BUTTON` test above already documents.
+  const body = daemon.slice(at, daemon.indexOf('if (acctMatch[4]) {', at))
   expect(body).toContain('logoutConfirmText(plan)')     // one formatter, both surfaces
   expect(body).toContain('logoutResultText(name, r.said)')
   expect(body).toContain("`acct:outgo:${name}`")
@@ -168,4 +173,98 @@ test('CALL SITE: the app repaints instead of raising a success bar', () => {
   expect(body).toContain('renderAccounts()')
   // SUCCESS CONFIRMATIONS ARE OFF (the owner, 2026-07-30) — the repaint is the outcome.
   expect(body).not.toMatch(/showOk\(|toast\(/)
+})
+
+// ---- v0.5.200: the three gaps the shipped confirmation left open --------------------------------
+// Each assertion below was chosen by asking what the SHIPPED 0.5.194 build would give it. Two of the
+// obvious phrasings go GREEN against the bug, and both say so at their own test.
+
+test('G2a THE FILE DELETION IS STATED, and stated UNCONDITIONALLY', () => {
+  // CONTROL, and the whole reason this test is written the awkward way: it must be asserted on the
+  // BARE plan — mcp [] and sessions [] — because on a plan WITH mcp entries the shipped build's
+  // conditional sentence already says "stored in the same file", so `toContain('.credentials.json')`
+  // passes against the very bug this exists to catch.
+  const bare = logoutConfirmText(P())
+  expect(bare).toContain('It deletes /home/ubuntu/.claude/.credentials.json outright.')
+  // …and on every other shape too, since "unconditional" is the claim being made.
+  for (const p of [P({ mcp: ['github'] }), P({ mcp: null }), P({ sessions: [{ name: 'w', working: true }] }), P({ unknownSessions: 3 })]) {
+    expect(logoutConfirmText(p)).toContain('deletes /home/ubuntu/.claude/.credentials.json outright')
+  }
+})
+
+test('G2b AN UNREADABLE CREDENTIALS FILE SAYS SO — it never renders as "no MCP logins"', () => {
+  const unreadable = logoutConfirmText(P({ mcp: null }))
+  const none = logoutConfirmText(P({ mcp: [] }))
+  expect(unreadable).toMatch(/could not be read/)
+  expect(unreadable).toMatch(/MCP server logins/)
+  // The claim itself: the two states must not render identically. Against a build where both are
+  // `[]` this is the line that fails.
+  expect(unreadable).not.toBe(none)
+  // Silence stays reserved for the one case where silence is TRUE.
+  expect(none).not.toMatch(/MCP/)
+  const some = logoutConfirmText(P({ mcp: ['github', 'Claude_Code_Remote'] }))
+  expect(some).toContain('2 MCP server logins')
+  expect(some).toContain('github, Claude_Code_Remote')
+  expect(logoutConfirmText(P({ mcp: ['github'] }))).toContain('1 MCP server login')
+})
+
+test('G6 PANES THAT COULD NOT BE CHECKED ARE COUNTED — an empty list is never implied', () => {
+  expect(logoutConfirmText(P({ sessions: [], unknownSessions: 2 }))).toMatch(/2 more panes couldn't be checked/)
+  expect(logoutConfirmText(P({ unknownSessions: 1 }))).toMatch(/1 more pane couldn't be checked/)
+  // Zero is silent: a sentence about nothing is noise, and this warning has to stay believable.
+  expect(logoutConfirmText(P())).not.toMatch(/couldn't be checked/)
+})
+
+test('G1 CALL SITE: planAccountLogout reads ALL THREE session stores, and a failed read is UNKNOWN', () => {
+  const at = daemon.indexOf('async function planAccountLogout(')
+  expect(at).toBeGreaterThan(0)
+  const body = daemon.slice(at, daemon.indexOf('\n}\n', at))
+  expect(body).toContain('listTopics()')
+  // These two are what fails against HEAD — the shipped body walks listTopics() alone, which is why
+  // logging out `chat` (this box's only registered account) reported "no live sessions".
+  expect(body).toContain('listDmChatSessions()')
+  expect(body).toContain('getGeneralSession()')
+  expect(body).toMatch(/new Set</)                     // one pane, two stores ⇒ counted once
+  // The swallowing catches are the defect; their absence is the fix.
+  expect(body).toContain('unknownSessions++')
+  expect(body).not.toContain('paneAlive(pane).catch(() => false)')
+  expect(body).not.toContain('paneAccount(pane).catch(() => null)')
+})
+
+test('G4 a non-zero exit AFTER the file is gone is PARTIAL — never "nothing happened"', () => {
+  const t = logoutPartialText('main', 'socket hang up')
+  expect(t).toContain('is signed out on this box')
+  expect(t).toContain('credentials file is gone')
+  expect(t).toContain('unknown')
+  expect(t).toContain('socket hang up')
+  // The screen must not contradict a row that has already gone grey.
+  expect(t).not.toMatch(/couldn't log out|could not log out/i)
+})
+
+test('G4 SOURCE: claudeLogout decides partial-vs-failed from the DISK, not the exit code', () => {
+  const body = accounts.slice(accounts.indexOf('export async function claudeLogout('))
+  expect(body).toContain("kind: 'partial'")
+  expect(body).toContain("kind: 'failed'")
+  // The same predicate every surface colours the row with — so the message cannot disagree with it.
+  expect(body).toContain('accountLoggedIn(a)')
+})
+
+test('G4 CALL SITES: both surfaces branch on three outcomes, and neither logs a partial as a delivery', () => {
+  const tg = daemon.slice(daemon.indexOf('if (acctMatch[5] || acctMatch[6]) {'))
+  const app = daemon.slice(daemon.indexOf("if (kind === 'logout-claude-plan' || kind === 'logout-claude')"))
+  for (const body of [tg.slice(0, 2600), app.slice(0, 2200)]) {
+    expect(body).toContain("r.kind === 'failed'")
+    expect(body).toContain("r.kind === 'partial'")
+    expect(body).toContain('logoutPartialText')
+    // `grep "daemon: delivery "` is a contract delivery-log-sites.test.ts enumerates over
+    // refused/held/buffered/dropped. A partial logout is a SUCCESS with an unverified half, so it
+    // takes its own named line instead of inventing a fifth decision.
+    expect(body).toContain('daemon: logout PARTIAL')
+  }
+})
+
+test('the result points at the ROW, not at a Launch button being retired', () => {
+  const r = logoutResultText('main', 'Successfully logged out from your Anthropic account.')
+  expect(r).toContain('Sign in on its row')
+  expect(r).not.toMatch(/Launch/)
 })

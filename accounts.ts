@@ -10,6 +10,9 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { exec } from './proc.ts'
+// Type only, and one-way: account-logout.ts imports nothing from here, so naming the outcome where
+// it is RENDERED rather than where it is produced costs no cycle.
+import type { LogoutOutcome } from './account-logout.ts'
 
 export type Account = { name: string; configDir: string }
 
@@ -229,13 +232,23 @@ export function accountLoggedIn(a: Account): boolean {
 
 // The MCP server logins stored in the SAME file as the Anthropic one — `claude auth logout` deletes
 // the file whole, so these go with it and the confirmation has to name them. Keys are
-// `<serverName>|<hash>`; the name before the pipe is what a reader recognises. Unreadable ⇒ empty,
-// which understates the cost rather than inventing one.
-export function accountMcpLogins(a: Account): string[] {
+// `<serverName>|<hash>`; the name before the pipe is what a reader recognises.
+//
+// TRI-STATE since v0.5.200: `[]` means the file says there are none, `null` means it could not be
+// read. Both used to return `[]` and the confirmation rendered silence for both — understating the
+// cost precisely when the daemon knows least, which is the unreadable≠absent inversion already ruled
+// on twice here (v0.5.160's transcript resolver, v0.5.181's ProofRead).
+//
+// A MISSING file is not unreadable: it means the account is already signed out, which every caller
+// has refused on (`accountLoggedIn`) before reaching here. Kept as `[]` so a race there cannot
+// invent a warning about a file that is already gone.
+export function accountMcpLogins(a: Account): string[] | null {
+  const file = join(a.configDir, '.credentials.json')
+  if (!existsSync(file)) return []
   try {
-    const raw = JSON.parse(readFileSync(join(a.configDir, '.credentials.json'), 'utf8')) as { mcpOAuth?: Record<string, unknown> }
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { mcpOAuth?: Record<string, unknown> }
     return [...new Set(Object.keys(raw.mcpOAuth ?? {}).map(k => k.split('|')[0]!).filter(Boolean))]
-  } catch { return [] }
+  } catch { return null }
 }
 
 // The env a `claude` subprocess needs from the daemon: the account's config dir, and ~/.local/bin on
@@ -268,13 +281,21 @@ export async function accountIdentity(a: Account): Promise<string | null> {
 //
 // It reported success for a fabricated token, so a zero exit does NOT prove the revoke landed — the
 // caller reports the CLI's own sentence and claims nothing more.
-export async function claudeLogout(a: Account): Promise<{ ok: true; said: string } | { ok: false; error: string }> {
+//
+// THREE outcomes, not two (v0.5.200). The file is deleted BEFORE the revoke can fail, so a non-zero
+// exit does not mean nothing happened: the decision is made here, where the evidence is, by asking
+// whether the credentials file survived. Reporting a `partial` as a failure put "couldn't log out"
+// on screen above a row that had already gone grey.
+export async function claudeLogout(a: Account): Promise<LogoutOutcome> {
   try {
     const { stdout, stderr } = await exec('claude', ['auth', 'logout'], { timeout: 60_000, env: claudeEnv(a.configDir) })
-    return { ok: true, said: (stdout || stderr || '').trim() }
+    return { kind: 'ok', said: (stdout || stderr || '').trim() }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    return { ok: false, error: msg.split('\n')[0]!.slice(0, 190) }
+    const error = msg.split('\n')[0]!.slice(0, 190)
+    // Re-read the disk rather than trusting the exit code: `accountLoggedIn` is the same test every
+    // surface uses to colour the row, so this cannot disagree with what he is looking at.
+    return accountLoggedIn(a) ? { kind: 'failed', error } : { kind: 'partial', error }
   }
 }
 
