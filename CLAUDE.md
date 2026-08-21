@@ -103,6 +103,27 @@ feed half of `transcript.ts`.
 
 ## Supervision
 
+**NO TWO PROCESSES A SESSION CAN OWN MAY RENDER AS THE SAME LABEL, and this bridge's own CLI is not
+work about to be lost** (v0.5.192, 2026-08-21). `tg kill`'s survivor check was always parentage-only
+(`childWaitShells` takes the snapshot-shell children of the pane's engine; `--force` skips it and
+signals no pid, only `/exit` then `tmux kill-pane`) — the defect was the LABEL. `LABEL_MAX` is 60 and
+the plugin-cache path runs 59 characters to the version, so `bun <cache>/<ver>/tgctl.ts answer 49 -`
+and `bun <cache>/<ver>/daemon.ts` were one string: ten kills refused between 2026-07-29 and
+2026-08-21 naming what looked like the production daemon, seven then re-run with `--force`. The leaf
+was almost always the target's own in-flight `tg` call, and that race is STRUCTURAL — `tg answer`
+delivers to the asker before `tgctl` exits, so "answer arrives → orchestrator kills" collides every
+time. `leafLabel` names the script (`tgctl.ts answer 49 -`), not the interpreter — raising the cap is
+not the fix, since a longer absolute path still truncates and still says nothing; `isBridgeCli` puts a
+tgctl leaf on the same significance floor `isPacing` established, **except `tg spawn`, which still
+warns** (@chat's carve-out). Three things are load-bearing: the exclusion matches `tgctl.ts` and
+nothing else (a `bun scripts/<probe>.ts` left running is exactly what the warning is for), a deploy
+chain still warns (`bun run deploy` names no absolute script — the one refusal in the ten that was
+protective, 2026-08-01), and the refusal now calls `logDecision` — it wrote NO line for nine days of
+log, so the class was only reconstructable from callers' transcripts. Proof:
+`kill-survivor-label.test.ts` (its "SEEN COLLIDING" test reproduces the old formatter as the
+known-answer control; the D3 call-site test must fail against a pre-0.5.192 `daemon.ts`) and
+`$(tg shared)/bridgekill-2026-08-21/`.
+
 **A long-lived process never keeps the cwd it INHERITED; every supervision launch passes `cwd`
 explicitly.** Under Bun a process whose cwd was deleted cannot spawn anything — every spawn fails
 `ENOENT … posix_spawn`, absolute paths included — while `process.cwd()` keeps returning the stale

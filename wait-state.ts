@@ -81,6 +81,48 @@ const ENGINE = /(^|\/)(claude|codex)(\s|$)/
 
 const LABEL_MAX = 60
 
+// NO TWO PROCESSES A SESSION CAN OWN MAY RENDER AS THE SAME LABEL (2026-08-21).
+//
+// An interpreter invocation is mostly path, and `LABEL_MAX` cut it one character before the only
+// token that identified it: `bun <plugin cache>/cc-bridge/telegram/0.5.191/tgctl.ts answer 49 -` and
+// `bun <plugin cache>/cc-bridge/telegram/0.5.191/daemon.ts` both rendered as
+// `bun /home/ubuntu/.claude/plugins/cache/cc-bridge/telegram/0.` — so a session's own `tg` call and
+// the PRODUCTION DAEMON were one string. Ten kills were refused with that label between 2026-07-29
+// and 2026-08-21 and seven were then re-run with `--force`, each time by a caller who had just been
+// told, in effect, that ending a probe would take the bridge down.
+//
+// Raising the cap is not the fix: a longer absolute path is still mostly path, still truncates
+// somewhere, and still says nothing to a reader. The SCRIPT is the identity, so drop the interpreter
+// and the directory and keep the basename with its arguments. Everything that is not an interpreter
+// invocation — `gh run watch 18832`, `sleep 600`, `/usr/bin/grep -roE` — is untouched.
+const INTERPRETER = /^(?:\S*\/)?(?:bun|node|deno|python3?|ruby|perl)$/
+export function leafLabel(argv: string): string {
+  const flat = argv.replace(/\s+/g, ' ').trim()
+  const [exe, script, ...rest] = flat.split(' ')
+  // Only an ABSOLUTE script path: `bun run deploy patch` and `python3 -m x` name no file, and
+  // rewriting them would invent a basename that is not there.
+  if (exe && script && INTERPRETER.test(exe) && script.startsWith('/')) {
+    return [script.slice(script.lastIndexOf('/') + 1), ...rest].join(' ').slice(0, LABEL_MAX)
+  }
+  return flat.slice(0, LABEL_MAX)
+}
+
+// This bridge's OWN CLI, running inside a session, is not work that session is about to lose: the
+// paste, the delivery and the proof all happen in the daemon, so killing `tgctl` loses its result
+// line and nothing else. It is also a STRUCTURAL collision rather than a coincidence — `tg answer`
+// delivers to the asker before tgctl exits, so "answer arrives → orchestrator kills" races the
+// answerer's own CLI process every time, which is why this leaf dominated the refusals above.
+//
+// `spawn` is the carve-out (@chat's ruling, 2026-08-21): a kill landing mid-`tg spawn` still warns.
+// The floor is the same one `isPacing` established — a significance test, not a blanket exclusion:
+// a `bun scripts/<probe>.ts` a session left running is exactly what this warning is for, so the
+// match is on tgctl.ts specifically and nothing else.
+export function isBridgeCli(leafArgv: string): boolean {
+  const [exe, script, verb] = leafArgv.replace(/\s+/g, ' ').trim().split(' ')
+  if (!exe || !script || !INTERPRETER.test(exe) || !/(^|\/)tgctl\.ts$/.test(script)) return false
+  return verb !== 'spawn'
+}
+
 // The tag, and the ruling behind it (owner, 2026-07-28): a child that outlived a `/clear` still counts
 // as a wait — it is a real process, and hiding it is how a wedged loop span for 81 minutes under a card
 // that read idle — but it says so. Suppressing it instead would have grayed out the deliberate case:
@@ -176,6 +218,10 @@ export function childWaitShells(procs: ProcRow[], panePid: number | undefined, s
   const found = (kids.get(engineProc(procs, panePid)) ?? [])
     .filter(p => SNAPSHOT_SHELL.test(p.argv()))
     .filter(p => !isPacing(p, leafOf(p)))
+    // …and the same floor for this bridge's own CLI. Read off the LEAF, so a `tg … | tail` pipeline
+    // whose leaf is the `tail` still counts — a false negative here costs a spurious warning, and
+    // guessing at a pipeline's intent would cost a real one.
+    .filter(p => { const l = leafOf(p); return !l || !isBridgeCli(l.argv()) })
   // A shell older than this conversation is debris a `/clear` left running. An undated one (startedAt
   // 0) is treated as current: the tag is a claim about age, and we only make it when we measured one.
   const preClear = (p: ProcRow) => !!since && p.startedAt > 0 && p.startedAt < since
@@ -188,7 +234,7 @@ export function childWaitShells(procs: ProcRow[], panePid: number | undefined, s
     // while the shell tidies up. Real, and rare enough that naming it beats guessing at its argv.
     // (The owner's own incident read exactly this way — between two `sleep 4` ticks of a wedged poll
     // loop there is no child to name.)
-    const named = leaf ? leaf.argv().replace(/\s+/g, ' ').slice(0, LABEL_MAX) : ''
+    const named = leaf ? leafLabel(leaf.argv()) : ''
     const tag = preClear(shell) ? PRE_CLEAR : ''
     return { label: (named || 'background shell') + tag, preClear: preClear(shell), named: !!named }
   })

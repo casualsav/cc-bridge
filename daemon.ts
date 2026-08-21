@@ -3863,6 +3863,14 @@ async function runSessionKill(fromSid: string, target: string, force: boolean, g
         if (targetPane && alive && !force) {
           const shells = await paneSurvivors(targetPane)
           if (shells.length) {
+            // A refusal that leaves no line is a class nobody can count: ten of these fired between
+            // 2026-07-29 and 2026-08-21 and daemon.log held not one of them, so the only corpus that
+            // could answer "has this happened before" was the CALLERS' transcripts. Single-shot, so
+            // no key — each kill attempt is its own event, and there is no sweep to throttle.
+            // Named from the RESOLVED endpoint, not the raw argument: `tg kill @killa` passes the `@`
+            // through and `kill @@killa` is not a name anything can be grepped by.
+            const killName = nameForEndpoint(res.id, endpoints)
+            logDecision({ family: 'ctl', what: `kill @${killName}`, target: killName, pane: targetPane, decision: 'REFUSED', predicate: survivorWarning(shells), hint: 'caller can re-run with --force' })
             return { ok: false, text: `${survivorWarning(shells)}\n${forceGesture(g, target)} to close it anyway` }
           }
         }
