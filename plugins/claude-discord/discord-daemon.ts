@@ -9,7 +9,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeF
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { exec, hashText } from './proc.ts'
-import { capturePane, paneAlive, paneCwd, sendKeys, waitForSettle, navigateDown } from './pane-io.ts'
+import { capturePane, paneAlive, paneCwd, sendKeys, waitForSettle, navigateDown, loadPasteBuffer } from './pane-io.ts'
 import { resolveTranscript, finalRepliesAfter, latestFinalReply } from './agent-transcript.ts'
 import { detectPermissionPrompt, detectUserPrompt, onNormalPrompt, type PermissionPrompt, type PromptInfo } from './prompt.ts'
 import { DiscordAdapter } from './discord-adapter.ts'
@@ -22,7 +22,6 @@ import {
 
 const CHAN_PANE_OPT = '@discord'       // this channel's adopt marker: "1" discoverable, "pin" pinned-preferred
 const LEGACY_PANE_OPT = '@tg_bridge'   // legacy shared marker (value "1") — panes from pre-ccb launchers
-const INJECT_BUFFER = 'dsc-inbound'
 
 function log(msg: string): void {
   const line = `${new Date().toISOString()} discord: ${msg}\n`
@@ -113,8 +112,12 @@ function newestPane(panes: { id: string; activity: number; cwdLive: boolean; pin
 // Bracket-paste `text` as one block (embedded newlines don't submit early), then Enter to submit.
 async function injectPaste(paneId: string, text: string): Promise<boolean> {
   if (!(await paneAlive(paneId))) return false
-  await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
-  await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
+  // Through a FILE, and under a name unique to this attempt: `set-buffer -- <text>` is a tmux
+  // COMMAND and tmux refuses one over ~16 KB, so a long message reached no pane at all
+  // (measured on the Telegram daemon, 2026-08-21 — the ceiling is the primitive's, not the
+  // channel's). Untested live on this channel: no token for it on this box.
+  const buf = await loadPasteBuffer(paneId, text)
+  await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
   await waitForSettle(paneId, 200, 4000)
   await sendKeys(paneId, ['Enter'])
   await waitForSettle(paneId, 300, 5000)
