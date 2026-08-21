@@ -123,7 +123,7 @@ import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } 
 import { decideFallbackTranscript, recordedTranscript, fallbackIsCrowded } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import { planAskGate, planInjectionConfirm, blockCarriesAsk, blockCarriesAnswer, fileCarries, anchorSizeFor, CONFIRM_WINDOW_MS, type ProofRead, type PasteAnchor } from './ask-parity.ts'
-import { paneFreedom, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
+import { paneFreedom, planFreedomDisagreement, readRegistryRows, rowForPane, rowIsLive, paneIdOf } from './session-freedom.ts'
 import { planHeartbeat, planStuckAlarm, stuckAlarmCard, heartbeatCard, alarmPlain, type StuckRow } from './bus-alarm.ts'
 import { logDecision, forgetDecision, gcDecisions, decisionGate } from './delivery-log.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
@@ -4665,8 +4665,14 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     if (gate !== 'deliver') {
       // The gate folds working/queued/bashArmed into one 'busy'; the line does not — the sub-predicate
       // is what tells a queued-messages bar from a spinner from an armed `!` box.
-      logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD',
-        predicate: `planAskGate=${gate} (atPrompt=${+onNormalPrompt(cap)} working=${+detectWorking(cap)} queued=${+hasQueuedMessages(cap)} bashArmed=${+bashModeArmed(cap)})` })
+      const shown = `planAskGate=${gate} (atPrompt=${+onNormalPrompt(cap)} working=${+detectWorking(cap)} queued=${+hasQueuedMessages(cap)} bashArmed=${+bashModeArmed(cap)})`
+      logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: shown })
+      // …and when the record disagreed with that, SAY SO. Keyed per PANE, not per row: the subject is
+      // the pane's contradictory state, so N rows queued behind one false-busy print one line between
+      // them and a 5-minute reminder after — not N lines that never transition.
+      const clash = planFreedomDisagreement(freedom.freedom, false, shown)
+      if (clash) logDecision({ key: `freedomclash:${pane}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD',
+        predicate: clash, hint: 'the record is the authority (v0.5.132) and the screen keeps the questions it cannot see — this line exists so a screen predicate that has started lying names itself' })
       return gate
     }
     const room = busLedgerRoom()

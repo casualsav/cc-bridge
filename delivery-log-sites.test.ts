@@ -20,11 +20,13 @@ const count = (s: string, re: RegExp): number => (s.match(re) ?? []).length
 
 test('bus family: tryDeliverAsk, deliverAside, deliverAnswerToAsker, the founding closure', () => {
   const t = bodyOf(/\nasync function tryDeliverAsk\(/)
-  // no pane · record busy · registry SILENT (folded) · capture empty · gate ≠ deliver · box occupied
-  // (folded) · payload refused (terminal, v0.5.189)
-  expect(count(t, /logDecision\(\{/g)).toBe(7)
+  // no pane · record busy · registry SILENT (folded) · capture empty · gate ≠ deliver · record/screen
+  // DISAGREE (v0.5.207, keyed per pane not per row) · box occupied (folded) · payload refused
+  // (terminal, v0.5.189)
+  expect(count(t, /logDecision\(\{/g)).toBe(8)
   expect(t).toContain("predicate: `paneFreedom=busy")
-  expect(t).toContain('predicate: `planAskGate=${gate}')
+  expect(t).toContain('predicate: shown')
+  expect(t).toContain('key: `freedomclash:${pane}`')
   expect(t).toContain('forgetDecision(`ask:${cur.id}`)')
   const a = bodyOf(/\nasync function deliverAside\(/)
   expect(count(a, /\brefused\('|\brefused\(`/g)).toBe(6)         // no pane · capture empty · paneAcceptsText · wedged · occupied · not-landed

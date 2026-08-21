@@ -309,7 +309,15 @@ before hashing a signature, so over-matching can only coarsen one). **Still open
 no parser to gate on. Proof: `working-timer-shape.test.ts` (the incident line byte-exact from
 @dailyadapter's transcript, with the pre-fix predicate asserted TRUE on it as the known-answer control)
 and `bun scripts/working-shape-probe.ts --watch N`, which runs both predicates over every live pane —
-132 pane-samples, zero disagreement, which is the false-negative half no unit test can answer.
+132 pane-samples, zero disagreement, which is the false-negative half no unit test can answer. **The
+class's own alarm ships with it** (v0.5.207): both readings were computed on all 1020 of those sweeps
+and only the screen's was printed, so `planFreedomDisagreement` (`session-freedom.ts`) now logs
+`record says FREE but the screen says held` — keyed per PANE, so rows queued behind one false-busy share
+a line. A LINE, not a tiebreak: an "idle for N minutes wins" override would reintroduce
+how-long-is-long-enough on the other side, and `unknown` is excluded because it is the absence of a
+reading, not a contradiction. The record=busy direction is unobservable on purpose — the veto returns
+before the capture — and widening it means moving the capture, which is the thing not to do.
+Proof: `freedom-clash-log.test.ts` (source-bound; its call-site test must fail against HEAD).
 
 **A submit is verified against the input BOX, never against the pane's mood.** `submitLanded`
 (`prompt.ts`) reads `inputBoxOccupant` on a STYLED capture and nothing else — text still in the box is
@@ -594,7 +602,16 @@ each was a separate live loss: `injected` is stamped only on transcript proof, n
 that was DELIVERED, because a held row that expires becomes permanently undeliverable while its asker
 is told a late answer will still arrive (caught mid-flight on ask 523, owner ruling 2026-08-15: the
 TTL arms at delivery, and the hour-mark notice for a held row says which of mid-turn/wedged/gone it
-is); and the reap's suppression is DELIVERED-ONLY **for asks** — killing a stalled worker is the
+is) — **and "at delivery" means at the PASTE, `markPastedAt`, not at the proof**: `stillQueued` is what
+keeps a held row out of `expirePending` and it goes false at the paste, while until v0.5.207 the clock
+was re-armed only in `markInjected`, so R-4's paste→proof gap carried the row's CREATION deadline. Ack
+57 sat 4h15m behind %254's false-busy, was pasted at 08:23:22.682Z and expired 8.8s later against an
+`expiresAt` from 05:07, after which both `tryDeliverAsk` and `confirmInjections` bail on `expiredAt` —
+the block physically in the pane, the row written off, and silent because it was an ack. Arm at the
+paste rather than widening `stillQueued`: a row pasted and never confirmed must still expire, and
+widening the guard is the one change that keeps it alive forever (`bus-held-ttl.test.ts`, whose four
+ack-57 tests must fail against a pre-0.5.207 `agent-bus.ts`); and the reap's suppression is
+DELIVERED-ONLY **for asks** — killing a stalled worker is the
 orchestrator's standard recovery, so silencing its never-delivered rows discards the queued units
 without telling the one session that could re-issue them, while **an ack is silent whatever its
 state** (nothing awaits one; v0.5.165, after two sign-off acks reached the owner as "❌ Ask N … never

@@ -613,6 +613,19 @@ export function markInjected(id: number, now: number): void {
  * R-4: record that the block was PASTED, which is not the same as delivered. The confirmation sweep
  * turns this into `injected` once the ask block appears in the target's transcript, or reports it
  * unconfirmed and clears it (`markPastedAt(id, null)`) — never silently promotes it.
+ *
+ * THE CLOCK STARTS HERE, not at `markInjected` (v0.5.207). `stillQueued` — which is what keeps a HELD
+ * row out of `expirePending` — goes false at the PASTE, while the TTL was re-armed only on transcript
+ * PROOF, so R-4's paste→proof gap was unprotected and carried the row's CREATION deadline. Ack 57
+ * held 4h15m behind the %254 false-busy, was finally pasted at 08:23:22.682Z, and the next sweep
+ * expired it 8.8 seconds later against an `expiresAt` from 05:07 — after which `tryDeliverAsk` and
+ * `confirmInjections` both bail on `expiredAt`, so it could never become `injected`. The block was
+ * physically in the pane and the bus had written it off; being an ack, nothing was reported.
+ *
+ * Arming here and not widening `stillQueued`: the row must still eventually expire if it is pasted
+ * and never confirmed, and widening the guard is the one change that would keep it alive forever.
+ * `markInjected` re-arms AGAIN on proof, which is a different window — this one bounds "how long may
+ * a pasted block go unproved", that one is the answer window.
  */
 export function markPastedAt(id: number, at: number | null, anchor?: { size?: number; file?: string }): void {
   ensureLoaded()
@@ -621,6 +634,9 @@ export function markPastedAt(id: number, at: number | null, anchor?: { size?: nu
   if (at == null) { if (p.pastedAt == null) return; delete p.pastedAt; delete p.pastedSize; delete p.pastedFile }
   else {
     p.pastedAt = at
+    // Forward only. A re-paste of the same row moves the deadline out; nothing here may pull it in,
+    // or a retry loop could shorten a window the asker was already promised.
+    if (at + ASK_TTL_MS > p.expiresAt) p.expiresAt = at + ASK_TTL_MS
     if (anchor?.size != null) p.pastedSize = anchor.size; else delete p.pastedSize
     if (anchor?.file) p.pastedFile = anchor.file; else delete p.pastedFile
   }

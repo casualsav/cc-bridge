@@ -183,3 +183,28 @@ export function paneFreedom(paneId: string, configDirs: string[], procRoot = '/p
   const alive = rowIsLive(row, procRoot)
   return planSessionFreedom(row, alive, alive && row.status === 'busy' ? concludedAt(row) : null)
 }
+
+/**
+ * The record and the screen answering the same question differently — a line, not a tiebreak.
+ *
+ * Pane %254 sat held for 4h15m on 2026-08-21 with the screen composite reading `working=1` off a reply
+ * bullet and the CLI's own record saying `idle` the whole time. Both readings were computed on every
+ * sweep and neither line printed the other, so the contradiction — the one fact that names the defect
+ * immediately — was reconstructable only from a transcript. This prints it.
+ *
+ * Deliberately NOT a new precedence: `paneFreedom` is already the authority and the screen already the
+ * fallback (v0.5.132). An "idle for N minutes wins" override would reintroduce how-long-is-long-enough
+ * on the other side, and v0.5.171 had to date the record's own `busy` against the transcript precisely
+ * because it over-reports.
+ *
+ * `unknown` is not a disagreement — it is the ABSENCE of a reading, already logged as `registry
+ * SILENT`, and counting it here would print a second line for every pane on a box whose CLI stopped
+ * writing records. And only this DIRECTION is observable: the record=busy case returns before the
+ * capture is taken, deliberately (a failed capture must never gate the veto), so there is no screen
+ * reading to disagree with. Widening this means moving the capture, which is the thing not to do.
+ */
+export function planFreedomDisagreement(record: Freedom, gateDelivers: boolean, screenWhy: string): string | null {
+  if (gateDelivers) return null      // they agree
+  if (record !== 'free') return null
+  return `record says FREE but the screen says held — ${screenWhy}`
+}
