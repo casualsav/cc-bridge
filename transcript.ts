@@ -1089,6 +1089,13 @@ export function turnAnchorIsBus(file: string): boolean {
   return false
 }
 
+// The same anchor's TEXT, for the paths that need to know WHO started this turn rather than merely
+// whether the bus did (`tg send @owner`'s requester test). Read at the same moment and off the same
+// entry as turnAnchorIsBus, so the two can never disagree about which turn they are describing.
+export function turnAnchorText(file: string): string {
+  return latestAnchorText(readEntries(file))
+}
+
 export function turnAnchorUuid(file: string): string | null {
   const entries = readEntries(file)
   for (let i = entries.length - 1; i >= 0; i--) {

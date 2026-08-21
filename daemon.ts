@@ -59,7 +59,7 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // `turnAnchorIsBus` joins it for a simpler reason than the shape argument above: its only caller is
 // the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
 // rollout for a dispatcher to read.
-import { lastTurnApiError, turnAnchorIsBus, transcriptStartedAt, CONVO_CAP } from './transcript.ts'
+import { lastTurnApiError, turnAnchorIsBus, turnAnchorText, transcriptStartedAt, CONVO_CAP } from './transcript.ts'
 import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound, recapUuids } from './outbound-feed.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -163,8 +163,9 @@ import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
-  assertSendable, chunk, coerceReaction,
+  assertSendable, chunk, coerceReaction, ownerChatId,
 } from './calls.ts'
+import { planOwnerFileSend, type OwnerFileVerdict } from './owner-file.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
@@ -2626,6 +2627,27 @@ async function paneTurnIsBusAnchored(pane: string | null): Promise<boolean> {
   const last = finalRepliesAfter(file, '').slice(-1)[0]
   return last?.busAnchored === true
 }
+// WHO started this turn, verbatim — the envelope, not merely its class. Read for the one decision
+// that needs the person rather than the origin: whether a file may land in the owner's DM
+// (`owner-file.ts`). Fails to '' , which ALLOWS: refusing on an unreadable anchor would trade a file
+// he asked for against an attachment in his own DM from his own session (his ruling, 2026-08-21).
+async function paneTurnAnchorText(pane: string | null): Promise<string> {
+  if (!pane) return ''
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd).catch(() => null)
+  if (!file) return ''
+  try { return turnAnchorText(file) } catch { return '' }
+}
+// The requester test for any file send whose destination is the owner's DM — BOTH spellings, `@owner`
+// and his numeric chat id, because a rule that only one of them honours is not a rule.
+async function ownerFileGate(pane: string | null): Promise<OwnerFileVerdict> {
+  const sid = pane ? await sessionForPane(pane).catch(() => null) : null
+  return planOwnerFileSend({
+    anchorText: await paneTurnAnchorText(pane),
+    callerLaneChat: (sid ? chatIdForDmChatSession(sid) : null) ?? null,
+    ownerChat: loadAccess().allowFrom[0] ?? '',
+  })
+}
 // The same question at a different MOMENT: the stop hook asks while the turn is still ending, so it
 // reads the turn's ANCHOR instead of its last concluded reply (see transcript.ts's turnAnchorIsBus —
 // asking the reply is what made the hook a no-op on its first live run). Fails false, which fails
@@ -4309,6 +4331,42 @@ async function sendPostPart(chat: string, header: string, shown: string, fromSid
     process.stderr.write(`daemon: post send failed: ${e}\n`); return null
   })
   rememberMsgRoute(chat, ref?.messageId, fromSid)
+}
+
+// Telegram's caption limit. A caption past it is a post with a file attached, not a caption.
+const OWNER_FILE_CAPTION_CAP = 1024
+// `tg send @owner <path>` — a FILE to the human, from a session that may have no chat surface of its
+// own. The post card's sibling: the ATTACHMENT ITSELF names the session (`📎 @name`), so a document
+// arriving in his DM says who sent it without a second message to correlate it with.
+//
+// NOTIFYING, always. A file he asked for is a session reaching for a human — the same class as a
+// post, and his ruling there governs. The turn's own class (`quiet`, from paneTurnIsBusAnchored) is
+// deliberately NOT consulted here: an agent-composed ask is a silent turn, and owner → @chat →
+// worker is the normal chain by which he asks a worker for a file.
+async function sendOwnerFile(
+  chat: string, fromName: string, files: string[], caption: string | undefined, fromSid: string | null,
+): Promise<number[]> {
+  const header = `📎 <b>@${escapeHtml(fromName)}</b>`
+  const words = caption?.trim() ?? ''
+  const body = words ? mdToTelegramHtml(words) : ''
+  const inline = !!body && words.length + 64 <= OWNER_FILE_CAPTION_CAP
+  const ids: number[] = []
+  // Too long to ride the file: send it as its own notifying message rather than cutting it, the
+  // same call bus-split.ts makes one surface down, and leave the header alone on the attachment.
+  if (body && !inline) {
+    const ref = await channel.sendText(chat, `${header}\n\n${body}`).catch(e => {
+      process.stderr.write(`daemon: owner file caption send failed: ${e}\n`); return null
+    })
+    if (ref) ids.push(Number(ref.messageId))
+  }
+  for (const f of files) {
+    const ref = await channel.sendFile(chat, f, { caption: inline ? `${header}\n\n${body}` : header })
+    ids.push(Number(ref.messageId))
+  }
+  // Routable like every card with a session behind it: his native reply to the attachment goes back
+  // to whoever sent it, which for a headless worker is the only way he can answer it at all.
+  for (const i of ids) rememberMsgRoute(chat, i, fromSid)
+  return ids
 }
 
 // A worker answering something the OWNER addressed to it himself (`@name <message>`, or a reply to one
@@ -7971,11 +8029,21 @@ async function handleCall(
     }
     switch (name) {
       case 'reply': {
-        const { chat: chat_id, thread } = await resolveTarget(args)
+        const files = (args.files as string[] | undefined) ?? []
+        const callerPane = args.pane ? String(args.pane) : null
+        // `tg send @owner <path>` — the address that gives a HEADLESS session a route to the human.
+        // `.` still refuses for a surfaceless pane (calls.ts, 2026-07-30): that guard forbids a silent
+        // FALLBACK into a human chat, and this is the agent naming him. Words-only verbs spelled
+        // `@owner` fall through to resolveTarget, which teaches `tg post` instead.
+        const toOwner = isOwnerAddress(String(args.chat_id ?? ''))
+        if (toOwner && !files.length) {
+          write({ t: 'result', id, ok: false, text: '`@owner` carries a FILE — `tg send @owner <path> [caption]`. For words use `tg post` (or `tg ack @owner -`), which reaches him as a card he can reply to' })
+          return
+        }
+        const { chat: chat_id, thread } = toOwner ? { chat: ownerChatId(), thread: undefined } : await resolveTarget(args)
         const threadOpt = thread ? { message_thread_id: thread } : {}
         const msgText = args.text as string | undefined   // absent for a caption-less file send
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
-        const files = (args.files as string[] | undefined) ?? []
         const format = args.format as string | undefined
 
         assertAllowedChat(chat_id)
@@ -7983,6 +8051,33 @@ async function handleCall(
           assertSendable(f)
           const st = statSync(f)
           if (st.size > MAX_ATTACHMENT_BYTES) throw new Error(`file too large: ${f}`)
+        }
+        // WHO caused this file to reach him. Applied to the destination, not the spelling — his
+        // numeric chat id has always worked from any session, ungated, so gating only `@owner` would
+        // ship a rule with a bypass. Positive evidence of a non-owner requester REFUSES; everything
+        // else (his own turns, agent-composed asks, an unreadable anchor) allows — see owner-file.ts.
+        if (files.length && chat_id === (loadAccess().allowFrom[0] ?? '\0')) {
+          const verdict = await ownerFileGate(callerPane)
+          if (!verdict.allow) {
+            logDecision({ family: 'owner', what: `file ${basename(files[0]!)}${files.length > 1 ? ` +${files.length - 1}` : ''}`, target: 'owner', pane: callerPane, decision: 'REFUSED', predicate: verdict.reason })
+            write({ t: 'result', id, ok: false, text: verdict.reason }); return
+          }
+        }
+        // The owner-addressed file has its own short send: the caption rides ON the attachment and
+        // names the session, and it is notifying whatever the turn's class. Everything below stays
+        // the surface-addressed path (`.` / an explicit chat), byte-for-byte unchanged.
+        if (toOwner) {
+          const senderSid = callerPane ? await sessionForPane(callerPane).catch(() => null) : null
+          const fromName = senderSid ? nameForEndpoint(senderSid, busEndpoints()) : 'agent'
+          const sent = await sendOwnerFile(chat_id, fromName, files, msgText, senderSid)
+          // The mini-app drill-in reads the transcript, and a file sent through a command argument
+          // leaves no trace in one — the same hole outbound-feed.ts exists to close for `tg answer`.
+          // A caption-less send has no text at all, so the row names the file.
+          if (senderSid) recordOutbound({ sid: senderSid, ts: Date.now(), kind: 'chat',
+            text: `📎 ${files.map(f => basename(f)).join(', ')}${msgText?.trim() ? ` — ${msgText.trim()}` : ''}` })
+          process.stderr.write(`daemon: @${fromName} sent the owner ${files.length} file(s) (${files.map(f => basename(f)).join(', ')}) → chat ${chat_id}\n`)
+          text = sent.length === 1 ? `sent to the owner (id: ${sent[0]})` : `sent to the owner (ids: ${sent.join(', ')})`
+          break
         }
 
         const access = loadAccess()

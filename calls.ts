@@ -7,6 +7,7 @@ import { realpathSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { STATE_DIR } from './common.ts'
 import { loadAccess } from './access.ts'
+import { isOwnerAddress } from './agent-bus.ts'
 import { paneOutboundIntent } from './topic-runtime.ts'
 
 export const MAX_CHUNK_LIMIT = 4096
@@ -31,6 +32,15 @@ export function resolveChatId(raw: unknown): string {
   throw new Error(s ? `chat "${s}" not resolvable` : 'no chat id given and not exactly one allowlisted chat')
 }
 
+// THE OWNER is `allowFrom[0]` — the paired human, the same identity `formatChannelBlock` compares
+// against when it decides whether to print an `@sender`. Deliberately NOT `ownerCardChats()` /
+// every DM lane: a private attachment is not a broadcast, and on a multi-user box those differ.
+export function ownerChatId(): string {
+  const chat = loadAccess().allowFrom[0]
+  if (!chat) throw new Error('no owner chat is configured (access.json allowFrom is empty)')
+  return chat
+}
+
 // Pane-aware `.`: a tg-CLI call carries its tmux pane, so `.` resolves to the calling session's
 // own chat. We resolve it through the SAME pane→chat(+thread) binding the outbound relay uses
 // (outboundTargetsFor, via paneOutboundIntent): the bound group + that session's topic thread in
@@ -44,6 +54,13 @@ export function resolveChatId(raw: unknown): string {
 // the owner DM even though the relay was correctly routing that session's replies to its group.
 export async function resolveTarget(args: Record<string, unknown>): Promise<{ chat: string; thread?: number }> {
   const s = (args.chat_id == null ? '' : String(args.chat_id)).trim()
+  // `@owner` addresses the HUMAN, and it is a destination for a FILE only — `tg send @owner <path>`
+  // handles it before this function is reached. Reaching it here means a words-only verb was spelled
+  // that way, and words to him already have one path (`tg post`). A second one is how one of them
+  // quietly stops being expanded, notifying and routable, so this teaches rather than resolves.
+  if (isOwnerAddress(s)) {
+    throw new Error('@owner is a destination for `tg send @owner <path>` only — for words use `tg post` (or `tg ack @owner -`), which reaches him as a card he can reply to')
+  }
   if (s && s !== '.') return { chat: s }
   const pane = args.pane ? String(args.pane) : null
   if (pane) {

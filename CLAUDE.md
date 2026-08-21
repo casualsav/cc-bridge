@@ -398,6 +398,26 @@ FAIL against the deployed build), unit + source-bound control in `transcript-own
 canary founding a lane beside the live prod one — the live-owner guard refusing `1bbc9821` 9ms after
 the spawn, before the new pane had a record of its own (`$(tg shared)/crossadopt-canary-baseline.txt`).
 
+**`@owner` IS A FILE DESTINATION, AND THE REQUESTER TEST REFUSES ONLY ON POSITIVE EVIDENCE OF A
+NON-OWNER HUMAN** (v0.5.191, 2026-08-21). `tg send .` refuses for a surfaceless pane on purpose, so a
+headless worker asked for its report as an .md could only post the PATH and ask the chat lane to relay
+the file by hand. The gap was never that files are blocked — his numeric chat id has always worked from
+any session, ungated, through `resolveTarget`'s explicit-id branch — it was that there was no NAME for
+the destination, which is why `@owner` is not a fallback but the agent naming him and the 2026-07-30
+`.` guard is untouched. `planOwnerFileSend` (`owner-file.ts`) refuses exactly two things, both naming a
+person who is not him: a turn anchored on a `from=group` message carrying an `@sender`, and another
+person's DM lane answering that person (the envelope cannot tell — a DM prints no `@sender`, since
+`chat_id === user_id` — so the LANE BINDING decides). Everything else allows, and three of those are
+load-bearing: **an unreadable anchor allows** (his ruling, narrowing a draft that refused — the
+attachment lands in his own DM from his own session, while the false refusal costs him a round trip on
+a file he asked for, "the one he will feel and report"); **agent-composed asks allow**, because owner →
+@chat → worker is the normal chain and a bus ack arriving mid-work re-anchors the turn; and the gate is
+keyed on the **destination chat**, not the `@owner` spelling, or the numeric-id spelling is a bypass.
+The attachment is NOTIFYING whatever the turn's class (`quiet` is deliberately not consulted — an
+agent-composed ask is a silent turn) and carries `📎 @name` so a document in his DM says who sent it.
+Proof: `owner-file.test.ts` (source-bound; five call-site tests must fail against a pre-0.5.191
+`daemon.ts` + `calls.ts`) and the live canary run in `$(tg shared)/bridgefiles-2026-08-21/`.
+
 **Every relay send is gated on `claimRelayDelivery` (`state.ts`)** — file + uuid + chat +
 thread. Four paths deliver a relayed reply and each advances only its OWN cursor, so racing two
 can both see a reply unrelayed (observed 2026-07-30: one reply, two copies in the DM). A fifth

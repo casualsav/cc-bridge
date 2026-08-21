@@ -42,6 +42,13 @@ bracketed note. A final block after it is the same report delivered twice.
 Chat is always `.`: `tg send . /abs/path [caption]` — file/photo · `tg edit . <id> -` — edit a
 sent message · `tg reply . -` — force a text send (rare) · `tg react . <id> <emoji>`.
 
+**Asked for a FILE? `tg send @owner /abs/path [caption|-]` hands it to him.** It works from a
+HEADLESS session too — the one that has no chat of its own, where `.` refuses — and lands in his DM
+as an attachment captioned with your name, which he can reply to. Say the words in the same turn's
+`tg answer`/`tg ack`; the send is the file, not the report. Refused when the turn you are in was
+started by somebody else (another person's group message): send it to the thread they asked in, or
+hand him the path with `tg post`. `@owner` carries a file only — for words use `tg ack @owner -`.
+
 **Every message body goes on stdin, never in a double-quoted shell string.** Inside `"…"` your
 Markdown code spans are command substitution — the shell RUNS them and splices the output into
 your message before `tg` sees it, and nothing announces it ($vars, `!`, `\`, newlines mangle

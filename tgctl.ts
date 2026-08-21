@@ -6,6 +6,7 @@
 //
 // <chat> is `.` in a DM (resolves to the sole allowlisted chat) or an explicit id in a group.
 //   tgctl send   <chat> <path> [caption|-]     send a file/photo (- reads caption from stdin)
+//                                              <chat> = `.`, an explicit id, or `@owner` (the human)
 //   tgctl react  <chat> <message_id> <emoji>   add an emoji reaction
 //   tgctl edit   <chat> <message_id> <text|->  edit a message the bot sent (- reads stdin)
 //   tgctl reply  <chat> <text|->               send a text message (- reads stdin)
@@ -79,7 +80,12 @@ const body = (raw: string | undefined, verb: string): string | undefined => {
 // spawned a session called "--help" (and a folder to match) — help must never be a live action.
 // Only argv[3] counts as the help flag, so a `--help` inside a message body still sends as text.
 const HELP: Record<string, string> = {
-  send:    'tg send <chat> <path> [caption|-]   send a file/photo (- reads the caption from stdin)',
+  send:    'tg send <chat> <path> [caption|-]   send a file/photo (- reads the caption from stdin)\n' +
+           '  <chat> is `.` for your own chat/topic, or `@owner` to hand the FILE to the human — the one\n' +
+           '  route a HEADLESS session has, since it has no chat of its own for `.` to resolve to. It\n' +
+           '  arrives in his DM as an attachment captioned with your name, and he can reply to it.\n' +
+           '  Refused when the turn you are in was started by somebody else (a group message from another\n' +
+           '  person): send it to the thread they asked in, or hand him the path with `tg post`.',
   react:   'tg react <chat> <message_id> <emoji>   add an emoji reaction to a message',
   edit:    'tg edit <chat> <message_id> <text|->   edit a message the bot sent (- reads stdin)',
   reply:   'tg reply <chat> <text|->   force a text send (plain replies relay automatically)',
