@@ -24,6 +24,7 @@ export type GatherSession = {
   name: string
   live: boolean
   endedAgo?: string             // rendered age of the ending, for a session that has one
+  endedAt?: number              // the ending itself, for callers that bound by recency
   state: string                 // the CLI's own status word, or 'unknown'
   ownerDirect?: boolean
   asks: RepoState['sessions'][number]['asks']

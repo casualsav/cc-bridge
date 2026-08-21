@@ -20762,6 +20762,7 @@ async function repoRootsFor(real: string): Promise<string[]> {
 // chat lane needed at 21:29Z on 2026-08-21: four files dirty and their writer already gone, which
 // `git status` cannot say and no live roster can either.
 const OWNED_AFTER_END_MS = 24 * 60 * 60 * 1000
+const RECENT_REPORT_MS = 2 * 60 * 60 * 1000
 
 // The conversation an ENDED session wrote: its own recorded id under its account's projects dir. A row
 // with no `agentSessionId` never completed a turn and has no conversation — null, so its files report
@@ -20790,7 +20791,7 @@ async function repoSessionsHere(real: string, now: number): Promise<GatherSessio
     out.push({
       name: t.name,
       live: open,
-      ...(open ? {} : { endedAgo: endAgeLabel(Math.max(0, now - endedAt)) }),
+      ...(open ? {} : { endedAgo: endAgeLabel(Math.max(0, now - endedAt)), endedAt }),
       state: pane ? paneFreedom(pane, configDirs).status ?? 'unknown' : 'unknown',
       ...(ownerDirectSids.has(t.sessionId) ? { ownerDirect: true } : {}),
       asks: open ? openAsksFor(t.sessionId).map(p => ({
@@ -20826,7 +20827,10 @@ async function gatherRepoStateFor(real: string, rec: BriefRecord | null, missing
   return gatherRepoState({
     root: real,
     sessions,
-    lastReports: lastReportsHere(sessions.map(s => s.name), now),
+    // Live sessions, plus the ones that ended in the last two hours: an ended session keeps OWNING its
+    // dirty files for a day, but its report is news only while the lane might still be acting on it —
+    // measured live on 2026-08-21, 24h of ended sessions printed thirteen report lines under one block.
+    lastReports: lastReportsHere(sessions.filter(s => s.live || (s.endedAt != null && now - s.endedAt <= RECENT_REPORT_MS)).map(s => s.name), now),
     capsulePaths: rec ? { total: capsulePathTokens(rec.brief).length, missing } : null,
     git: async args => { try { return (await exec('git', args, { cwd: real, timeout: 5000 })).stdout } catch { return null } },
     now,
