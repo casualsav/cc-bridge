@@ -625,6 +625,26 @@ pane stamps), after snapshotting first. Fails open. Override: `CC_BRIDGE_ALLOW_T
 
 ## Agent bus
 
+**THE REPO PREFLIGHT IS A GATE KEYED BY CONVERSATION, AND IT NEVER REFUSES A RETRY** (v0.5.213–215,
+2026-08-21). The first build kept its "seen" Set in daemon memory and keyed it by session id, so the
+deploy loop's 26 restarts re-dumped the same 4.7 KB capsule into the chat lane 31 times in one day (~37k
+tokens, plus every refused body re-sent), while the one real stale premise in a brief (`handoff/facts.md`,
+deleted 8 days earlier) passed — the preflight returned the capsule without reading the body, and the lane
+learned `for i in 1 2; do tg spawn … && break; done`. Four things are load-bearing: the seen-state is
+`repo-context-seen.json` keyed by the CLI's CONVERSATION id (a restart keeps it, a `/clear` — the event
+that really loses the capsule — resets it); a refusal names only what `brief-contradictions.ts` can prove
+(a path this repo's own history DELETED or RENAMED, naming the commit — a path never in history may be a
+file to create; an `@name` not on the roster), in ≤5 lines; an identical resubmit always passes
+(`override-on-retry`), because the gate says its piece once and the lane decides; and every capsule render
+existence-checks its own paths and a dead one stamps `stale` itself, one re-scout per repo per day. The
+state block under `tg repo` is read fresh every call and cached nowhere — `file-owners.ts` attributes a
+dirty file from transcripts INCLUDING `<uuid>/subagents/` (a Fable lead's own transcript has zero edits).
+Proof: `brief-contradictions.test.ts` (ask 76's body replayed against midi2score's real history),
+`repo-context-gate.test.ts`, `capsule-liveness.test.ts` (the old capsule as fixture), source-bound controls
+that fail against a pre-0.5.213 `daemon.ts`, `bun scripts/context-tax-probe.ts --day <d>` (31 / 100%
+restart-correlated before) and `bun scripts/repo-state-probe.ts <path>`; design and measurements in
+`$(tg shared)/bridgecontext/DESIGN.md`.
+
 **A bus ask is answered with `tg answer`; a final text block is not an answer** — it reaches
 nobody, and the ask envelope says so at the collision point.
 
