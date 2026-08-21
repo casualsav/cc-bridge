@@ -1121,7 +1121,12 @@
      it — the same reason `.mh` above is a <b> and not an <h2>. Unscoped on purpose: every renderer
      that runs md() may emit one, and a quote that styled itself in one row and not another would be
      the drift `.mh`'s comment warns about. */
-  .msg .mq { border-left: 2px solid var(--hint); padding-left: var(--sp-2); color: var(--hint); }
+  /* The bar is the whole treatment, and it takes `currentColor` — the same discipline `.mh` follows
+     with weight and size. A quote painted in `--hint` was measured against the OUTGOING bubble, whose
+     fill is the accent: dark grey on blue, and the quoted half of a report was the hardest line in it
+     to read (screenshot, 2026-08-21). A row's own foreground is the only colour that is correct in
+     every bubble this can land in. */
+  .msg .mq { border-left: 2px solid currentColor; padding-left: var(--sp-2); }
   /* Links come from an agent's own prose. The colour is the page's, and the underline is what says
      it is tappable in a wall of text that is otherwise all one weight. */
   .msg a { color: var(--link); }

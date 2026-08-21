@@ -68,6 +68,11 @@ const m = await p.evaluate(() => {
     mq: e.querySelectorAll(".mq").length,
     mqBorder: (() => { const n = e.querySelector(".mq"); return n ? getComputedStyle(n).borderLeftWidth : null; })(),
     mqMargin: (() => { const n = e.querySelector(".mq"); return n ? getComputedStyle(n).marginTop : null; })(),
+    // The quoted text must be the row's OWN colour. Structure assertions cannot see contrast, and a
+    // quote painted in --hint was dark grey on the outgoing bubble's accent fill — the hardest line
+    // in the report to read, caught only by looking at the screenshot (2026-08-21).
+    mqColor: (() => { const n = e.querySelector(".mq"); return n ? getComputedStyle(n).color : null; })(),
+    ownColor: getComputedStyle(e).color,
     mh: e.querySelectorAll(".mh").length,
   });
   return { rows: q("#dfeed > .msg").length, user: q("#dfeed .msg.user").map(read), reply: q("#dfeed .msg.assistant").map(read) };
@@ -94,6 +99,7 @@ check(!/\*\*|~~|\]\(http/.test(bus.text || ""), `no literal markers survive (${J
 // newline that is already there — the rule `.mh` states and the reason this is a <span>.
 check(parseFloat(bus.mqBorder) >= 1, `the quote wears a left bar (${bus.mqBorder})`);
 check(parseFloat(bus.mqMargin) === 0, `and no block margin to double-space against pre-wrap (${bus.mqMargin})`);
+check(bus.mqColor === bus.ownColor, `the quoted text keeps the row's own colour (${bus.mqColor} vs ${bus.ownColor})`);
 
 // ---- 3. THE CONTROL: what was NOT in scope did not move -------------------------------------------
 check(reply.mh === 0, `the assistant reply painted ${reply.mh} headings (0 — the owner's call, out of scope)`);
