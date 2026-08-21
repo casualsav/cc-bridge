@@ -247,6 +247,10 @@ import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection,
 import { parseLaunch, parseSpawnAddress, parseLaunchArgs, parseLaunchCommand, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { createOwnerReplyRoutes, ownerReplyMarker, type OwnerReplyRoute } from './owner-reply.ts'
+import {
+  createDecisions, planDecisionAnchor, envelopeLines, cardText, tapData, parseTap, decisionBlock,
+  DECISION_TTL_MS, type Decision,
+} from './decisions.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, reopenForceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
@@ -1156,6 +1160,13 @@ function rememberMsgRoute(chat: string, messageId: number | string | undefined, 
 const OWNER_REPLIES_FILE = join(STATE_DIR, 'owner-replies.json')
 const ownerReplyRoutes = createOwnerReplyRoutes(readJsonFile<OwnerReplyRoute[]>(OWNER_REPLIES_FILE, []),
   { save: rows => writeJsonFile(OWNER_REPLIES_FILE, rows) })
+
+// The open proposals a chat lane has put to the owner (`tg decide`, DESIGN.md §6). Persisted for the
+// reason every deadline in this daemon is: the card outlives the process that sent it, and a row lost
+// with a restart is a button on his phone that answers to nothing. Registry and planners: decisions.ts.
+const DECISIONS_FILE = join(STATE_DIR, 'decisions.json')
+const decisions = createDecisions(readJsonFile<Decision[]>(DECISIONS_FILE, []),
+  rows => writeJsonFile(DECISIONS_FILE, rows))
 
 const SESSION_MODELS_FILE = join(STATE_DIR, 'session-models.json')
 const sessionModels = new Map<string, string>(Object.entries(readJsonFile<Record<string, string>>(SESSION_MODELS_FILE, {})))
@@ -8965,6 +8976,50 @@ async function handleCall(
           : `🔎 ${real}: ${why} — scouting now (~1 min). ` + (sid
             ? 'It arrives as an ack; say a line to whoever is waiting so the pause is not read as a hang.'
             : 'Not a bridged session, so nothing can be delivered to you — run `tg repo` again in a minute to read it.'))
+        break
+      }
+      // `tg decide "<title>"` — the lane puts ONE decision to the owner as a card in his DM, and his
+      // tap comes back into the lane as a `<tg decision=N …>` block. DESIGN.md §6; decisions.ts.
+      //
+      // A DM CHAT LANE AND NOTHING ELSE. The card is a question addressed to a person, and the only
+      // session with a person on the other end of it is a lane bound to his chat — a worker topic is
+      // silent by design, which is how @hourlystudy's eight resume relays went unread (v0.5.178).
+      // NOT in AGENT_BUS_VERBS, for the `wait`/`repo` reason: this is a lane and its own owner, not
+      // agent-to-agent messaging, and it should still work with the bus off.
+      case 'decide': {
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane).catch(() => null) : null
+        const chat = fromSid ? chatIdForDmChatSession(fromSid) : null
+        if (!fromSid || !chat) { write({ t: 'result', id, ok: false, text: 'tg decide works only from a DM chat lane — a proposal is a card in his chat, and this session has none' }); return }
+        if (args.list) {
+          const rows = decisions.listOpen(fromSid)
+          text = rows.length
+            ? rows.map(d => `#${d.id} ${d.title} (${d.options.join(' | ')}, ${ageLabel(Date.now() - d.openedAt)})`).join('\n')
+            : '(nothing open — `tg decide "<title>"` opens one)'
+          break
+        }
+        // `--close` is the lane deciding it no longer needs him: the card says so rather than sitting
+        // there tappable, and a choice given here is recorded exactly as a tap's would be, by 'lane'.
+        if (args.close != null) {
+          const d = decisions.byId(Number(args.close))
+          if (!d || d.laneSid !== fromSid) { write({ t: 'result', id, ok: false, text: `no decision #${args.close} of yours — \`tg decide --list\` shows what is open` }); return }
+          if (d.closedAt != null) { write({ t: 'result', id, ok: false, text: `🗳 #${d.id} is already closed${d.choice ? ` — ${d.choice}` : ''}` }); return }
+          const choice = String(args.choice ?? '').replace(/\s+/g, ' ').trim()
+          decisions.close(d.id, { ...(choice ? { choice } : {}), by: 'lane', now: Date.now() })
+          await editDecisionCard(d, choice ? ` — ${choice}` : ' — closed')
+          text = `🗳 #${d.id} closed${choice ? ` — ${choice}` : ''}`
+          break
+        }
+        const title = String(args.title ?? '').replace(/\s+/g, ' ').trim()
+        if (!title) { write({ t: 'result', id, ok: false, text: 'usage: tg decide "<title>" [--options "Approve|Hold"] | tg decide --close <id> [choice] | tg decide --list' }); return }
+        const options = String(args.options ?? '').split('|').map(o => o.trim()).filter(Boolean)
+        const d = decisions.open({ laneSid: fromSid, chat, title, ...(options.length ? { options } : {}), now: Date.now() })
+        const msgId = await sendDecisionCard(d)
+        // The row stays either way — it is what a `--close` and the expiry sweep act on — but a
+        // proposal with no card is not in front of anybody, and saying "opened" would claim it is.
+        if (msgId == null) { write({ t: 'result', id, ok: false, text: `🗳 #${d.id} recorded, but the card could not be sent — nothing is on his screen` }); return }
+        decisions.attachMessage(d.id, msgId)
+        text = `🗳 #${d.id} opened — ${d.title} (${d.options.join(' | ')})`
         break
       }
       // `tg slash <name> "/compact"` — inject a slash command into another session's CLI over the
@@ -16835,6 +16890,31 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // A `tg decide` proposal (decisions.ts): the option he tapped IS the answer, so the card closes on
+  // the tap and the choice goes into the lane as the block a typed reply would have become. THE ONLY
+  // caller of `close(… by: 'tap')` — a sweep or a timer acquiring this is the regression to fear, the
+  // same rule the resume-picker card carries (v0.5.178), and for the same reason: this spends
+  // something of his (a decision, in his name) that nothing unattended may spend for him.
+  if (data.startsWith('dec:')) {
+    if (!(await cbAuth(ctx))) return
+    const tap = parseTap(data)
+    const d = tap ? decisions.byId(tap.id) : null
+    if (!d || d.closedAt != null) {
+      await ctx.answerCallbackQuery({ text: d ? 'That one is already closed.' : 'That proposal is gone.' }).catch(() => {})
+      await ctx.editMessageReplyMarkup().catch(() => {})   // a card nothing answers to must not stay tappable
+      return
+    }
+    const choice = d.options[tap!.optionIndex]
+    if (!choice) { await ctx.answerCallbackQuery({ text: 'That option is no longer on this proposal.' }).catch(() => {}); return }
+    decisions.close(d.id, { choice, by: 'tap', now: Date.now() })
+    await editDecisionCard(d, ` — ✅ ${choice}`)
+    // Answered BEFORE the delivery: a paste onto a busy pane can outlast Telegram's callback window,
+    // and a spinner stuck on his thumb reads as a tap that did nothing.
+    await ctx.answerCallbackQuery({ text: choice }).catch(() => {})
+    await deliverDecision(d, choice)
+    return
+  }
+
   // A HELD spawn (spawn-model-policy.ts): the human's answer decides what starts. Nothing is running
   // yet, so there is no late-tap problem to guard here — the whole `smq:` context-growth machinery
   // below exists because that card moves a session that has been working, and this one doesn't.
@@ -19549,6 +19629,61 @@ async function ownerDirectDispatch(
   return 'delivered'
 }
 
+// ---- `tg decide` — the lane putting ONE decision in front of him ------------------------------
+//
+// One card per open proposal, and the BUTTONS ARE THE OPTIONS (his standing ruling on the resume
+// picker: buttons naming the thing and what the tap costs, nothing else on the card). `cardText`
+// therefore says only what it is — restating the options in the body would be the same fact twice.
+//
+// The tap is the one gesture nobody here can exercise: an agent cannot originate a callback query,
+// so everything below the `cbAuth` line is unit-tested and closed by a single live tap from him.
+async function sendDecisionCard(d: Decision): Promise<number | null> {
+  // Classic send: the card is one short line and a row of buttons, and the rich carrier buys it
+  // nothing (no chevron, no body to collapse). Escaped, because `sendText` takes rendered HTML.
+  const m = await channel.sendText(d.chat, escapeHtml(cardText(d)),
+    { buttons: [d.options.map(o => ({ text: o, data: tapData(d, o) }))] }).catch(e => {
+      process.stderr.write(`daemon: decision #${d.id} card send failed: ${e}\n`)
+      return null
+    })
+  return m ? Number(m.messageId) : null
+}
+
+// Every ending of a proposal writes the SAME card — the tap, `--close`, and the expiry sweep differ
+// only in the suffix. An edit with no `buttons` drops the keyboard (Telegram removes a reply_markup
+// the edit omits), which is what makes a closed card unable to be tapped a second time.
+async function editDecisionCard(d: Decision, suffix: string): Promise<void> {
+  if (d.msgId == null) return
+  await channel.editText({ chatId: d.chat, messageId: String(d.msgId) }, escapeHtml(`${cardText(d)}${suffix}`))
+    .catch(() => {})
+}
+
+// His answer, into the lane, by exactly the route his typed DM message takes (ownerDirectDispatch's
+// paste): one serialized delivery onto the pane's inbound chain. Nothing arms an owner-reply route
+// here and nothing should — the lane's own replies already land in this chat (outboundTargetsFor).
+async function deliverDecision(d: Decision, choice: string): Promise<void> {
+  const name = nameForEndpoint(d.laneSid, busEndpoints())
+  const pane = await paneForSession(d.laneSid).catch(() => null)
+  if (!pane) {
+    logDecision({ family: 'owner', what: `decision ${d.id}`, target: name, pane: null, decision: 'REFUSED', predicate: 'no pane (paneForSession)', hint: 'the tap is recorded; the lane never heard it' })
+    return
+  }
+  const outcome = await busDeliverOutcome(pane, decisionBlock(d, choice)).catch(() => 'failed' as PasteOutcome)
+  if (outcome !== 'landed') {
+    logDecision({ family: 'owner', what: `decision ${d.id}`, target: name, pane, decision: 'REFUSED', predicate: `busDeliverOutcome=${outcome}` })
+    return
+  }
+  process.stderr.write(`daemon: decision #${d.id} → @${name} (${pane}): ${choice}\n`)
+}
+
+// Silence decides nothing: a proposal nobody touched inside its window closes itself and SAYS so on
+// the card, so a stale card on his screen is never mistaken for a question still standing.
+async function sweepDecisions(): Promise<void> {
+  for (const d of decisions.expire(Date.now(), DECISION_TTL_MS)) {
+    await editDecisionCard(d, ' — expired')
+    process.stderr.write(`daemon: decision #${d.id} expired unanswered (@${nameForEndpoint(d.laneSid, busEndpoints())})\n`)
+  }
+}
+
 // ---- `@mimo <prompt>` — the owner addressing a NON-Claude agent -------------------------------
 //
 // The Hermes twin of the dispatch above, and everything that differs about it follows from one fact:
@@ -19980,6 +20115,26 @@ async function handleInbound(
       if ((plan === 'session-reply' || plan === 'address') && repliedToSid && repliedToSid !== lane.sessionId) {
         if (await routeOwnerReply(ctx, chat_id, repliedToSid, content, msgId, inboundFiles)) return
       }
+      // Past the cascade this is ordinary conversation into the lane — and the two facts the bridge
+      // has always KNOWN about it and always dropped. `re=` is the message of its own the lane is
+      // being replied to (msgRoutes already has the mapping; a reply to another session's card was
+      // routed away above, so this can only ever be the lane's own). `decides=` / `open-decisions:`
+      // come from `planDecisionAnchor` — a native reply to a proposal card, or a bare "Approved"
+      // while exactly one is open. HINTS, NEVER A BINDING: nothing is closed here and the lane
+      // decides, which is what makes a wrong guess visible instead of silent (decisions.ts).
+      if (repliedTo != null && repliedToSid === lane.sessionId) params.meta.re = String(repliedTo)
+      const anchor = planDecisionAnchor({
+        text: content,
+        repliedToMsgId: repliedTo ?? null,
+        open: decisions.listOpen(lane.sessionId),
+        byMessage: mid => decisions.byMessage(chat_id, mid),
+      })
+      // Read back off `envelopeLines` rather than off the plan a second time: which plans earn an
+      // attribute is decisions.ts's rule, and restating it here is how the two would come to disagree.
+      const env = envelopeLines(anchor, Date.now())
+      const decides = /decides=(\d+)/.exec(env.attr)?.[1]
+      if (decides) params.meta.decides = decides
+      if (env.line) params.content = `${params.content}\n${env.line}`
     }
   }
 
@@ -22994,6 +23149,10 @@ async function sweepDeadPaneState(): Promise<void> {
   for (const k of seen) if (k.startsWith('%') && !live.has(k)) forgetPane(k)
 }
 setInterval(() => void sweepDeadPaneState(), 5 * 60_000).unref()
+
+// A 24h window read once a minute: the cadence only bounds how long an expired card can still look
+// tappable, and the sweep is a no-op on an empty registry.
+setInterval(() => void sweepDecisions().catch(() => {}), 60_000).unref()
 
 // ── Scratch GC: the CLI's per-session /tmp scratchpads, reaped once nothing live claims them ──────
 //
