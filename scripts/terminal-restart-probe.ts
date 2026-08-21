@@ -48,7 +48,11 @@ const api = async (m: string, body: unknown): Promise<Record<string, unknown>> =
   })).json()) as Record<string, unknown>
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-const logSize = (): number => (existsSync(LOG) ? readFileSync(LOG).length : 0)
+// CHARACTERS, not bytes, and the two must agree: `readFileSync(LOG).length` is a byte count while
+// `.slice(n)` on the decoded string counts characters, so on a log full of em dashes and emoji the
+// mark overshoots and the tail starts PAST the lines being waited for. Pass 1 passed on 2026-08-21
+// and this probe reported FAIL for exactly that reason.
+const logSize = (): number => (existsSync(LOG) ? readFileSync(LOG, 'utf8').length : 0)
 const logSince = (n: number): string => (existsSync(LOG) ? readFileSync(LOG, 'utf8').slice(n) : '')
 
 async function restartAndWatch(mid: number, chat: string, from: number, expectRearm = false, budgetS = 120): Promise<void> {
