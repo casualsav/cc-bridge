@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { test, expect, mock, beforeEach, afterAll } from 'bun:test'
 import * as realProc from './proc.ts'
 
@@ -236,7 +237,9 @@ function fakeSlashPane(opts: { acceptsOnSubmitNo: number | null; occupiedWith?: 
   let submits = 0, pasted = false, cleared = false, typed = ''
   execImpl = async (_cmd, args) => {
     if (args.includes('display-message')) return { stdout: '%1\n' }
-    if (args.includes('set-buffer')) { typed = args[args.length - 1]; return { stdout: '' } }   // what we're about to paste
+    // The payload arrives as a FILE now (loadPasteBuffer), never as a command argument — tmux refuses a
+    // command over ~16 KB. Reading it back here keeps this fake honest about what is about to be pasted.
+    if (args.includes('load-buffer')) { typed = readFileSync(args[args.length - 1], 'utf8'); return { stdout: '' } }
     if (args.includes('paste-buffer')) { pasted = true; return { stdout: '' } }
     if (args.includes('send-keys')) {
       if (args.includes('C-u')) { cleared = true; return { stdout: '' } }

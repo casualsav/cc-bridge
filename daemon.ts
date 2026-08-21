@@ -96,7 +96,7 @@ import { planPasteRecovery, needsSubmitCard, loadPasteStore, savePasteStore } fr
 import {
   capturePane, capturePaneStyled, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
-  submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
+  submitVerified, withPaneDelivery, deliveryLockKey, loadPasteBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
   paneDeliveriesInFlight, drainPaneDeliveries,
   pasteVerified, resubmitVerified, waitForPaneReady, clearInputBox, type PasteOutcome,
 } from './pane-io.ts'
@@ -4645,6 +4645,18 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       if (blocking != null) logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'HELD', predicate: `box occupied ${JSON.stringify(blocking.slice(0, 40))}`, hint: 'the ask stays open and will retry' })
       else process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${why}\n`)
     }
+    // TERMINAL, and the only outcome here that is: tmux would not take these BYTES, so no wait makes
+    // the same message landable and the 15s sweep would retry it until the 60-minute TTL — which is
+    // exactly what a >16 KB block did before `loadPasteBuffer`, while its sender was told the message
+    // was "sitting unsubmitted in their input box" (2026-08-21). Every other failure here is
+    // transient by construction and keeps its retry.
+    if (outcome === 'refused') {
+      logDecision({ key: `ask:${cur.id}`, family: 'bus', what, target: cur.toName, pane, decision: 'DROPPED',
+        predicate: 'the pane refused the payload itself (pasteVerified=refused)', hint: 'not retried — the same bytes cannot land' })
+      removePending(cur.id)
+      void reportRefusedPayload(cur, pane)
+      return 'refused'
+    }
     const ok = outcome === 'landed'
     if (ok) {
       forgetDecision(`ask:${cur.id}`); forgetDecision(`registry:${cur.id}`)   // a later hold of this row is a new story
@@ -4664,7 +4676,12 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // 'not-landed' for the same reason 'not-landed' was split out of 'busy': it is the one of the
     // three the SENDER cannot fix by waiting, and reporting it as ours-sitting-unsubmitted sends
     // them looking for our message in a box that never held it.
-    return ok ? 'delivered' : outcome === 'occupied' ? 'occupied' : 'not-landed'
+    // 'failed' is split OUT of 'not-landed' (owner, 2026-08-21): they are opposite facts about the
+    // target's input box — 'not-landed' means our block IS in it, unsubmitted, and 'failed' means
+    // nothing of ours ever reached it. Reporting the second as the first sent the sender looking for
+    // a message in a box that never held it, which is the same wrong-place error 'occupied' was split
+    // out to fix.
+    return ok ? 'delivered' : outcome === 'occupied' ? 'occupied' : outcome === 'failed' ? 'failed' : 'not-landed'
   } finally { busInFlight.delete(cur.id) }
 }
 
@@ -4812,6 +4829,22 @@ function recordedConversation(pane: string): { kind: 'unwritten' } | { kind: 'fi
   } catch { return { kind: 'unknown' } }
 }
 const paneTranscriptUnwritten = (pane: string): boolean => recordedConversation(pane).kind === 'unwritten'
+
+// The asker's report for the ONE terminal paste failure: the target's pane refused the payload, so
+// the row is off the queue and nothing will retry it. Two surfaces, exactly as the unconfirmed report
+// uses — a card where the asker can see it, and a system block in its own context, because an agent
+// cannot read a card. The wording says what a retry would and would not do: this is the one delivery
+// failure where "re-send it" is wrong advice unless the body changes.
+async function reportRefusedPayload(cur: BusPending, pane: string): Promise<void> {
+  const askerPane = await paneForSession(cur.fromSid).catch(() => null)
+  process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} was REFUSED by ${pane} (${cur.text.length} chars) — off the queue, not retried\n`)
+  for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : [])
+    void channel.sendText(chat,
+      `⚠️ Ask ${cur.id} to <b>${escapeHtml(cur.toName)}</b> could not be pasted into its pane at all — the pane refused the message itself (${cur.text.length} characters), so nothing reached its input box. It is off the queue and nothing will retry it: the same text cannot land. Send a shorter body, or put it in a file under the shared dir and send the path.`,
+      { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', cur.id,
+    `(ask ${cur.id} was NOT delivered to @${cur.toName} — its pane refused the message itself (${cur.text.length} chars), so nothing reached its input box. The row is off the queue and nothing retries it, because the same bytes cannot land. Re-send a shorter body, or write it to a file under \`$(tg shared)\` and send the path.)`))
+}
 
 // The sweep. Promotes a pasted ask to delivered on proof, and REPORTS one that never arrived — it
 // never re-pastes, because nothing can see the CLI's queue and a retry cannot tell "swallowed" from
@@ -5641,6 +5674,11 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
     putPending(cur)
     return outcome === 'occupied'
       ? `!couldn't deliver to @${cur.fromName} — their input box already holds typed text of their own, so nothing was pasted on top of it. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` once that box clears (the ask is kept open)`
+      // The one failure here that re-running does NOT fix: the pane refused the ANSWER ITSELF, so the
+      // same bytes cannot land however many times they are sent. The ask stays open — a SHORTER answer
+      // still delivers, and that is a decision for the answerer, not a sweep.
+      : outcome === 'refused'
+      ? `!couldn't deliver to @${cur.fromName} — their pane refused the answer itself (${body.length} characters), so nothing reached their input box. Re-running \`tg answer ${cur.id}\` with the SAME text cannot land: shorten it, or write it to a file under \`$(tg shared)\` and answer with the path (the ask is kept open)`
       : `!couldn't deliver to @${cur.fromName} — pane gone, or the message is sitting unsubmitted in their input box; ask kept open`
   }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
@@ -9344,13 +9382,10 @@ async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, 
 
 // `! cmd` → the session's bash mode. Bracketed paste can never trigger the TUI's `!` prefix (the
 // paste lands as literal text), so type `!` as a real keystroke first to switch modes, THEN paste
-// the (possibly multiline) command body. It has always used its own tmux buffer rather than the
-// inbound one, because a concurrent inbound paste could clobber a shared buffer mid-flight — and
-// that observation, made here and nowhere else, is the one the delivery buffers were finally named
-// per-pane on (see injectBuffer). It stays a single name only because relayBashCommand now takes the
-// same per-pane delivery lock, which orders it against every other paste on that pane; give it a
-// per-pane name too if it ever gains a caller that runs outside the lock.
-const BANG_BUFFER = 'tg-bang'
+// the (possibly multiline) command body. It used its own tmux buffer rather than the inbound one,
+// because a concurrent inbound paste could clobber a shared buffer mid-flight — the observation the
+// delivery buffers were named per-pane on; `loadPasteBuffer` now names every payload buffer per
+// ATTEMPT, which covers this caller too.
 
 // A pane with an armed, non-empty bash box must not receive ANY injection (see bashModeArmed).
 // Warns once per incident with tap-to-recover buttons; callers just abort their relay.
@@ -9370,8 +9405,10 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
     if (!(await paneAlive(t.paneId))) return false
     await sendKeys(t.paneId, ['!'])
     await waitForSettle(t.paneId, 150, 1500)   // let the TUI switch to shell mode before the paste
-    await exec('tmux', ['set-buffer', '-b', BANG_BUFFER, '--', command], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', BANG_BUFFER, '-t', t.paneId], { timeout: 2000 })
+    // Through a FILE, like every other payload paste (pane-io.ts loadPasteBuffer). A 16 KB shell
+    // command is implausible, but the ceiling is a property of the primitive, not of this caller.
+    const bangBuf = await loadPasteBuffer(t.paneId, command)
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', bangBuf, '-t', t.paneId], { timeout: 2000 })
     await waitForSettle(t.paneId, 200, 4000)
     // Bash mode still armed ("! for shell mode" footer) means the TUI swallowed the Enter and the
     // command idles in the box forever. Same retry dance every other deliverer uses — shared, so
@@ -11548,9 +11585,10 @@ async function typeBriefIntoPane(pane: string, agent: AgentKind, brief: string):
         // function can spend CROSS_ENGINE_COMPOSER_TIMEOUT_MS waiting for a composer to come up, and
         // holding a pane's delivery queue for that long would be a self-inflicted wedge.
         return await withPaneDelivery(await paneDeliveryKey(pane), async () => {
-          const buf = injectBuffer(pane)
-          await exec('tmux', ['set-buffer', '-b', buf, '--', brief], { timeout: 2000 }).catch(() => {})
-          await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', pane], { timeout: 2000 }).catch(() => {})
+          // Through a FILE, like every other payload paste (pane-io.ts loadPasteBuffer): a brief
+          // over ~16 KB cannot be a tmux command argument.
+          const buf = await loadPasteBuffer(pane, brief).catch(() => null)
+          if (buf) await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', pane], { timeout: 2000 }).catch(() => {})
           await waitForSettle(pane, 200, 4000)
           await sendKeys(pane, agentSubmitKeys(agent))
           await waitForSettle(pane, 300, 5000)

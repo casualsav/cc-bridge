@@ -131,7 +131,9 @@ test('TRIPWIRE: every delivery outcome has its own honest line', () => {
     seen.set(t, s)
     if (s !== 'delivered') {
       expect(t, `outcome "${s}" did not land, so its line must not claim delivery`).not.toMatch(/^delivered\b/)
-      expect(t, `outcome "${s}" must be flagged as not-yet-delivered`).toMatch(/QUEUED/)
+      // …and says so in words. It was `/QUEUED/` until 2026-08-21, when 'refused' arrived — the one
+      // outcome that is TERMINAL, and for which "queued" would be the lie this tripwire exists to catch.
+      expect(t, `outcome "${s}" must be flagged as not delivered`).toMatch(/not (yet )?delivered/i)
     }
   }
 })

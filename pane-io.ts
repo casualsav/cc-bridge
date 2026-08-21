@@ -6,6 +6,9 @@
 // be unit-tested and mocked in one place. Higher-level pane logic that depends on daemon
 // state (PaneWatcher, injection guards, the focused-pane registry) stays in daemon.ts and
 // calls down into these primitives.
+import { writeFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { exec, sleep, hashText } from './proc.ts'
 import { logDecision } from './delivery-log.ts'
 
@@ -176,8 +179,7 @@ export async function pasteSlashVerified(paneId: string, text: string, p: {
   const before = await capturePaneStyled(paneId).catch(() => '')
   const occupied = before ? p.boxOccupant(before) : null
   if (occupied) return { ok: false, occupied }
-  const buf = injectBuffer(paneId)
-  await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+  const buf = await loadPasteBuffer(paneId, text)
   await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
   await waitForSettle(paneId, 200, 4000)
   const offered = p.wouldMisfire(await capturePane(paneId).catch(() => ''), text)
@@ -367,13 +369,63 @@ export async function drainPaneDeliveries(budgetMs: number): Promise<boolean> {
 // would read a leading dash as an option.
 export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-z0-9]+/g, '-')}`
 
+// THE PAYLOAD GOES THROUGH A FILE, NEVER AN ARGUMENT — and the buffer name is per ATTEMPT.
+//
+// `set-buffer -b <name> -- <text>` makes the message a tmux COMMAND, and tmux refuses a command over
+// ~16 KB: measured 2026-08-21 against a live pane, 16,312 bytes accepted and 16,343 refused with
+// `command too long`, in 4 ms — a refusal, not a timeout. So every bus message past that size reached
+// no pane at all, was reported to its sender as "sitting unsubmitted in their input box" (the words of
+// a different failure — nothing had reached that box), and was retried every 15s until the 60-minute
+// TTL. `load-buffer` from a file has no such limit: the same pane took 70 KB in 5 ms.
+//
+// The name is unique per attempt because the failure mode of a shared one is the worst kind: a load
+// that fails leaves the PREVIOUS attempt's payload under that name, and the `paste-buffer` that
+// follows sends it into the pane — the wrong message, submitted, with nothing to say so. A unique
+// name cannot exist when its load failed, so that paste can only error. `-d` on the paste deletes a
+// buffer that WAS consumed; this deletes one whose load failed.
+let pasteAttempt = 0
+export async function loadPasteBuffer(paneId: string, text: string): Promise<string> {
+  const buf = `${injectBuffer(paneId)}-${++pasteAttempt}`
+  const file = join(tmpdir(), `${buf}.paste`)
+  try {
+    writeFileSync(file, text, { mode: 0o600 })   // the message is somebody's private text
+    await exec('tmux', ['load-buffer', '-b', buf, file], { timeout: 4000 })
+  } catch (e) {
+    await exec('tmux', ['delete-buffer', '-b', buf], { timeout: 2000 }).catch(() => {})
+    throw e
+  } finally {
+    try { unlinkSync(file) } catch {}   // exactly the file this call made, never a glob
+  }
+  return buf
+}
+
+// Did tmux refuse the PAYLOAD, or did the paste merely not go through? The distinction decides
+// whether a retry is a recovery or a loop.
+//
+// tmux has TWO words for the same ceiling and only one of them says "long" — measured on a real pane
+// (2026-08-21, `scripts/paste-size-probe.ts --legacy`): 16,312 bytes loads, **16,343 fails with
+// `failed to send command`**, and 30,000 fails with `command too long`. The first is the IPC message
+// limit and the second is the command-length check, and a classifier that knew only the second called
+// the boundary case transient — which is the loop this exists to stop. Anything else (a dead pane, an
+// unreachable server, a timeout) IS transient and keeps its retry.
+export function payloadRefused(e: unknown): boolean {
+  const t = `${(e as { stderr?: string })?.stderr ?? ''} ${(e as Error)?.message ?? ''}`
+  return /command too long|failed to send command|argument list too long|E2BIG|too large/i.test(t)
+}
+
 // The paste dance, returning the outcome the boolean threw away. This is `CLAUDE.md` §Outbound's rule
 // carried to the pane: **a failed delivery is either a REFUSAL or an UNKNOWN OUTCOME, and only a
 // refusal may be re-sent.**
 //
 //   'occupied'    — somebody's real text was already in the box. NOTHING was typed, and a retry is
 //                   right only once that text is gone — see the note on the check itself below.
-//   'failed'      — tmux refused the paste. NOTHING reached the input box, so a full retry is right.
+//   'failed'      — the paste did not go through. NOTHING reached the input box, so a full retry is
+//                   right: the cause is the pane or the moment, not the message.
+//   'refused'      — tmux would not take the PAYLOAD itself, so the same bytes can never land and a
+//                   retry is a loop, not a recovery. Split out of 'failed' after a >16 KB block was
+//                   retried every 15s for an hour against a ceiling no wait could clear (2026-08-21).
+//                   `load-buffer` removed the only known instance; the state stays because the next
+//                   ceiling must fail loudly and once, not quietly and forever.
 //   'unsubmitted' — the paste took, the Enter was not confirmed. The text IS in the box. A retry must
 //                   press Enter again and MUST NOT paste again.
 //   'landed'      — pasted and submitted.
@@ -389,7 +441,7 @@ export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-
 // box untouched. Everything after a SUCCESSFUL paste-buffer is 'unsubmitted' on any failure, including
 // a thrown one — the text is in the box whatever went wrong afterwards, and that is the fact the
 // retry needs.
-export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed' | 'occupied'
+export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed' | 'occupied' | 'refused'
 
 // `occupant` is REQUIRED, not optional, and that is the point: a paste into an occupied box
 // concatenates, and the single Enter that follows submits the stranded draft and this message as ONE
@@ -417,11 +469,10 @@ export async function pasteVerified(
   const before = await capturePaneStyled(paneId).catch(() => '')
   const who = before ? occupant(before) : null
   if (who) { onOccupied?.(who); return 'occupied' }
-  const buf = injectBuffer(paneId)
   try {
-    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+    const buf = await loadPasteBuffer(paneId, text)
     await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
-  } catch { return 'failed' }
+  } catch (e) { return payloadRefused(e) ? 'refused' : 'failed' }
   try {
     await waitForSettle(paneId, 200, 4000)
     return (await submitVerified(paneId, keys, landed)) ? 'landed' : 'unsubmitted'

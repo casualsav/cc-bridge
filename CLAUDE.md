@@ -164,6 +164,26 @@ refuses; it never falls back to a guess** (with `dmChat` empty, the owner's DM c
 
 ## Pane delivery
 
+**A PAYLOAD IS LOADED FROM A FILE, NEVER PASSED AS A tmux COMMAND ARGUMENT — the ceiling was ~16 KB**
+(v0.5.189, 2026-08-21). `set-buffer -b <name> -- <text>` makes the message a tmux command, and tmux
+refuses one past its limit: measured on a live pane, 16,312 bytes loads, **16,343 fails with
+`failed to send command`**, 30,000 with `command too long` — two different messages for one ceiling, and
+a classifier that knows only the second calls the boundary case transient. Nothing reached the input box
+past that, while the sender was told the message was "sitting unsubmitted in their input box" (the words
+of the opposite failure) and the sweep retried the impossible paste every 15s until the 60-minute TTL.
+`loadPasteBuffer` (`pane-io.ts`) is the one loader for all five payload sites across three daemons —
+`pasteVerified`, `pasteSlashVerified`, the `!` bash relay, the cross-engine composer brief, and the
+Slack/Discord inbound pastes — and the buffer name is per ATTEMPT, because a shared name means a failed
+load leaves the PREVIOUS payload under it and the paste that follows sends the wrong message into the
+pane, submitted. Two states follow and neither may be folded back: `'failed'` (nothing of ours reached
+the box — transient, keeps its retry) is the opposite fact from `'not-landed'` (our block IS in the box,
+unsubmitted), and `'refused'` is TERMINAL — the row leaves the queue and the asker is told, because
+retrying bytes tmux will not take is a loop, not a recovery. Proof: `paste-size.test.ts` (source-bound
+half must fail against HEAD) and `bun scripts/paste-size-probe.ts --pane <id> [--legacy]`, whose
+`--legacy` run is the control and must fail at 16,343 on the same pane in the same run. The `refused`
+branch has never fired live and should not be able to any more; it stays so the next ceiling fails
+loudly and once (HANDOFF carries it).
+
 **Every write of user content into a pane goes through `withPaneDelivery` (`pane-io.ts`).**
 Delivery is a paste plus a separate Enter, 200ms–30s apart; two deliveries overlapping in that
 window submit as one message (observed live 2026-07-27). `PaneWatcher.withInjection` is a

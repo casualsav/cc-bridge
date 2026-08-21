@@ -970,7 +970,7 @@ export function markNudged(id: number, now: number): void {
 // shape — an unrecognized screen owns the pane). 'no-session' = no live pane for the target sid.
 // ('deferred' — an FYI recorded to ride the next digest instead of pasting — was a state from
 // v0.5.44 until the owner abolished the defer class on 2026-08-13; every ack delivers now.)
-export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
+export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied', 'failed', 'refused'] as const
 export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
@@ -1016,6 +1016,16 @@ export function askResultText(status: AskDelivery, toName: string, id: number, a
     // held it — the same wrong-place error the TTL notice made an hour later.
     case 'occupied':
       return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s input box already holds typed text of their OWN (${q}); nothing was pasted on top of it, and the sweep retries until that box clears`
+    // The THIRD member of that family, split out of 'not-landed' on 2026-08-21: the paste itself did
+    // not go through, so — unlike 'not-landed' — there is nothing of ours in their box to look for.
+    // Transient (a pane that just died, a tmux that was unreachable), so the sweep keeps trying.
+    case 'failed':
+      return `⚠️ QUEUED, NOT DELIVERED — the paste into @${toName}'s pane did not go through (${q}); nothing of ours reached their input box, so there is nothing to look for there. The sweep retries.`
+    // …and the one that is TERMINAL: tmux would not take the message itself, so the same bytes cannot
+    // land however long anyone waits. Retrying that is a loop, not a recovery — a >16 KB block was
+    // retried every 15s for an hour before this existed.
+    case 'refused':
+      return `⚠️ NOT DELIVERED, AND NOT RETRYING — @${toName}'s pane refused the message itself (${q}); nothing reached their input box and the same text cannot land there. It is off the queue: shorten it, or put the body in a file under \`tg shared\` and send the path.`
   }
 }
 
