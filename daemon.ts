@@ -95,9 +95,10 @@ import {
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
-  ageLabel, deterministicRepoBrief, isStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
-  scoutPrompt, validateBrief, resolveBriefRoot, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord, type GitRun,
+  ageLabel, capsulePathTokens, deterministicRepoBrief, isStale, planAutoStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
+  scoutPrompt, validateBrief, resolveBriefRoot, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord, type GitRun, type MissingPath,
 } from './repo-brief.ts'
+import { parseDeletedPaths, planBriefContradictions, removalOf, renderContradictions, type DeletedPath } from './brief-contradictions.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import { PANELS, panelKindOf, interactivePanelOf, parsePanel, redactPanelIdentity, type PanelKind } from './panel-readout.ts'
@@ -8348,8 +8349,8 @@ async function handleCall(
           const targetCwd = getTopicBySession(res.id)?.cwd
           const repoRoot = targetCwd ? await repoBriefRoot(targetCwd) : null
           if (repoRoot) {
-            const preflight = await repoDispatchPreflight(fromSid, repoRoot)
-            if (preflight) { logDecision({ family: 'bus', what: verb, target: nameForEndpoint(res.id, endpoints), pane: null, decision: 'REFUSED', predicate: 'repoDispatchPreflight' }); write({ t: 'result', id, ok: false, text: preflight }); return }
+            const preflight = await repoDispatchPreflight(fromSid, repoRoot, askText, nameForEndpoint(res.id, endpoints), verb)
+            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
           }
         }
         const fromName = nameForEndpoint(fromSid, endpoints)
@@ -8924,8 +8925,9 @@ async function handleCall(
         }
         const head = await gitHeadOf(real)
         if (rec && !args.refresh && !isStale(rec, head, Date.now())) {
-          if (sid) repoContextGate.markSeen(sid, real)
-          text = inheritNote + renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })
+          const missing = checkCapsulePaths(real, rec, await deletedPathsFor(real, head), Date.now())
+          if (sid) repoContextGate.markSeen(await repoContextKey(sid), real, rec.generatedAt)
+          text = inheritNote + renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing })
           break
         }
         const why = !rec ? 'no brief yet' : args.refresh ? 'refresh requested' : rec.stale ? `flagged stale: ${rec.stale}` : 'stale (HEAD moved and the brief is over a fortnight old)'
@@ -9223,8 +9225,8 @@ async function handleCall(
         if (existsSync(dir)) {
           const repoRoot = await repoBriefRoot(dir)
           if (repoRoot) {
-            const preflight = await repoDispatchPreflight(fromSid, repoRoot)
-            if (preflight) { logDecision({ family: 'bus', what: `spawn ${topicName}`, target: topicName, pane: null, decision: 'REFUSED', predicate: `repoDispatchPreflight (${repoRoot})` }); write({ t: 'result', id, ok: false, text: preflight }); return }
+            const preflight = await repoDispatchPreflight(fromSid, repoRoot, String(args.text ?? '').trim(), topicName, `spawn ${topicName}`)
+            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
           }
         }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
@@ -20622,24 +20624,94 @@ async function runScout(real: string): Promise<string> {
   }
 }
 
-const repoContextGate = createRepoContextGate()
+const repoContextGate = createRepoContextGate(join(STATE_DIR, 'repo-context-seen.json'))
 const scoutCoordinator = createScoutCoordinator({
   run: runScout,
   notify: async (sid, note, real) => {
-    repoContextGate.markSeen(sid, real)
+    // The note IS the fresh render, so the conversation has now read exactly this capsule.
+    const rec = loadBriefRecord(STATE_DIR, real)
+    if (rec) repoContextGate.markSeen(await repoContextKey(sid), real, rec.generatedAt)
     await notifyScoutResult(sid, note)
   },
 })
+
+// The conversation this session is IN, from the CLI's own record — never the session id and never the
+// daemon process. A `/clear` mints a new conversation, and that is exactly the event that loses the
+// capsule from the lane's context; a restart and a resume are exactly the events that do not.
+// An unwritten or unreadable record falls back to the session id: the old key, one capsule too many.
+async function repoContextKey(sid: string): Promise<string> {
+  const pane = await paneForSession(sid).catch(() => null)
+  const rec = pane ? recordedConversation(pane) : { kind: 'unknown' as const }
+  return rec.kind === 'file' ? basename(rec.file, '.jsonl') : sid
+}
+
+// Paths this repo REMOVED, cached per HEAD: the evidence half of the deleted-path detector, and the
+// only thing that may spend a re-scout on a dead capsule path. A failed read is an EMPTY map — no
+// evidence, so nothing is flagged — logged once per repo.
+const deletedPathCache = new Map<string, { head: string | null; paths: Map<string, DeletedPath> }>()
+const deletedPathFailures = new Set<string>()
+async function deletedPathsFor(real: string, head: string | null): Promise<Map<string, DeletedPath>> {
+  const hit = deletedPathCache.get(real)
+  if (hit && hit.head === head) return hit.paths
+  let out: string | null = null
+  try { out = (await exec('git', ['log', '--diff-filter=DR', '--name-status', '--format=%h %cs %s', '--since=180.days'], { cwd: real, timeout: 5000 })).stdout }
+  catch (e) {
+    if (!deletedPathFailures.has(real)) { deletedPathFailures.add(real); process.stderr.write(`repo-context: no deleted-path history for ${real} (${(e as Error)?.message ?? e}) — the path detector is off there\n`) }
+  }
+  const paths = parseDeletedPaths(out ?? '')
+  deletedPathCache.set(real, { head, paths })
+  return paths
+}
+
+// A capsule path that no longer exists, with the commit that removed it. Only a path the repo's own
+// HISTORY removed counts: a scout writes prose like "midi2score/web.py + web/", and `web/` is not a
+// dead path, it is a shorthand — flagging it would spend a $0.28 re-scout on a sentence.
+function checkCapsulePaths(real: string, rec: BriefRecord, deleted: Map<string, DeletedPath>, now: number): MissingPath[] {
+  const missing: MissingPath[] = []
+  for (const token of capsulePathTokens(rec.brief)) {
+    const rel = token.replace(/\/+$/, '')
+    if (!rel || existsSync(join(real, rel))) continue
+    const hit = removalOf(deleted, rel)
+    if (hit) missing.push({ path: token, removedIn: hit.sha })
+  }
+  const stamp = planAutoStale(rec, missing, now)
+  if (stamp) {
+    saveBriefRecord(STATE_DIR, { ...rec, ...stamp })
+    process.stderr.write(`repo-context: ${real} capsule flagged stale — ${stamp.stale} (${missing.length} dead path(s))\n`)
+  }
+  return missing
+}
+
 function startScout(real: string, sid: string | null): 'started' | 'running' {
   return scoutCoordinator.start(real, sid)
 }
 
-// The chat lane gets one deterministic, side-effect-free stop before its first dispatch into a repo.
-// That makes context acquisition a daemon invariant instead of an instruction the model can forget.
-// Claiming the presentation lets an immediate retry proceed while the richer model scout runs.
-async function repoDispatchPreflight(fromSid: string, real: string): Promise<string | null> {
-  if (!repoContextGate.claimPresentation(fromSid, real, !!chatIdForDmChatSession(fromSid))) return null
+// The last refused body per (sender, target). NEVER REFUSE A RETRY: the gate says its piece once and
+// the lane decides — a resubmission of the same bytes is the deliberate override, not a second guess.
+// Its absence is what taught the lane `for i in 1 2; do tg spawn … && break; done` (2026-08-21).
+const repoPreflightRetry = new Map<string, string>()
+
+// The chat lane's stop before a dispatch into a repo. TWO questions, one stop: does this body
+// contradict the repo (every dispatch — cheap, and the contradiction is the whole point), and has this
+// CONVERSATION read this capsule (once per capsule per conversation). They are answered together
+// because a lane stopped twice for one body relearns the double-dispatch reflex the retry rule exists
+// to kill. Side-effect-free for everyone else: a worker, an ack and an aside never reach here.
+async function repoDispatchPreflight(fromSid: string, real: string, body: string, target: string, what: string): Promise<string | null> {
+  if (!chatIdForDmChatSession(fromSid)) return null
   const head = await gitHeadOf(real)
+  const deleted = await deletedPathsFor(real, head)
+  const findings = planBriefContradictions({
+    body, repoRoot: real, deletedPaths: deleted,
+    existsInRepo: rel => existsSync(join(real, rel)),
+    endpoints: busEndpoints().map(e => e.name), target,
+  })
+  const retryKey = `${fromSid}\0${target}`
+  const bodyHash = createHash('sha256').update(body).digest('hex')
+  if (repoPreflightRetry.get(retryKey) === bodyHash) {
+    repoPreflightRetry.delete(retryKey)
+    process.stderr.write(`daemon: repoDispatchPreflight:override-on-retry — ${target} into ${real}, body unchanged\n`)
+    return null
+  }
   let rec = loadBriefRecord(STATE_DIR, real)
   if (!rec || isStale(rec, head, Date.now())) {
     const fallback = deterministicRepoBrief(real)
@@ -20655,7 +20727,19 @@ async function repoDispatchPreflight(fromSid: string, real: string): Promise<str
     saveBriefRecord(STATE_DIR, rec)
     startScout(real, fromSid)
   }
-  return `Repository context preflight — no ask/spawn was sent. Review this capsule, correct any assumptions, then retry the command:\n\n${renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })}`
+  const missing = checkCapsulePaths(real, rec, deleted, Date.now())
+  const convKey = await repoContextKey(fromSid)
+  const unseen = !repoContextGate.hasSeen(convKey, real, rec.generatedAt)
+  if (!findings.length && !unseen) { repoPreflightRetry.delete(retryKey); return null }
+  repoPreflightRetry.set(retryKey, bodyHash)
+  const predicate = [...(unseen ? ['capsule-unseen'] : []), ...new Set(findings.map(f => f.kind))]
+    .map(p => `repoDispatchPreflight:${p}`).join(' + ')
+  logDecision({ family: 'bus', what, target, pane: null, decision: 'REFUSED', predicate, hint: real })
+  const marks = findings.length ? renderContradictions(findings) : ''
+  if (!unseen) return marks
+  repoContextGate.markSeen(convKey, real, rec.generatedAt)
+  const capsule = `Repository context preflight — no ask/spawn was sent. Review this capsule, correct any assumptions, then retry the command:\n\n${renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing })}`
+  return marks ? `${marks}\n\n${capsule}` : capsule
 }
 
 // DM typing may only be driven by the pane whose replies actually deliver to the DM. With a chat

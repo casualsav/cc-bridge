@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, type Dirent } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { pathTokensIn } from './brief-contradictions.ts'
 
 // Fields the orchestrator reads to route, brief, and avoid repo-specific assumptions. Architecture is
 // included only as a bounded component/flow map: enough to choose and judge work, never a raw graph.
@@ -159,7 +160,24 @@ function renderFields(b: RepoBrief, skip: Set<keyof RepoBrief>): string {
   return lines.join('\n')
 }
 
-export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string; source?: 'model' | 'deterministic' }
+export type MissingPath = { path: string; removedIn?: string }
+export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string; source?: 'model' | 'deterministic'; missing?: MissingPath[] }
+
+// The path-shaped tokens a capsule names, for the caller that existence-checks them. A capsule is
+// prose with no liveness: `handoff/facts.md` sat in the midi2score capsule for the 8 days after
+// `8144198` deleted it and reached a real brief, because `isStale` can only see schemaVersion, age
+// and HEAD. These five fields are the ones whose items are paths by construction.
+export function capsulePathTokens(b: RepoBrief): string[] {
+  const fields: (keyof RepoBrief)[] = ['docs', 'surfaces', 'components', 'truth', 'conventions']
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const f of fields) {
+    for (const item of b[f] as string[]) {
+      for (const t of pathTokensIn(item, null)) if (!seen.has(t)) { seen.add(t); out.push(t) }
+    }
+  }
+  return out
+}
 
 // What the orchestrator actually reads. Rendered HERE from validated data with fixed labels, so the
 // ceiling is arithmetic rather than a request: the scout's prose never reaches the reader unmediated.
@@ -173,6 +191,8 @@ export function renderBrief(b: RepoBrief, meta: RenderMeta): string {
     body = renderFields(b, skip)
   }
   const notes: string[] = []
+  for (const m of meta.missing ?? []) notes.push(`✗ ${m.path} gone${m.removedIn ? ` (removed in ${m.removedIn})` : ''}`)
+  if (meta.missing?.length) notes.push(`⚠ ${meta.missing.length} capsule path(s) no longer exist — flagged stale`)
   if (skip.size) notes.push(`⚠ over the ${RENDER_CEILING}-char ceiling — dropped: ${[...skip].join(', ')}`)
   if (meta.violations) notes.push(`⚠ ${meta.violations} schema violation(s) corrected by the daemon (fields clipped or dropped)`)
   if (meta.source === 'deterministic') notes.push('⚠ deterministic fallback — architecture/flows require worker verification or a model refresh')
@@ -195,6 +215,7 @@ export type BriefRecord = {
   schemaVersion: number
   source?: 'model' | 'deterministic'
   stale?: string        // a worker's --stale reason; forces the next lookup to re-scout
+  autoStaleAt?: number  // when a dead capsule path last stamped `stale` itself; one re-scout per 24h
   costUsd?: number
 }
 // Bumped when the field list changes, so a release that changes the schema re-scouts rather than
@@ -264,6 +285,17 @@ export function isStale(rec: BriefRecord, head: string | null, now: number): boo
   const aged = now - rec.generatedAt > REFRESH_AFTER_MS
   const moved = head != null && rec.gitHead != null && head !== rec.gitHead
   return aged && moved
+}
+
+// A capsule path the repo removed flags the capsule stale by itself — the existing `--stale` path, so
+// the next lookup re-scouts and `handoff/facts.md` cannot sit dead in a brief for 8 days again. The
+// guard is the cost: a scout is ~$0.28 and 30–40s, so one auto-stamp per repo per day, and never over
+// a `--stale` a worker already wrote (that reason is a person's and outranks this one).
+export const AUTO_STALE_EVERY_MS = 24 * 60 * 60 * 1000
+export function planAutoStale(rec: BriefRecord, missing: MissingPath[], now: number): { stale: string; autoStaleAt: number } | null {
+  if (!missing.length || rec.stale) return null
+  if (rec.autoStaleAt != null && now - rec.autoStaleAt < AUTO_STALE_EVERY_MS) return null
+  return { stale: `auto: ${missing[0]!.path} removed in ${missing[0]!.removedIn}`, autoStaleAt: now }
 }
 
 export function ageLabel(ms: number): string {
