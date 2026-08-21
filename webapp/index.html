@@ -2840,6 +2840,11 @@ function renderAccounts() {
       // A Claude account row removes through the two-step plan/confirm, never the gateway path: the
       // row can stand for several config dirs and the confirm has to name them.
       + (a.id.startsWith('claude:') && a.id !== 'claude:main' ? '<button data-acc-rmclaude="1">Remove</button>' : '')
+      // Log out ENDS THE LOGIN on this box; Remove only unregisters the config dir ("the files on
+      // disk stay"). Different acts, so different buttons — and `main` gets this one, because it is
+      // excluded from Remove for a structural reason that does not carry. Same affordance the
+      // GitHub sheet already renders per account, so the sheet learns no new vocabulary.
+      + (a.id.startsWith('claude:') && a.ready ? '<button data-acc-logout="1">Log out</button>' : '')
       + '</div></div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
@@ -2872,6 +2877,19 @@ function renderAccounts() {
     if (await writeOp('/api/provider-accounts/action', { action: 'remove-claude', name })) {
       PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
     }
+  });
+  // Two-step, like the Claude removal above and for the same reason: the daemon computes what the
+  // log-out ends — whose login, the MCP tokens in the same file, the live sessions on it — and the
+  // app shows THAT text rather than composing its own.
+  body.querySelectorAll('[data-acc-logout]').forEach(b => b.onclick = async () => {
+    const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
+    const p = await writeOp('/api/provider-accounts/action', { action: 'logout-claude-plan', name });
+    if (!p || !confirm(p.text)) return;
+    if (!await writeOp('/api/provider-accounts/action', { action: 'logout-claude', name })) return;
+    // No success bar: SUCCESS CONFIRMATIONS ARE OFF here (the owner, 2026-07-30) and the repaint IS
+    // the outcome — the row's dot goes grey, its meta line reads "Needs attention", and Launch
+    // becomes the way back in.
+    PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
   });
   body.querySelectorAll('[data-acc-launch]').forEach(b => b.onclick = () => {
     const id = b.closest('[data-account]').dataset.account;

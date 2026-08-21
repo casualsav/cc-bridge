@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
+import { exec } from './proc.ts'
 
 export type Account = { name: string; configDir: string }
 
@@ -224,6 +225,57 @@ function healHook(configDir: string, event: string, script: string, command: str
 // Whether an account has completed /login (credentials present in its config dir).
 export function accountLoggedIn(a: Account): boolean {
   return existsSync(join(a.configDir, '.credentials.json'))
+}
+
+// The MCP server logins stored in the SAME file as the Anthropic one — `claude auth logout` deletes
+// the file whole, so these go with it and the confirmation has to name them. Keys are
+// `<serverName>|<hash>`; the name before the pipe is what a reader recognises. Unreadable ⇒ empty,
+// which understates the cost rather than inventing one.
+export function accountMcpLogins(a: Account): string[] {
+  try {
+    const raw = JSON.parse(readFileSync(join(a.configDir, '.credentials.json'), 'utf8')) as { mcpOAuth?: Record<string, unknown> }
+    return [...new Set(Object.keys(raw.mcpOAuth ?? {}).map(k => k.split('|')[0]!).filter(Boolean))]
+  } catch { return [] }
+}
+
+// The env a `claude` subprocess needs from the daemon: the account's config dir, and ~/.local/bin on
+// PATH. A watchdog-respawned daemon's PATH lacks it, and `claude` then resolves to a root-owned
+// npm-global copy or to nothing at all — the same trap `spawnSession`'s launch line documents.
+const claudeEnv = (configDir: string): NodeJS.ProcessEnv => ({
+  ...process.env,
+  CLAUDE_CONFIG_DIR: configDir,
+  PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}`,
+})
+
+// Whose login this is, for the confirmation — `claude auth status` prints JSON. Best effort: the
+// dialog is better with a name in it and correct without one, so every failure is null.
+export async function accountIdentity(a: Account): Promise<string | null> {
+  try {
+    const { stdout } = await exec('claude', ['auth', 'status'], { timeout: 15_000, env: claudeEnv(a.configDir) })
+    const s = JSON.parse(stdout) as { loggedIn?: boolean; email?: string | null; orgName?: string | null; subscriptionType?: string | null }
+    if (!s.loggedIn) return null
+    return s.email || s.orgName || (s.subscriptionType ? `Claude ${s.subscriptionType}` : null)
+  } catch { return null }
+}
+
+// END a login on THIS BOX. `claude auth logout` is the CLI's own subcommand, non-interactive, and it
+// honours CLAUDE_CONFIG_DIR — measured 2026-08-21 on 2.1.238: it deletes `<configDir>/.credentials.json`
+// outright and opens TLS to api.anthropic.com to ask for a server-side revoke first.
+//
+// Shelling out rather than unlinking the file is the whole point: an `rm` does the same local damage
+// (including the mcpOAuth map) while skipping the revoke, so the token would stay valid until it
+// expired. Mirrors `ghLogout` (github.ts), which is the same three lines for the gh CLI.
+//
+// It reported success for a fabricated token, so a zero exit does NOT prove the revoke landed — the
+// caller reports the CLI's own sentence and claims nothing more.
+export async function claudeLogout(a: Account): Promise<{ ok: true; said: string } | { ok: false; error: string }> {
+  try {
+    const { stdout, stderr } = await exec('claude', ['auth', 'logout'], { timeout: 60_000, env: claudeEnv(a.configDir) })
+    return { ok: true, said: (stdout || stderr || '').trim() }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: msg.split('\n')[0]!.slice(0, 190) }
+  }
 }
 
 // Choose an account to fail a usage-limited session over to: the first account (main-first, stable

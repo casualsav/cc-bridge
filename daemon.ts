@@ -82,6 +82,7 @@ import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline, healStopHook, healSessionEndHook,
+  accountMcpLogins, accountIdentity, claudeLogout,
   ACCOUNT_PANE_OPT, MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
@@ -166,6 +167,7 @@ import {
   assertSendable, chunk, coerceReaction, ownerChatId,
 } from './calls.ts'
 import { planOwnerFileSend, type OwnerFileVerdict } from './owner-file.ts'
+import { logoutConfirmText, logoutResultText, type LogoutPlan, type LogoutSession } from './account-logout.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
@@ -15055,6 +15057,27 @@ async function chatLaneAccountNames(): Promise<string[]> {
   return [...names]
 }
 
+// What a log-out of this account would end, computed HERE for both steps and for both surfaces — the
+// app renders the plan and never derives it, the same rule `remove-claude-plan` follows: a confirm
+// naming one set while the action takes another is exactly what a two-step flow exists to prevent.
+//
+// The live sessions are NAMED, never a reason to refuse (the owner's ruling). Refusing while any
+// session is live would leave `main` — the account the coding fleet always occupies — permanently
+// unloggable-out, which is the gap this closes.
+async function planAccountLogout(a: Account): Promise<LogoutPlan> {
+  const sessions: LogoutSession[] = []
+  for (const t of listTopics()) {
+    if (t.closed) continue
+    const pane = await paneForSession(t.sessionId).catch(() => null)
+    if (!pane || !(await paneAlive(pane).catch(() => false))) continue
+    const acct = await paneAccount(pane).catch(() => null)
+    if (acct?.name !== a.name) continue
+    const cap = await capturePane(pane).catch(() => '')
+    sessions.push({ name: t.name || t.sessionId.slice(0, 8), working: !!cap && detectWorking(cap) })
+  }
+  return { account: a.name, configDir: a.configDir, identity: await accountIdentity(a), mcp: accountMcpLogins(a), sessions }
+}
+
 async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
   for (const lane of listDmChatSessions()) {
     const pane = await paneForSession(lane.sessionId).catch(() => null)
@@ -15595,6 +15618,13 @@ function accountsPanelKeyboard(): InlineKeyboard {
       // `main`, deliberately: it is the dir the coding fleet already runs on. A specific profile is
       // still reachable with `tg spawn --account <name>` / `cc-bridge <slot> <name>`.
       kb.text('🚀', `acct:launch:${h.account}`)
+      // 🚪 ends this account's LOGIN on this box — a different act from 🗑, which only unregisters it.
+      // Shown for `main` too, deliberately: main is protected from 🗑 because unregistering it would
+      // break account resolution, and that reasoning does not carry to signing it out.
+      // Acts on the row's REPRESENTATIVE config dir, exactly as 🚀 does; the confirm names that dir,
+      // so a row standing for two profiles cannot silently sign out the one you did not mean.
+      const repAcct = accountByName(h.account!)
+      if (repAcct && accountLoggedIn(repAcct)) kb.text('🚪', `acct:out:${h.account}`)
       // 🗑 unregisters every config dir behind the row, so it goes through a confirm that names them
       // — and `main` is never removable, which also protects any group containing it.
       if (!group.hops.some(x => x.account === 'main')) kb.text('🗑', `acct:rmg:${h.account}`)
@@ -16797,7 +16827,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Accounts sub-panel (settings → 👤 Accounts, or the /account command's buttons).
-  const acctMatch = /^acct:(panel|back|add|rmg:([A-Za-z0-9_-]+)|rmgo:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+))$/.exec(data)
+  const acctMatch = /^acct:(panel|back|add|rmg:([A-Za-z0-9_-]+)|rmgo:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+)|out:([A-Za-z0-9_-]+)|outgo:([A-Za-z0-9_-]+))$/.exec(data)
   if (acctMatch) {
     if (!(await cbAuth(ctx))) return
     if (acctMatch[1] === 'back') {
@@ -16841,6 +16871,35 @@ bot.on('callback_query:data', async ctx => {
       for (const n of doomed) removeAccount(n)
       await ctx.answerCallbackQuery({ text: `Unregistered: ${doomed.join(', ')} (files kept).` }).catch(() => {})
       await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
+      return
+    }
+    // 🚪 Log out of an account. Two steps, like 🗑 above and for the same reason — but a DIFFERENT
+    // act: 🗑 forgets the account, this ends its login on this box. `main` gets the button (it is
+    // excluded from 🗑 only because unregistering it would break account resolution).
+    if (acctMatch[5] || acctMatch[6]) {
+      const name = (acctMatch[5] || acctMatch[6])!
+      const acct = accountByName(name)
+      if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
+      if (!accountLoggedIn(acct)) { await ctx.answerCallbackQuery({ text: `${name} is not logged in.` }).catch(() => {}); return }
+      if (acctMatch[5]) {
+        await ctx.answerCallbackQuery().catch(() => {})
+        const plan = await planAccountLogout(acct)
+        // The body is the SHARED formatter's plain text, escaped here — the envelope stays
+        // bridge-built, so the two surfaces cannot word one irreversible act differently.
+        await showHtmlPanel(ctx, 'edit', `🚪 ${escapeHtml(logoutConfirmText(plan))}`,
+          new InlineKeyboard().text('🚪 Log out', `acct:outgo:${name}`).text('‹ Cancel', 'acct:panel'))
+        return
+      }
+      await ctx.answerCallbackQuery({ text: `Logging out of ${name}…` }).catch(() => {})
+      const plan = await planAccountLogout(acct)
+      const r = await claudeLogout(acct)
+      if (!r.ok) {
+        logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed: ${r.error}` })
+        await showHtmlPanel(ctx, 'edit', `❌ Couldn't log out of <b>${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, accountsPanelKeyboard())
+        return
+      }
+      process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${plan.mcp.length} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+      await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutResultText(name, r.said))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
       return
     }
     if (acctMatch[4]) {
@@ -22405,6 +22464,30 @@ async function webappProviderAccountAction(userId: string, action: Record<string
     if (kind === 'remove-claude-plan') return { ok: true, plan }
     for (const n of doomed) removeAccount(n)
     return { ok: true, removed: doomed, plan }
+  }
+  // 🚪 Log out of a Claude account — the button the owner went looking for and did not find
+  // (2026-08-21). Two steps like the removal above, for the same reason: the confirm must name what
+  // goes, and it must come from HERE.
+  //
+  // NOT the same act as Remove, and keeping them apart is what makes either explainable: Remove
+  // forgets the account (registry entry only, "the files on disk stay"), this ENDS ITS LOGIN on this
+  // box. `main` gets it — it is excluded from Remove because unregistering it would break account
+  // resolution, and that reasoning does not carry: logging main out breaks nothing structural, its
+  // row stays, and withholding the button here would recreate the exact gap being closed.
+  if (kind === 'logout-claude-plan' || kind === 'logout-claude') {
+    const name = String(action.name ?? '')
+    const acct = accountByName(name)
+    if (!acct) return { error: 'unknown account' }
+    if (!accountLoggedIn(acct)) return { error: `${name} is not logged in` }
+    const plan = await planAccountLogout(acct)
+    if (kind === 'logout-claude-plan') return { ok: true, plan, text: logoutConfirmText(plan) }
+    const r = await claudeLogout(acct)
+    if (!r.ok) {
+      logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed: ${r.error}` })
+      return { error: r.error }
+    }
+    process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${plan.mcp.length} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+    return { ok: true, text: logoutResultText(name, r.said) }
   }
   // 🔑 Replace a gateway's API key. WRITE-ONLY on purpose: the existing key is never rendered, never
   // returned, and never round-trips through the browser — the field takes a new one or nothing. The

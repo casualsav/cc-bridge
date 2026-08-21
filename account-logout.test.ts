@@ -1,0 +1,171 @@
+// "One more thing I need the CC bridge session to do is give me a way to log out of accounts" —
+// the owner, 2026-08-21, having gone looking on his other box: "I noticed there was no log out
+// button in the accounts."
+//
+// There genuinely was none, and slightly worse than that: `Remove` on an account row unregisters
+// the config dir and its own confirm says the files stay, `claude:main` had no row action at all,
+// and `slash-policy.ts` refuses `/logout` in a pane. So no surface could end a login. The GitHub
+// sheet two sheets over has rendered `Make active | Log out` per account for months, which is
+// probably why the absence read as an omission rather than a design.
+//
+// Measured against claude 2.1.238 on throwaway config dirs holding fabricated tokens (design note:
+// $(tg shared)/bridgeaccounts-2026-08-21/DESIGN.md): `claude auth logout` is non-interactive,
+// honours CLAUDE_CONFIG_DIR, DELETES the whole `<configDir>/.credentials.json` — taking the
+// `mcpOAuth` map with it — backs up only `.claude.json`, and opens TLS to api.anthropic.com before
+// reporting success. It reported success for a fabricated token too, so a zero exit does not prove
+// the revoke landed. Every one of those facts is a line in the confirmation below.
+import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { logoutConfirmText, logoutResultText, type LogoutPlan } from './account-logout.ts'
+
+const SRC = process.env.CC_BRIDGE_SRC_DIR || import.meta.dir
+const daemon = readFileSync(join(SRC, 'daemon.ts'), 'utf8')
+const page = readFileSync(join(import.meta.dir, 'webapp', 'index.html'), 'utf8')
+const accounts = readFileSync(join(import.meta.dir, 'accounts.ts'), 'utf8')
+
+const P = (over: Partial<LogoutPlan> = {}): LogoutPlan => ({
+  account: 'main', configDir: '/home/ubuntu/.claude', identity: 'suchag@gmail.com',
+  mcp: [], sessions: [], ...over,
+})
+
+// ---- The confirmation says the three measured things, and promises nothing else ----------------
+
+test('it names WHOSE login, and the box — never anything about another machine', () => {
+  const t = logoutConfirmText(P())
+  expect(t).toContain('suchag@gmail.com (main)')
+  expect(t).toContain('THIS BOX')
+  expect(t).toContain('/home/ubuntu/.claude')
+  expect(t).toContain('Your other machines are not affected.')
+  // The one thing the evidence cannot support is a claim about the other box's session, so the
+  // wording must never reach for it (his ruling — the note leaves the revoke's scope open).
+  expect(t).not.toMatch(/all your machines|everywhere|other box will/i)
+})
+
+test('no identity ⇒ the account name alone, never an empty parenthetical', () => {
+  const t = logoutConfirmText(P({ identity: null }))
+  expect(t).toContain('Log out main?')
+  expect(t).not.toContain('()')
+})
+
+test('THE MCP COST IS STATED, not avoided — the file carries both kinds of login', () => {
+  const t = logoutConfirmText(P({ mcp: ['github', 'Claude_Code_Remote'] }))
+  expect(t).toContain('2 MCP server logins')
+  expect(t).toContain('github, Claude_Code_Remote')
+  // A surgical strip of `claudeAiOauth` would keep them — and skip the server-side revoke, which is
+  // a worse logout. Stating the cost is the ruling (A6).
+  expect(logoutConfirmText(P({ mcp: ['github'] }))).toContain('1 MCP server login')
+  expect(logoutConfirmText(P())).not.toMatch(/MCP/)
+})
+
+test('THERE IS NO UNDO, and the line is unconditional', () => {
+  for (const p of [P(), P({ mcp: ['github'] }), P({ sessions: [{ name: 'weather', working: true }] })]) {
+    expect(logoutConfirmText(p)).toContain('No undo')
+  }
+})
+
+// ---- Live sessions: WARN, never refuse ---------------------------------------------------------
+
+test('live sessions are NAMED, and mid-turn is a label rather than a veto', () => {
+  const t = logoutConfirmText(P({ sessions: [{ name: 'weather', working: true }, { name: 'wayback', working: false }] }))
+  expect(t).toContain('2 live sessions on this account')
+  expect(t).toContain('@weather (working)')
+  expect(t).toContain('@wayback')
+  expect(t).not.toContain('@wayback (working)')
+  // The consequence, which is the reason to name them at all: nothing breaks now, it breaks hours
+  // later at the next token refresh, and that failure is otherwise unattributable.
+  expect(t).toContain('They keep running until their current token expires')
+  // One session is not "they" — the sentence agrees with its count.
+  const single = logoutConfirmText(P({ sessions: [{ name: 'weather', working: true }] }))
+  expect(single).toContain('1 live session on this account: @weather (working). It keeps running until its current token expires, then fails until you sign in again.')
+})
+
+test('a long fleet is summarised, never silently cut', () => {
+  const many = ['a', 'b', 'c', 'd', 'e', 'f'].map(name => ({ name, working: false }))
+  const t = logoutConfirmText(P({ sessions: many }))
+  expect(t).toContain('6 live sessions')
+  expect(t).toContain('+2 more')
+})
+
+test('no live sessions ⇒ no sentence about them', () => {
+  expect(logoutConfirmText(P())).not.toMatch(/live session/)
+})
+
+test('the result reports the CLI\'s own words and points at the way back in', () => {
+  const r = logoutResultText('main', 'Successfully logged out from your Anthropic account.')
+  expect(r).toContain('Logged out of main on this box')
+  // The CLI's own terminator is trimmed, not doubled — "account.." reached the first live run.
+  expect(r).toContain('— Successfully logged out from your Anthropic account. Launch it again')
+  expect(r).not.toContain('..')
+  expect(r).toContain('Launch it again to sign in')
+  // A CLI that says nothing still produces a clean sentence.
+  expect(logoutResultText('main', '')).not.toContain('—')
+})
+
+// ---- The runner: the CLI subcommand, not an unlink ----------------------------------------------
+
+test('claudeLogout shells out to `claude auth logout` with the account\'s config dir', () => {
+  const body = accounts.slice(accounts.indexOf('export async function claudeLogout('))
+  expect(body).toContain("exec('claude', ['auth', 'logout']")
+  expect(body).toContain('claudeEnv(a.configDir)')
+  // An `rm` would do the same local damage (mcpOAuth included) and skip the server-side revoke,
+  // leaving the token valid until it expired. That is the whole reason this is a subprocess.
+  expect(body).not.toMatch(/unlinkSync|rmSync/)
+  // ~/.local/bin on PATH, or a watchdog-respawned daemon resolves `claude` to the wrong copy.
+  expect(accounts).toContain("PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}`")
+})
+
+// ---- Call sites ---------------------------------------------------------------------------------
+
+test('CALL SITE: the mini app has a two-step action and shows the DAEMON\'s text', () => {
+  const at = daemon.indexOf("if (kind === 'logout-claude-plan' || kind === 'logout-claude')")
+  expect(at).toBeGreaterThan(0)
+  const body = daemon.slice(at, daemon.indexOf("if (kind === 'key')", at))
+  expect(body).toContain('await planAccountLogout(acct)')
+  expect(body).toContain('text: logoutConfirmText(plan)')
+  expect(body).toContain('await claudeLogout(acct)')
+  expect(body).toContain('logDecision({')            // a failed logout leaves a line
+  // A logged-out account cannot be logged out again — the plan would name nothing.
+  expect(body).toContain('if (!accountLoggedIn(acct))')
+})
+
+test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
+  // Its exclusion from Remove is structural (unregistering breaks account resolution) and does not
+  // carry to ending a login. Withholding it would recreate the exact gap he reported.
+  // Anchored on the row builder's start, not on the button name — a slice that begins AT the needle
+  // cuts off the condition being asserted, which is the whole subject here.
+  const rowStart = page.indexOf("'<div class=\"acctactions\">")
+  expect(rowStart).toBeGreaterThan(0)
+  const rowJs = page.slice(rowStart, page.indexOf("+ '</div></div>';", rowStart))
+  expect(rowJs).toContain("a.id !== 'claude:main' ? '<button data-acc-rmclaude")   // Remove: main excluded
+  expect(rowJs).toContain("a.ready ? '<button data-acc-logout")                    // Log out: main included
+  expect(rowJs).not.toContain("a.id !== 'claude:main' ? '<button data-acc-logout")
+  const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
+  const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))   // the function's own body, never a magic length
+  expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
+  expect(kb).toContain('accountLoggedIn(repAcct)')
+  // …while 🗑 keeps its main guard, so the two acts stay distinguishable.
+  expect(kb).toContain("if (!group.hops.some(x => x.account === 'main')) kb.text('🗑'")
+})
+
+test('CALL SITE: the Telegram row action is the same two steps and the same words', () => {
+  expect(daemon).toContain('|out:([A-Za-z0-9_-]+)|outgo:([A-Za-z0-9_-]+))$/')
+  const at = daemon.indexOf('if (acctMatch[5] || acctMatch[6]) {')
+  expect(at).toBeGreaterThan(0)
+  const body = daemon.slice(at, at + 2200)
+  expect(body).toContain('logoutConfirmText(plan)')     // one formatter, both surfaces
+  expect(body).toContain('logoutResultText(name, r.said)')
+  expect(body).toContain("`acct:outgo:${name}`")
+  expect(body).toContain('await claudeLogout(acct)')
+})
+
+test('CALL SITE: the app repaints instead of raising a success bar', () => {
+  const at = page.indexOf("body.querySelectorAll('[data-acc-logout]')")
+  const body = page.slice(at, at + 900)
+  expect(body).toContain("action: 'logout-claude-plan'")
+  expect(body).toContain('confirm(p.text)')            // the daemon's text, never the app's own
+  expect(body).toContain("action: 'logout-claude'")
+  expect(body).toContain('renderAccounts()')
+  // SUCCESS CONFIRMATIONS ARE OFF (the owner, 2026-07-30) — the repaint is the outcome.
+  expect(body).not.toMatch(/showOk\(|toast\(/)
+})
