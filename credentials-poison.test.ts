@@ -72,9 +72,17 @@ test('CONTROL: the pre-fix reducer DOES elect the 2099 fixture (the incident, re
 })
 
 test('a 2099 token is never elected, and every real dir survives the tick byte-identical', () => {
-  const main = dir('main', tok(Date.now() + 7 * H, 'REAL'))
-  const scout = dir('scout', tok(Date.now() + 7 * H, 'REAL'))
-  const chat = dir('chat', tok(Date.now() + 7 * H, 'REAL'))
+  // ONE timestamp for all three, because the assertion below is that a correct tick does not touch
+  // dirs that ALREADY AGREE — and three separate `Date.now()` calls only agree when the three land in
+  // the same millisecond. Under a full-suite run they sometimes do not, the tick then legitimately
+  // propagates the freshest of the three, and the hash-asserted-untouched check failed on correct
+  // code (twice on 2026-08-21; reproduced deterministically by skewing these three by 1ms, which
+  // fails this test and no other). The already-agree premise is now structural, not a race won.
+  // Same `const at` the expiry-window test below has always used.
+  const at = Date.now() + 7 * H
+  const main = dir('main', tok(at, 'REAL'))
+  const scout = dir('scout', tok(at, 'REAL'))
+  const chat = dir('chat', tok(at, 'REAL'))
   const lotest = dir('lotest', FAKE)
   const before = [main, scout, chat].map(hash)
 
