@@ -1264,7 +1264,20 @@ const STAR_SPINNER_RE = /^\s{0,2}\*\s+\S[^\n(]*(?:…|\.\.\.)\s*\(/
 export function detectWorking(paneText: string): boolean {
   const tail = paneLines(paneText).slice(-WORKING_TAIL)
   if (/esc to interrupt/i.test(tail.join('\n'))) return true
-  return tail.some(l => WORKING_TIMER_RE.test(l) || (STAR_SPINNER_RE.test(l) && parseOneWorkingLine(l)?.elapsed != null))
+  // BOTH regexes are a PRE-FILTER, and the shape test is the predicate. The timer branch used to be
+  // tested bare, so a glyph plus any parenthesised duration read as a live turn — and `●` is Claude
+  // Code's own REPLY bullet. @dailyadapter's own sentence, "● Probe running in the background (20 s
+  // cadence, 02:46→04:05 UTC …", held pane %254 busy for 4h15m at an empty ❯ while the CLI's session
+  // record said idle throughout and every bus delivery was HELD behind `planAskGate=busy`. It is
+  // SELF-SUSTAINING: an idle pane re-parses the same scrollback line every sweep, and the gate
+  // refuses the very deliveries that would push it out of the tail.
+  //
+  // Same class as the 2026-08-11 permanent-working-row incident, whose fix hardened the ellipsis test
+  // inside parseOneWorkingLine and left this branch reading the glyph alone. `elapsed`, not merely a
+  // non-null parse: a reply line that happens to END in an ellipsis parses fine, and "(30s timeout)"
+  // is not an elapsed FIELD — ELAPSED_FIELD_RE is what separates a spinner's clock from a duration
+  // somebody wrote a sentence about.
+  return tail.some(l => (WORKING_TIMER_RE.test(l) || STAR_SPINNER_RE.test(l)) && parseOneWorkingLine(l)?.elapsed != null)
 }
 
 // The SAME line detectWorking tests for, read instead of counted: "✻ Hyperspacing… (1m 55s · ↓ 5.6k

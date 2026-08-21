@@ -1,0 +1,32 @@
+  receipt timestamps from hourly_metar_raw and the journal firings; a charter test
+  still green; no rate-limit errors in the journal. Three honesty lines. Grey-off
+  (a)/(b) still with the owner.
+  · chat→dailyadapter: /status
+  · chat→dailyadapter: /context
+  💬 chat→dailyadapter: Heads-up (no reply needed): the bridge mis-read your idle
+  prompt as "working" for the last 4 hours …
+  </tg>
+  <tg @chat ask=113>Status check from the owner: is all of your work committed and
+  pushed? Is anything waiting on him (a decision, a login, an approval)? Answer in a
+  few lines: current unit and its state, last commit hash + pushed or not, anything
+  uncommitted and why, whether the deploy worktrees have it checked out, and exactly
+  what (if anything) you need from him.</tg>
+  ↩ reply with: tg answer 113 "<summary>"  ·  a final text block does NOT reach the
+  asker
+
+● Answer status check
+  ⎿  $ tg answer 113 - <<'EOF'
+     Everything is committed and pushed; working tree clean; both deploy worktrees are
+     on the same commit. One thing waits on him and it is a ruling, not a login.
+     **Current unit and state.** The grey-hourly-chip lane. Shipped and deployed:
+     `--metar-only` on `hourly_capture` plu…
+
+✻ Newspapering… (26s · ↓ 1.3k tokens)
+
+───────────────────────────────────────────────────────────────────────────────────────
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────
+  ubuntu@cloud:/home/ubuntu/projects/weather (main) | casualsav/weather | Opus 5 (1M…
+  ε:high | ✻think | ctx ██░░░░░░░░ 23%/1000k | ↑228.1k ↓1.0k | $17.6523 | ⧗8h04m | a…
+  5h ███░░░░░░░░░░░ 18% ↻2h39m | 7d ███████████░░░ 82% ↻55h29m
+  ⏵⏵ bypass permissions on · 1 monitor · ← for agents

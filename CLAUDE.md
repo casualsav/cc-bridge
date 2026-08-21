@@ -293,6 +293,24 @@ open, and the bigger half:** the sweep that caused it counts that picker as a su
 (`paneBackUp`, deliberate) and cards "♻️ Auto-refreshed 2 idle sessions", while `relayResumeChoice`
 puts the only lever in a worker topic's silent card — six of them went unread. HANDOFF carries it.
 
+**A SPINNER GLYPH PLUS A DURATION IS NOT A TURN — every reader of that line asks `parseOneWorkingLine`
+for its SHAPE, never the glyph** (v0.5.206, 2026-08-21). `●` is Claude Code's own REPLY bullet and sits
+in `SPINNER_GLYPHS`, so @dailyadapter's own sentence — "● Probe running in the background (20 s cadence,
+02:46→04:05 UTC …" — satisfied `WORKING_TIMER_RE`, which `detectWorking` tested BARE while the star
+branch had been gated all along. Pane %254 read busy for 4h15m at an empty ❯ with every bus delivery
+`HELD` and the CLI's own session record saying `idle` throughout. It is SELF-SUSTAINING, which is why
+hours and not one sweep: an idle pane re-parses the same scrollback line every poll, and the gate
+refuses the deliveries that would push it out of the tail. Same class as the 2026-08-11 permanent
+working row, whose fix hardened the ellipsis test INSIDE the parser and left this caller reading the
+glyph. The gate is `elapsed`, not a non-null parse — a reply ending in an ellipsis parses fine, and
+`(30s timeout)` is not an elapsed FIELD. `STUCK_CHROME`'s copy is the named exclusion (it STRIPS rows
+before hashing a signature, so over-matching can only coarsen one). **Still open, named not closed:**
+`plugins/claude-{slack,discord}/prompt.ts` carry the same bare test in an older fork of this file with
+no parser to gate on. Proof: `working-timer-shape.test.ts` (the incident line byte-exact from
+@dailyadapter's transcript, with the pre-fix predicate asserted TRUE on it as the known-answer control)
+and `bun scripts/working-shape-probe.ts --watch N`, which runs both predicates over every live pane —
+132 pane-samples, zero disagreement, which is the false-negative half no unit test can answer.
+
 **A submit is verified against the input BOX, never against the pane's mood.** `submitLanded`
 (`prompt.ts`) reads `inputBoxOccupant` on a STYLED capture and nothing else — text still in the box is
 a delivery that did not take, whatever the spinner says. It short-circuited on `detectWorking ||

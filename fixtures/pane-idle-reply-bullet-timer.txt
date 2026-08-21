@@ -1,0 +1,10 @@
+● Probe running in the background (20 s cadence, 02:46→04:05 UTC — covers both the
+  02:5x and 03:5x settling cycles); I'll report recoverable minutes when it finishes.
+
+───────────────────────────────────────────────────────────────────────────────────────
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────
+  ubuntu@cloud:/home/ubuntu/projects/weather (main) | casualsav/weather | Opus 5 (1M…
+  ε:high | ✻think | ctx ██░░░░░░░░ 23%/1000k | ↑230.3k ↓46 | $18.0370 | ⧗8h05m | api…
+  5h ███░░░░░░░░░░░ 19% ↻2h39m | 7d ███████████░░░ 82% ↻55h29m
+  ⏵⏵ bypass permissions on · 1 monitor · ← for agents
