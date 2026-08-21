@@ -276,6 +276,27 @@ Even on `'allow'` the buy/provision variants are declined — approving credit *
 a *purchase*. Fixture: `CREDIT_CONSENT` in `prompt.test.ts`; the branch has never fired live
 (HANDOFF.md carries the capture that would close it).
 
+**A CARD WITH A DEADLINE IS PERSISTED, OR THE DEADLINE IS A PROPERTY OF THE PROCESS AND NOT OF THE
+CARD** (v0.5.189, 2026-08-21). The live `/terminal` card's whole life was a 5s interval and a 30s
+timeout in daemon memory, against 149 daemon restarts in nine days — eight inside one hour — so a
+restart in the window left the message frozen on its last frame and in the chat forever. It presents
+as a REVERT, which is what made it expensive: frozen-live and the pre-v0.2.71 static card are the same
+artefact, and the owner reported it as a feature going backwards (the glyph settles it — `📺` is the
+live card frozen, `📜 Recent terminal` has not shipped since 2026-06-23). Three things are load-bearing
+and each reads as a tidy-up: the record goes down BEFORE the timers go up (a record with no timer
+recovers; a timer with no record cannot), `until` is an ABSOLUTE deadline so a recovery finishes the
+original window instead of starting a new one, and the persisted row is cleared only once the message
+is really gone. Two adjacent silences closed with it: `scheduleDelete` was fire-and-forget — the row
+dropped before the await, the call ending in `.catch(() => {})` — so one failed API call orphaned the
+card with no retry and no line; and `scheduleEdit` had no `seed`, so a quiet pane's every tick re-sent
+identical text for Telegram to reject as `message is not modified`. The command had been ENTIRELY
+silent in daemon.log (a nine-day grep for `terminal` returned 130 hits, all of them the
+`CLAUDE_CODE_TERMINAL_MCP_TOOLS` env string in launch lines), which is why the first diagnosis could
+only be a ranked hypothesis. `/keys` already had this record (`keys-card.ts`) — this is that pattern,
+applied where it was missing. Proof: `terminal-lifecycle.test.ts` (source-bound; six call-site tests
+must fail against a pre-0.5.189 `daemon.ts`) and `bun scripts/terminal-card-probe.ts <dir>`, whose four
+scheduler claims must all FAIL against the deployed build.
+
 **Retiring a slash command means a stub handler, never a deleted one** — an unregistered command
 falls through to the unknown-command relay, which types it into the live TUI where the palette
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
@@ -324,6 +345,20 @@ shipped and must FAIL there, wedging its own probe session), unit + source-bound
 call-site tests).
 
 ## Outbound
+
+**A RULE ABOUT HOW A MESSAGE LOOKS IS SETTLED FOR BOTH SURFACES OR FOR NEITHER** (v0.5.189,
+2026-08-21). Telegram renders through `mdToTelegramHtml` (`markdown.ts`), the mini app through
+`md()` / `mdReport()` (`webapp/index.html`), and the same literal `**bold**` reached his phone twice —
+Telegram 2026-08-10 (ce74b70, v0.5.45) and the mini-app feed 2026-08-19 (2f7a6fa, v0.5.166). The first
+fix DID enumerate; its grep token was `<details><summary>`, which structurally cannot reach a webapp
+file, so the second surface was never in scope. That is coverage-by-enumeration failing one level up,
+and the reason it reads to the owner as a fixed thing regressing. `bun scripts/render-parity.ts` runs
+every construct `mdToTelegramHtml` has through the SHIPPED page's own functions (lifted by source
+extraction — a restated copy passes while the served file is wrong); `render-parity.test.ts` holds
+mdReport()'s gaps at **0** and md()'s at a NAMED list, today headings and bullets, both the owner's
+call (cc25c02) and neither an accident. Browser half: `scripts/webapp-measure/mdwiden.mjs`, whose §3
+control — an assistant reply's headings and his own message's asterisks unmoved — must pass on both
+the new and the pre-change page.
 
 **A pane's transcript is resolved by IDENTITY — the stamp, then the CLI's own
 `<config dir>/sessions/<pid>.json` record — and the newest-file-in-the-project-dir guess is the last

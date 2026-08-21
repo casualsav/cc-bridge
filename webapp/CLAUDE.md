@@ -441,6 +441,19 @@ give it.
 
 ## Bubbles
 
+- **A RULE ABOUT HOW A MESSAGE LOOKS IS SETTLED FOR BOTH SURFACES OR FOR NEITHER.** Telegram renders
+  through `mdToTelegramHtml` (`markdown.ts`); the mini app renders through `md()` / `mdReport()` here.
+  The same literal `**bold**` reached the owner's phone twice — Telegram 2026-08-10 (ce74b70, v0.5.45)
+  and this feed 2026-08-19 (2f7a6fa, v0.5.166) — because the first fix's enumeration was scoped to one
+  surface (its grep token was `<details><summary>`, which cannot reach this file). A change to either
+  renderer is unfinished until `bun scripts/render-parity.ts` reports **0 mdReport() gaps**;
+  `render-parity.test.ts` holds that at zero and holds `md()`'s gaps to a NAMED list — today headings
+  and bullets, both the owner's own call (cc25c02) and neither of them an accident.
+- **Every new inline rule excludes `<` from its character class**, for the reason the code span does
+  (below), and a rule that emits an ATTRIBUTE carries two more guards: an `https?:` allowlist and a
+  `"` escape. `esc()` covers `&<>` and not quotes, so a link's URL is the one place an agent's prose
+  can reach out of the text and into the markup.
+
 - **A photo FILLS its bubble** (Telegram's own treatment, measured). The 11px is cancelled by
   NEGATIVE MARGINS on the image, never a smaller padding on `.msg` — the text case keeps every
   number it was tuned with. With no caption the picture bleeds through the bottom and the time

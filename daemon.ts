@@ -173,7 +173,11 @@ import { planStartupAdoption, shouldSwitchToDiscoveredPane } from './pane-discov
 import { createScoutCoordinator } from './scout-coordinator.ts'
 import { createRepoContextGate } from './repo-context-gate.ts'
 import { createMsgTracker } from './msg-tracker.ts'
-import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
+import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView, flushPendingDeletes } from './edit-scheduler.ts'
+import {
+  TERMINAL_REFRESH_MS, TERMINAL_LIFETIME_MS, terminalCardHtml, liveCardKey, armLiveCard, disarmLiveCard,
+  planCardRecovery, type LiveCardRecord, type LiveCardStore,
+} from './terminal-card.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
 import { formatChannelBlock, appBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
@@ -13109,25 +13113,87 @@ bot.command('diff', async ctx => {
 // message, self-edits every 5s so you watch recent activity in place, then deletes itself after
 // 30s so it never clutters the chat. Read-only: each tick just re-captures the pane scrollback.
 // Re-running it in the same chat/topic replaces the previous live card (no timer pile-up).
-const TERMINAL_REFRESH_MS = 5_000
-const TERMINAL_LIFETIME_MS = 30_000
+// Constants, the renderer and the store are in terminal-card.ts; the timers and the pane read are here.
+// PERSISTED (terminal-cards.json): a restart inside the 30s window used to kill the interval and the
+// timeout and leave the message frozen in the chat forever — the owner's 2026-08-21 report, and the
+// shape of the pre-v0.2.71 static card, which is why it read to him as a revert.
+const TERMINAL_CARD_FILE = join(STATE_DIR, 'terminal-cards.json')
 type LiveTerminal = { interval: ReturnType<typeof setInterval>; timeout: ReturnType<typeof setTimeout>; chat: string; mid: number }
 const liveTerminals = new Map<string, LiveTerminal>()
 
-// Render the pane tail as ONE Telegram message (a live card must be a single editable message,
-// never a multi-chunk send): trim the oldest lines until it fits, hard-capping a pathological
-// mega-line by keeping its newest chars.
-function terminalCard(body: string, limit: number): string {
-  const render = (text: string, count: number) =>
-    `📺 <b>Live terminal · ${count} lines</b>\n` +
-    `<pre><code class="language-javascript">${escapeHtml(text)}</code></pre>`
-  let lines = body.split('\n')
-  for (;;) {
-    const html = render(lines.join('\n'), lines.length)
-    if (html.length <= limit) return html
-    if (lines.length > 1) { lines = lines.slice(1); continue }
-    return render('…' + lines[0].slice(-Math.max(0, limit - 200)), 1)
-  }
+function loadLiveCards(): LiveCardStore {
+  const raw = readJsonFile<unknown>(TERMINAL_CARD_FILE, {})
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as LiveCardStore : {}
+}
+const saveLiveCards = (v: LiveCardStore): void => { try { writeJsonFile(TERMINAL_CARD_FILE, v) } catch {} }
+const forgetLiveCard = (chat: string, msgId: number): void =>
+  saveLiveCards(disarmLiveCard(loadLiveCards(), liveCardKey(chat, msgId)))
+
+// One line per lifecycle point. Before this the whole command was SILENT — the handler logged
+// nothing, the send logged nothing, and both the edit's and the delete's failures were swallowed, so
+// `grep -ai terminal daemon.log` over nine days returned 130 hits and every one of them was the
+// CLAUDE_CODE_TERMINAL_MCP_TOOLS env string in a launch line. That silence is why the owner's report
+// could only be answered with a ranked hypothesis. Successes trace here; refusals and failures go
+// through logDecision, which is the vocabulary for a delivery that did not happen.
+function terminalTrace(what: string, chat: string, mid: number, detail?: string): void {
+  process.stderr.write(`daemon: terminal card ${chat}:${mid} ${what}${detail ? ` — ${detail}` : ''}\n`)
+}
+
+// The delete, retried by the scheduler until the message is gone. The persisted record is cleared
+// ONLY once the card really is out of the chat (or we have given up), because the record is the one
+// thing that can finish the job after a restart — dropping it early is how the card became immortal.
+function deleteTerminalCard(rec: { chat: string; msgId: number }, why: string): void {
+  cancelEdit(rec.chat, rec.msgId)
+  scheduleDelete(rec.chat, rec.msgId, o => {
+    if (o.ok) {
+      forgetLiveCard(rec.chat, rec.msgId)
+      terminalTrace('deleted', rec.chat, rec.msgId, `${why}${o.already ? ' (already gone)' : ''}`)
+      return
+    }
+    logDecision({
+      key: o.giveUp ? null : `terminal-delete:${rec.chat}:${rec.msgId}`,
+      family: 'ctl', what: `live terminal card ${rec.msgId}`, target: rec.chat, pane: null,
+      decision: 'DROPPED', predicate: `deleteMessage failed — ${o.error}`,
+      hint: o.giveUp ? 'gave up; the card stays in the chat' : 'retrying on the next tick',
+    })
+    if (o.giveUp) forgetLiveCard(rec.chat, rec.msgId)
+  })
+}
+
+// The two timers, for a card this process just sent OR one it inherited from the process before it.
+// One function for both so a recovered card cannot drift from a fresh one; `until` is absolute, so a
+// recovery finishes the ORIGINAL window rather than starting a new one.
+function armTerminalCard(rec: LiveCardRecord, seed?: string): void {
+  const key = `${rec.chat}:${rec.thread ?? ''}`
+  const interval = setInterval(() => {
+    scheduleEdit({
+      chat: rec.chat, mid: rec.msgId, thread: rec.thread, source: 'terminal', seed,
+      render: async () => {
+        const b = await captureTerminalTail(rec.pane, rec.lines)
+        if (b === null) throw new Error('pane unreadable')
+        return terminalCardHtml(b, rec.limit)
+      },
+    })
+  }, TERMINAL_REFRESH_MS)
+  interval.unref?.()
+  const timeout = setTimeout(() => {
+    clearInterval(interval)
+    if (liveTerminals.get(key)?.mid === rec.msgId) liveTerminals.delete(key)
+    deleteTerminalCard(rec, 'window closed')
+  }, Math.max(0, rec.until - Date.now()))
+  timeout.unref?.()
+  liveTerminals.set(key, { interval, timeout, chat: rec.chat, mid: rec.msgId })
+}
+
+// Startup: whatever was armed when we went down. Past its window → delete now; still inside it →
+// rebuild both timers for the remainder. There is no third answer, because a record only exists
+// while a card is in a chat with nobody left to remove it.
+async function recoverStrandedTerminalCards(): Promise<void> {
+  const { expired, live } = planCardRecovery(loadLiveCards(), Date.now())
+  if (!expired.length && !live.length) return
+  process.stderr.write(`daemon: terminal card(s) orphaned by a restart — ${expired.length} past their window (deleting now), ${live.length} still live (re-arming)\n`)
+  for (const rec of expired) deleteTerminalCard(rec, 'orphaned by a restart, window already closed')
+  for (const rec of live) { armTerminalCard(rec); terminalTrace('re-armed', rec.chat, rec.msgId, `${Math.round((rec.until - Date.now()) / 1000)}s left`) }
 }
 
 bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept out of the command menu)
@@ -13139,15 +13205,9 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
   const chat = String(ctx.chat!.id)
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
 
-  // Re-capture the pane tail; null = couldn't read the pane, '' = nothing recent.
-  const capture = async (): Promise<string | null> => {
-    try {
-      const raw = (await exec('tmux', ['capture-pane', '-p', '-t', t.paneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
-      return cleanPaneTail(raw, n)
-    } catch { return null }
-  }
-
-  const first = await capture()
+  // The pane tail, cleaned; null = couldn't read the pane, '' = nothing recent. Same reader the mini
+  // app's card and its 5s tick use, so the two surfaces cannot show different amounts of pane.
+  const first = await captureTerminalTail(t.paneId, n)
   if (first === null) { await ctx.reply('Could not read the session pane.'); return }
   if (!first) { await ctx.reply('Nothing recent to show.'); return }
 
@@ -13156,30 +13216,29 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
   const prev = liveTerminals.get(key)
   if (prev) {
     clearInterval(prev.interval); clearTimeout(prev.timeout); liveTerminals.delete(key)
-    cancelEdit(prev.chat, prev.mid); scheduleDelete(prev.chat, prev.mid)
+    deleteTerminalCard({ chat: prev.chat, msgId: prev.mid }, 'replaced by a newer card')
   }
 
-  const sent = await channel.sendText(chat, terminalCard(first, limit), t.replyThread ? { threadId: String(t.replyThread) } : {}).catch(() => null)
+  const html = terminalCardHtml(first, limit)
+  const sent = await channel.sendText(chat, html, t.replyThread ? { threadId: String(t.replyThread) } : {}).catch(() => null)
   if (!sent) return
   const mid = Number(sent.messageId)
   touchActiveView(chat, t.replyThread)   // the user just opened this card here → mark it the active view
 
+  // The record goes down BEFORE the timers go up: a crash between the two must leave a record with no
+  // timer (which the next startup finishes) and never a timer with no record (which nothing can).
+  const rec: LiveCardRecord = {
+    chat, msgId: mid, ...(t.replyThread ? { thread: t.replyThread } : {}),
+    pane: t.paneId, lines: n, limit, until: Date.now() + TERMINAL_LIFETIME_MS,
+  }
+  saveLiveCards(armLiveCard(loadLiveCards(), rec, Date.now()))
+  terminalTrace('sent', chat, mid, `pane ${t.paneId}, ${n} lines, ${TERMINAL_LIFETIME_MS / 1000}s window`)
+
   // Refresh every 5s by registering the latest desired state with the edit scheduler — it coalesces,
   // paces, and prioritizes this card against every other live card. The tmux capture runs at flush
-  // time, so frames dropped under load cost nothing; the card rides the active view (interactive tier).
-  const interval = setInterval(() => {
-    scheduleEdit({ chat, mid, thread: t.replyThread, source: 'terminal',
-      render: async () => { const b = await capture(); if (b === null) throw new Error('pane unreadable'); return terminalCard(b, limit) } })
-  }, TERMINAL_REFRESH_MS)
-
-  // Vanish after 30s (the delete is paced through the scheduler too).
-  const timeout = setTimeout(() => {
-    clearInterval(interval)
-    if (liveTerminals.get(key)?.mid === mid) liveTerminals.delete(key)
-    cancelEdit(chat, mid); scheduleDelete(chat, mid)
-  }, TERMINAL_LIFETIME_MS)
-
-  liveTerminals.set(key, { interval, timeout, chat, mid })
+  // time, so frames dropped under load cost nothing; the card rides the active view (interactive
+  // tier). `html` seeds the slot so a quiet pane's first tick is a no-op rather than a rejected edit.
+  armTerminalCard(rec, html)
 })
 
 // ---- Usage-limit reset reminder ----
@@ -21288,6 +21347,11 @@ function shutdown(): void {
     // the message had landed. Provenance is what covers the case where it genuinely had not.
     if (!drained) process.stderr.write('daemon: shutdown drain budget expired — a delivery still held its pane; if it had not submitted yet, the provenance record recovers it on restart\n')
     else if (inFlight > 0) process.stderr.write('daemon: shutdown — pane deliveries drained\n')
+    // A queued delete is a message already in a chat with nobody left to remove it. The persisted
+    // record covers it on the next startup either way; spending the last seconds here means the card
+    // usually vanishes now instead of a minute from now. Bounded inside the same hard-exit budget.
+    const flushed = await flushPendingDeletes(2_000).catch(() => 0)
+    if (flushed) process.stderr.write(`daemon: shutdown — flushed ${flushed} pending message delete(s)\n`)
     await Promise.resolve(bot.stop()).catch(() => {})
     clearTimeout(hardExit)
     process.exit(0)
@@ -21670,6 +21734,10 @@ setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // A /keys preview armed when we went down: its 30s timer died with the process, so the screenshot
 // would sit in the chat forever. One sweep at startup is the whole recovery — see armKeysPreview.
 setTimeout(() => void revertStrandedKeysPreviews().catch(() => {}), 4_000).unref()
+// Same window, same reason: a card whose 30s window died with the last process. Deliberately AFTER
+// the socket is up rather than inline with startup — a delete is outbound work, and a card that
+// outlived its window by four more seconds is not the failure this exists to fix.
+setTimeout(() => void recoverStrandedTerminalCards().catch(() => {}), 4_000).unref()
 // R-4: prove or report every pasted-but-unconfirmed ask. Runs on the bus's own cadence, so a
 // confirmation normally lands within seconds of the target's next turn boundary.
 setInterval(() => void confirmInjections().catch(() => {}), 15_000).unref()
