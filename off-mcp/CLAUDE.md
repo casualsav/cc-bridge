@@ -101,7 +101,9 @@ never payloads (`--ref path` hands a file over by path).
 - `tg watch <name>` — ONE notification when it next reaches a prompt (also fires if it ends
   first, or after an hour still busy). End your turn and be woken — never hold a polling loop.
 - `tg repo <path>` — the routing brief for a work repo. Found it wrong while working there?
-  `tg repo <path> --stale "why"`; never hand-edit a brief.
+  `tg repo <path> --stale "why"`; never hand-edit a brief. A single claim in the brief you found
+  FALSE goes to `tg repo <path> --correct "claim → truth"` in the same turn as your report — it is
+  kept beside the brief, survives every refresh, and reaches the next scout.
 - `tg slash @name "/cmd"` — run a slash command in its CLI. Mid-turn is a refusal, never a
   queue; don't hand-roll a wait for idle (you lose that race) — `--at-next-prompt` parks it and
   exactly one notice comes back. Panel commands are refused here; read them instead with
