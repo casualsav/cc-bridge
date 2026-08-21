@@ -337,7 +337,10 @@ test("an AGENT's spawn is untouched — its founding message is still an ask it 
   expect(body('async function ownerLaunchSpawn(', 2000)).toContain('ownerDirect: true')
   // `from=owner` in the ask block is what makes the new session write its answer for a person. Passing
   // the flag to the ROW and forgetting the BLOCK gives correctly-routed prose written for an agent.
-  expect(spawn).toContain('formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)')
+  // The body is `pasteMsg` since the repo capsule rides the founding ask by reference (repo-brief.ts's
+  // `foundingPrefix`): the PANE gets the bridge's four routing fields above the caller's words, and
+  // every surface that echoes the message keeps `firstMsg` — `founding-prefix.test.ts` holds that line.
+  expect(spawn).toContain('formatAskBlock(fromName, p.id, pasteMsg, foundingRefs, false, !!spec.ownerDirect)')
 })
 
 test('an owner-direct answer with a DM surface is a card to him, never a paste into the lane', () => {

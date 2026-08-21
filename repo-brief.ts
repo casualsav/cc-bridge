@@ -161,7 +161,33 @@ function renderFields(b: RepoBrief, skip: Set<keyof RepoBrief>): string {
 }
 
 export type MissingPath = { path: string; removedIn?: string }
-export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string; source?: 'model' | 'deterministic'; missing?: MissingPath[] }
+export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string; source?: 'model' | 'deterministic'; missing?: MissingPath[]; corrections?: Correction[]; now?: number }
+
+// A worker's correction to a scouted claim. It lives BESIDE the brief rather than in it: the scouted
+// fields stay the scout's (the "never hand-edit a brief" ruling), and a refresh that overwrote a
+// worker's correction would teach the worker not to bother filing one. Today the loop runs through a
+// human — a worker wrote its correction in prose twice on 2026-08-21 and the chat lane transcribed it
+// into a `--stale` by hand.
+export type Correction = { text: string; by: string; at: number }
+// Eight is the render budget (8 × 200 chars fits under the ceiling beside a full capsule) and also
+// the point past which a capsule is not being corrected, it is wrong — the next scout integrates them.
+export const MAX_CORRECTIONS = 8
+export const CORRECTION_CHARS = 200
+
+/** Append one correction, newest last, clipped and capped. */
+export function addCorrection(prev: Correction[] | undefined, text: string, by: string, at: number): Correction[] {
+  return [...(prev ?? []), { text: clip(text.replace(/\s+/g, ' ').trim(), CORRECTION_CHARS), by, at }].slice(-MAX_CORRECTIONS)
+}
+
+/**
+ * A REFRESH NEVER DROPS A CORRECTION. Every path that writes a new record over an old one — a model
+ * scout, the deterministic fallback, the preflight's cold write — goes through here, because a
+ * correction survives exactly as long as the least careful of them.
+ */
+export function carryCorrections(prev: BriefRecord | null, next: BriefRecord): BriefRecord {
+  const carried = (prev?.corrections ?? []).slice(-MAX_CORRECTIONS)
+  return carried.length ? { ...next, corrections: carried } : next
+}
 
 // The path-shaped tokens a capsule names, for the caller that existence-checks them. A capsule is
 // prose with no liveness: `handoff/facts.md` sat in the midi2score capsule for the 8 days after
@@ -183,10 +209,15 @@ export function capsulePathTokens(b: RepoBrief): string[] {
 // ceiling is arithmetic rather than a request: the scout's prose never reaches the reader unmediated.
 export function renderBrief(b: RepoBrief, meta: RenderMeta): string {
   const head = `📁 ${meta.path}${meta.age ? `  (scouted ${meta.age})` : ''}`
+  // Corrections are counted INTO the shed arithmetic, not added after it: they are a worker's
+  // measured claim about this repo and outrank any optional field the scout wrote.
+  const now = meta.now ?? Date.now()
+  const corrections = (meta.corrections ?? []).map(c => `  · ${c.text} (@${c.by}, ${ageLabel(Math.max(0, now - c.at))})`)
+  const extra = corrections.length ? corrections.join('\n').length + 'corrections:\n'.length : 0
   const skip = new Set<keyof RepoBrief>()
   let body = renderFields(b, skip)
   for (const k of SHED_ORDER) {
-    if (head.length + body.length + 2 <= RENDER_CEILING) break
+    if (head.length + body.length + extra + 2 <= RENDER_CEILING) break
     skip.add(k)
     body = renderFields(b, skip)
   }
@@ -197,7 +228,7 @@ export function renderBrief(b: RepoBrief, meta: RenderMeta): string {
   if (meta.violations) notes.push(`⚠ ${meta.violations} schema violation(s) corrected by the daemon (fields clipped or dropped)`)
   if (meta.source === 'deterministic') notes.push('⚠ deterministic fallback — architecture/flows require worker verification or a model refresh')
   if (meta.stale) notes.push(`⚠ flagged stale: ${meta.stale}`)
-  const out = [head, body, ...notes].filter(Boolean).join('\n')
+  const out = [head, body, ...(corrections.length ? ['corrections:', ...corrections] : []), ...notes].filter(Boolean).join('\n')
   // Backstop: a shed of every optional field still leaves what/verify/surfaces, which are capped at
   // 200+120+600 — so this slice is unreachable by arithmetic and exists only so the ceiling is a
   // guarantee rather than an expectation.
@@ -216,6 +247,7 @@ export type BriefRecord = {
   source?: 'model' | 'deterministic'
   stale?: string        // a worker's --stale reason; forces the next lookup to re-scout
   autoStaleAt?: number  // when a dead capsule path last stamped `stale` itself; one re-scout per 24h
+  corrections?: Correction[]   // workers' `--correct` claims; carried across every refresh (carryCorrections)
   costUsd?: number
 }
 // Bumped when the field list changes, so a release that changes the schema re-scouts rather than
@@ -394,7 +426,7 @@ export function deterministicRepoBrief(real: string): Validation {
 // The scout's brief. Caps are stated even though they are enforced downstream: a scout that aims at
 // the cap needs fewer clips, and the clip is lossy. Stating them is optimisation, not enforcement —
 // the pilot measured exactly how much of an enforcement they are (none).
-export function scoutPrompt(): string {
+export function scoutPrompt(corrections: Correction[] = []): string {
   const cap = (k: keyof RepoBrief) => {
     const c = CAPS[k]
     return c.items ? `array of <=${c.items} strings, each <=${c.chars} chars` : `string, <=${c.chars} chars`
@@ -438,5 +470,27 @@ code-quality opinions, TODOs, git history, or current work state. Distill only a
 that change routing, briefing, verification, or risk. The rendered result is hard-capped; prioritize.
 
 Say "unknown" rather than inferring. A confident wrong answer here misroutes real work.
-Output the JSON fence and nothing else.`
+Output the JSON fence and nothing else.${corrections.length ? `
+
+Corrections recorded by workers since the last scout — integrate them, do not contradict them:
+${corrections.map(c => `  · ${c.text} (@${c.by})`).join('\n')}` : ''}`
+}
+
+/**
+ * The four fields a session must carry into its FIRST turn, prepended to a founding message — the
+ * routing facts a briefing session otherwise restates by hand (the plugin-cache rule 9 times, the
+ * shared-checkout rule 10, `bun run deploy` 15, in one day's bus bodies). By REFERENCE: the rest of
+ * the capsule stays one `tg repo` away, so this costs ~150 tokens per spawn rather than 4,700.
+ *
+ * Empty when the capsule has none of them — a header over nothing is worse than no header.
+ */
+export function foundingPrefix(b: RepoBrief, root: string): string {
+  const lines = ([
+    ['do not assume', b.assumptions.join(' · ')],
+    ['hazards', b.hazards.join(' · ')],
+    ['conventions', b.conventions.join(' · ')],
+    ['verify', b.verify],
+  ] as const).filter(([, v]) => v.trim()).map(([k, v]) => `· ${k}: ${v}`)
+  if (!lines.length) return ''
+  return [`Repo brief (bridge-added — \`tg repo ${root}\` for the rest):`, ...lines, '', ''].join('\n')
 }

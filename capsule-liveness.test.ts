@@ -92,7 +92,9 @@ test('a worker\'s own --stale outranks this one, and a live capsule stamps nothi
 
 test('the capsule check is what tg repo and the preflight both render from', () => {
   const calls = [...daemon.matchAll(/checkCapsulePaths\(real, rec,/g)]
-  expect(calls).toHaveLength(2)                                    // the definition takes (real, rec, deleted, now)
+  // Three renders: `tg repo`'s capsule, `tg repo --state`'s block (which carries the same dead-path
+  // line, and is the read the lane takes most often), and the preflight.
+  expect(calls).toHaveLength(3)                                    // the definition takes (real, rec, deleted, now)
   expect(daemon).toContain('const missing = checkCapsulePaths(real, rec, await deletedPathsFor(real, head), Date.now())')
   expect(daemon).toContain('const stamp = planAutoStale(rec, missing, now)')
   expect(daemon).toContain('saveBriefRecord(STATE_DIR, { ...rec, ...stamp })')

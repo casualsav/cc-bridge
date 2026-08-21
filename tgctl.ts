@@ -155,11 +155,17 @@ const HELP: Record<string, string> = {
            '  prompt? it fires now. Ends first? it fires saying so. Still busy after an hour? it fires saying that.\n' +
            '  No options, and no foreground loop to hold open: that loop, hand-rolled off the roster, is what this\n' +
            '  replaces (one matched "idle" on the wrong row and reported a busy session as free).',
-  repo:    'tg repo <path> [--refresh] [--stale "why"] | tg repo --list\n' +
+  repo:    'tg repo <path> [--state|--brief] [--refresh] [--stale "why"] [--correct "claim → truth"] | tg repo --list\n' +
            '  the routing brief for a work repo: what it IS, which directory a request means, what proves\n' +
            '  work there, what makes a task not routine. Cached per box — a repo already scouted answers\n' +
            '  instantly; a new one is discovered in the background (~1 min) and arrives as an ack.\n' +
-           '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.',
+           '  Under it, read fresh every call: HEAD and how far it is from its upstream, which files are\n' +
+           '  dirty and WHICH SESSION is holding them, who is live in there and on what ask, the handoff\n' +
+           '  headings, the last report each session filed. --state prints only that block (the cheap read\n' +
+           '  before a brief, and it never scouts); --brief only the capsule.\n' +
+           '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.\n' +
+           '  --correct "claim → truth" records ONE claim you found false: it stays under the brief, survives\n' +
+           '  every refresh, and goes into the next scout — cheaper than a re-scout and it does not lose the rest.',
   roster:  'tg roster [--all]   who is live on the bus (--all also lists hidden endpoints, e.g. dev stubs)',
   providers:'tg providers   configured provider account ids, active/inactive state, role defaults, and models for tg spawn --account/--model',
   history: 'tg history [n]   recent agent-bus activity',
@@ -210,7 +216,7 @@ if (BUS.has(cmd)) {
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|account|model|effort|stale|why)$/.exec(rest[i]!)
+    const f = /^--(dir|account|model|effort|stale|correct|why)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
@@ -223,6 +229,8 @@ if (BUS.has(cmd)) {
     else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
     else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh
     else if (rest[i] === '--list') { flags.list = true }                   // repo: what this box already knows
+    else if (rest[i] === '--state') { flags.state = true }                 // repo: only the live block — never scouts
+    else if (rest[i] === '--brief') { flags.brief = true }                 // repo: only the scouted capsule
     else if (rest[i] === '--all') { flags.all = true }                     // roster: include hidden endpoints
     else if (rest[i] === '--at-next-prompt') { flags.atNextPrompt = true } // slash: hold it until the target is free
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }

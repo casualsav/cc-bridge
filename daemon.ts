@@ -52,7 +52,7 @@ import { gatherGcEvidence, planScratchGc, applyScratchGc, scratchRoot, fmtBytes 
 import { readTmpPressure, planTmpPressure, planSpawnGate, PRESSURE_STEPS, SPAWN_REFUSE_PCT, type PressureReading, type PressureState } from './tmp-pressure.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
-import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
+import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, endAgeLabel, timeOf, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -61,7 +61,7 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // `turnAnchorIsBus` joins it for a simpler reason than the shape argument above: its only caller is
 // the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
 // rollout for a dispatcher to read.
-import { lastTurnApiError, turnAnchorIsBus, turnAnchorText, transcriptStartedAt, CONVO_CAP } from './transcript.ts'
+import { lastTurnApiError, turnAnchorIsBus, turnAnchorText, transcriptStartedAt, projectDirName, CONVO_CAP } from './transcript.ts'
 import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound, recapUuids } from './outbound-feed.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -94,10 +94,12 @@ import {
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
-  ageLabel, capsulePathTokens, deterministicRepoBrief, isStale, planAutoStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
+  addCorrection, ageLabel, capsulePathTokens, carryCorrections, deterministicRepoBrief, foundingPrefix, isStale, planAutoStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord, MAX_CORRECTIONS,
   scoutPrompt, validateBrief, resolveBriefRoot, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord, type GitRun, type MissingPath,
 } from './repo-brief.ts'
 import { parseDeletedPaths, planBriefContradictions, removalOf, renderContradictions, type DeletedPath } from './brief-contradictions.ts'
+import { extractHonestyLines, renderRepoState, type RepoState } from './repo-state.ts'
+import { gatherRepoState, loadOwnerStore, ownerStorePath, type GatherSession } from './repo-state-gather.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import { PANELS, panelKindOf, interactivePanelOf, parsePanel, redactPanelIdentity, type PanelKind } from './panel-readout.ts'
@@ -8908,7 +8910,11 @@ async function handleCall(
           break
         }
         const raw = String(args.path ?? '').trim()
-        if (!raw) { write({ t: 'result', id, ok: false, text: 'usage: tg repo <path> [--refresh] [--stale "why"] | tg repo --list' }); return }
+        if (!raw) { write({ t: 'result', id, ok: false, text: 'usage: tg repo <path> [--state|--brief] [--refresh] [--stale "why"] [--correct "claim → truth"] | tg repo --list' }); return }
+        // Which halves to print. Neither flag (the first-contact read) and both flags mean the same
+        // thing — capsule then state — so a caller that passes both gets the default rather than a
+        // refusal about a combination that has an obvious meaning.
+        const halves = { brief: !args.state || !!args.brief, state: !args.brief || !!args.state }
         let real: string
         try { real = realpathSync(raw) } catch { write({ t: 'result', id, ok: false, text: `no such path: ${raw}` }); return }
         try { if (!statSync(real).isDirectory()) throw new Error('not a directory') }
@@ -8935,11 +8941,34 @@ async function handleCall(
           text = `flagged stale — the next \`tg repo ${real}\` re-scouts`
           break
         }
+        // `--correct` is the OTHER half of the loop back, and the one a worker can use without
+        // spending a $0.28 re-scout: one claim it found false, kept beside the scouted fields (never
+        // in them — the never-hand-edit ruling), carried across every refresh, and read into the next
+        // scout's prompt. `--stale` stays for "the whole capsule is wrong".
+        if (args.correct != null) {
+          const claim = String(args.correct).replace(/\s+/g, ' ').trim()
+          if (!claim) { write({ t: 'result', id, ok: false, text: 'usage: tg repo <path> --correct "claim → truth"' }); return }
+          if (!rec) { write({ t: 'result', id, ok: false, text: `no brief for ${real} yet — nothing to correct` }); return }
+          const by = sid ? nameForEndpoint(sid, busEndpoints()) : 'cli'
+          const corrections = addCorrection(rec.corrections, claim, by, Date.now())
+          saveBriefRecord(STATE_DIR, { ...rec, corrections })
+          text = `correction recorded (${corrections.length} of ${MAX_CORRECTIONS}) — it renders under the brief and goes into the next scout's prompt`
+          break
+        }
         const head = await gitHeadOf(real)
+        // `--state` alone NEVER scouts and never marks the capsule seen: it is the ~25-line read the
+        // lane takes before each later brief, and a repo with no capsule still has a tree.
+        if (halves.state && !halves.brief) {
+          const missing = rec ? checkCapsulePaths(real, rec, await deletedPathsFor(real, head), Date.now()) : []
+          text = inheritNote + renderRepoState(await gatherRepoStateFor(real, rec, missing), Date.now())
+          break
+        }
         if (rec && !args.refresh && !isStale(rec, head, Date.now())) {
           const missing = checkCapsulePaths(real, rec, await deletedPathsFor(real, head), Date.now())
           if (sid) repoContextGate.markSeen(await repoContextKey(sid), real, rec.generatedAt)
-          text = inheritNote + renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing })
+          const capsule = renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing, corrections: rec.corrections, now: Date.now() })
+          const state = halves.state ? renderRepoState(await gatherRepoStateFor(real, rec, missing), Date.now()) : ''
+          text = inheritNote + [capsule, state].filter(Boolean).join('\n\n')
           break
         }
         const why = !rec ? 'no brief yet' : args.refresh ? 'refresh requested' : rec.stale ? `flagged stale: ${rec.stale}` : 'stale (HEAD moved and the brief is over a fortnight old)'
@@ -9234,11 +9263,18 @@ async function handleCall(
           write({ t: 'result', id, ok: false, text: `no such directory: ${dir} — create it first, or pass --create` }); return
         }
         if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
+        // The four fields the new session must not have to be TOLD by hand — prepended to its founding
+        // message, marked as the bridge's words, with the rest of the capsule one `tg repo` away. Only
+        // here: the owner's `@launch` runs no preflight and his message is his own (v0.5.76's ruling),
+        // and `tg ask` into a live session adds nothing because the block is already in its transcript.
+        let founding = ''
         if (existsSync(dir)) {
           const repoRoot = await repoBriefRoot(dir)
           if (repoRoot) {
             const preflight = await repoDispatchPreflight(fromSid, repoRoot, String(args.text ?? '').trim(), topicName, `spawn ${topicName}`)
             if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
+            const briefed = String(args.text ?? '').trim() ? loadBriefRecord(STATE_DIR, repoRoot) : null
+            if (briefed) founding = foundingPrefix(briefed.brief, repoRoot)
           }
         }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
@@ -9247,7 +9283,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, ...(probe ? { probe: true } : {}), ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, ...(founding ? { briefPrefix: founding } : {}), ...(probe ? { probe: true } : {}), ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -10352,7 +10388,12 @@ function clampedClause(d: ModelDecision): string {
 // `refs` ride the spec for the same reason: the founding ask is minted inside launchSpawn, so a file
 // the owner attached to an `@launch` has nowhere else to travel. Set only by the owner's launcher —
 // `tg spawn` has no --ref, so an agent-made spawn leaves it absent and the block is byte-identical.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number; refs?: string[] }
+// `briefPrefix` is the ONE field that is not part of the caller's message: the repo capsule's four
+// routing fields, prepended to what is PASTED and to nothing else. Every surface that echoes the
+// founding message back — the spawner's chevron card, the ledger row, the ask row the target card and
+// the digest are built from — keeps the lane's own words, because the prefix is the bridge speaking
+// and attributing it to the caller would misreport what it asked for.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; briefPrefix?: string; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number; refs?: string[] }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — a dial the
@@ -10480,8 +10521,14 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     }
     // Built HERE, not in the closure: the marker his answer is matched on is read off these exact
     // bytes, so the block that is armed and the block that is pasted are one value by construction.
+    // The prefix joins the message HERE, at the block that is pasted, and nowhere above: the pending
+    // row, the ledger row and the card all carry `firstMsg`. The delivery proof is unaffected — it
+    // matches on `ask=<id>`, never on the prose (askBlockInTranscript). The HUMAN path takes `firstMsg`
+    // and not the prefixed text by construction rather than by nobody setting the field: his message is his
+    // own words, and a bridge-written brief inside his envelope is the third-person narration again.
+    const pasteMsg = (spec.briefPrefix ?? '') + firstMsg
     const block = p
-      ? formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)
+      ? formatAskBlock(fromName, p.id, pasteMsg, foundingRefs, false, !!spec.ownerDirect)
       : ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)
     void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
      try {
@@ -20532,13 +20579,16 @@ async function scoutRepo(real: string): Promise<ScoutRun> {
     if (!parsed) throw new Error(`the scout child returned unparseable output — ${tail(r.stdout, 400) || '(empty)'}`)
     return parsed
   }
-  let out = await run(scoutPrompt())
+  // Workers' corrections ride into the prompt: a scout that is not told what the last capsule got
+  // wrong is free to write it again, and then the correction has cost the worker a verb for nothing.
+  const prompt = scoutPrompt(loadBriefRecord(STATE_DIR, real)?.corrections)
+  let out = await run(prompt)
   let v = validateBrief(parseBriefJson(String(out.result ?? '')))
   let cost = out.total_cost_usd ?? 0
   // One retry, with what was wrong appended. Never a third: routing is not blocked on discovery, and
   // a thin brief stored now beats a perfect one that never arrives.
   if (!v.usable) {
-    const out2 = await run(`${scoutPrompt()}\n\nYour previous reply could not be used: it was missing 'what' or 'surfaces', or was not a JSON object. Return ONLY the \`\`\`json fence.`)
+    const out2 = await run(`${prompt}\n\nYour previous reply could not be used: it was missing 'what' or 'surfaces', or was not a JSON object. Return ONLY the \`\`\`json fence.`)
     const v2 = validateBrief(parseBriefJson(String(out2.result ?? '')))
     cost += out2.total_cost_usd ?? 0
     if (v2.usable) { v = v2; out = out2 }
@@ -20567,17 +20617,21 @@ async function notifyScoutResult(sid: string, plain: string): Promise<void> {
 // notification. This is process-local dedup only; the saved record is the durable result.
 async function runScout(real: string): Promise<string> {
   const t0 = Date.now()
+  // Read BEFORE the scout, which takes 30–40s: a correction filed while it runs would otherwise be
+  // silently overwritten by the record this returns with.
+  const prev = loadBriefRecord(STATE_DIR, real)
   try {
-    const { rec, violations } = await scoutRepo(real)
+    const { rec: scouted, violations } = await scoutRepo(real)
+    const rec = carryCorrections(prev, scouted)
     saveBriefRecord(STATE_DIR, rec)
     process.stderr.write(`scout: ${real} in ${Math.round((Date.now() - t0) / 1000)}s, $${rec.costUsd ?? '?'}, ${violations.length} schema violation(s) corrected\n`)
     if (violations.length) process.stderr.write(`scout: ${real} violations — ${violations.join(' | ')}\n`)
-    return `(repo brief ready — \`tg repo ${real}\`)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: violations.length, source: rec.source })}`
+    return `(repo brief ready — \`tg repo ${real}\`)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: violations.length, source: rec.source, corrections: rec.corrections, now: Date.now() })}`
   } catch (e) {
     const failure = String(e)
     process.stderr.write(`scout: ${real} MODEL FAILED after ${Math.round((Date.now() - t0) / 1000)}s: ${failure}\n`)
     const fallback = deterministicRepoBrief(real)
-    const rec: BriefRecord = {
+    const rec: BriefRecord = carryCorrections(prev, {
       path: real,
       brief: fallback.brief,
       generatedAt: Date.now(),
@@ -20585,10 +20639,10 @@ async function runScout(real: string): Promise<string> {
       violations: fallback.violations.length,
       schemaVersion: BRIEF_SCHEMA_VERSION,
       source: 'deterministic',
-    }
+    })
     saveBriefRecord(STATE_DIR, rec)
     process.stderr.write(`scout: ${real} deterministic fallback saved (${fallback.violations.length} correction(s))\n`)
-    return `(model scout unavailable for ${real}; using bounded deterministic context — \`tg repo ${real} --refresh\` retries the model)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: rec.violations, source: rec.source })}`
+    return `(model scout unavailable for ${real}; using bounded deterministic context — \`tg repo ${real} --refresh\` retries the model)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: rec.violations, source: rec.source, corrections: rec.corrections, now: Date.now() })}`
   }
 }
 
@@ -20654,6 +20708,101 @@ function startScout(real: string, sid: string | null): 'started' | 'running' {
   return scoutCoordinator.start(real, sid)
 }
 
+// ---- the live state block (`tg repo`'s second half) ----
+//
+// Everything below is a LOOKUP the daemon already holds or a git read; the reads themselves and the
+// rendering live in repo-state-gather.ts / repo-state.ts, so a probe can run them without a daemon.
+
+// A session is in this repo when its cwd is at or below the brief root — or below one of its LINKED
+// WORKTREES, which is the isolation the owner sequences merges with, so a writer standing in one is a
+// writer here. ONE `git worktree list` answers it for every row; asking each row for its own brief
+// root is two git processes per session, and there are 36 rows on this box.
+async function repoRootsFor(real: string): Promise<string[]> {
+  const roots = [real]
+  try {
+    const { stdout } = await exec('git', ['worktree', 'list', '--porcelain'], { cwd: real, timeout: 5000 })
+    for (const line of stdout.split('\n')) if (line.startsWith('worktree ')) roots.push(line.slice(9).trim())
+  } catch { /* no worktree list ⇒ the root itself, which is the pre-worktree behaviour */ }
+  return [...new Set(roots.filter(Boolean))]
+}
+
+// How long an ENDED session still owns what it left dirty. That window IS the collision warning the
+// chat lane needed at 21:29Z on 2026-08-21: four files dirty and their writer already gone, which
+// `git status` cannot say and no live roster can either.
+const OWNED_AFTER_END_MS = 24 * 60 * 60 * 1000
+
+// The conversation an ENDED session wrote: its own recorded id under its account's projects dir. A row
+// with no `agentSessionId` never completed a turn and has no conversation — null, so its files report
+// `unowned` rather than being attributed from a guess (v0.5.160's rule, applied to a dead session).
+function endedSessionTranscript(t: { agentSessionId?: string; cwd: string; account?: string }): string | null {
+  if (!t.agentSessionId) return null
+  const configDir = (t.account ? accountByName(t.account) : null)?.configDir ?? MAIN_ACCOUNT.configDir
+  const file = join(configDir, 'projects', projectDirName(t.cwd), `${t.agentSessionId}.jsonl`)
+  return existsSync(file) ? file : null
+}
+
+async function repoSessionsHere(real: string, now: number): Promise<GatherSession[]> {
+  const roots = await repoRootsFor(real)
+  const ownerDirectSids = new Set(ownerReplyRoutes.snapshot().map(r => r.sid))
+  const configDirs = listAccounts().map(a => a.configDir)
+  const out: GatherSession[] = []
+  for (const t of listTopics()) {
+    if (!t.cwd || !roots.some(r => t.cwd === r || t.cwd.startsWith(r + sep))) continue
+    const open = !t.closed && t.killedAt == null
+    const end = getSessionEnd(t.sessionId)
+    const endedAt = t.killedAt ?? (end ? timeOf(end) : 0)
+    if (!open && !(endedAt > 0 && now - endedAt <= OWNED_AFTER_END_MS)) continue
+    // The CLI's own status word, never a capture: this block is read before every brief, and a pane
+    // capture per session is what would make it too expensive to read that often.
+    const pane = open ? await paneForSession(t.sessionId).catch(() => null) : null
+    out.push({
+      name: t.name,
+      live: open,
+      ...(open ? {} : { endedAgo: endAgeLabel(Math.max(0, now - endedAt)) }),
+      state: pane ? paneFreedom(pane, configDirs).status ?? 'unknown' : 'unknown',
+      ...(ownerDirectSids.has(t.sessionId) ? { ownerDirect: true } : {}),
+      asks: open ? openAsksFor(t.sessionId).map(p => ({
+        id: p.id, from: p.fromName, ageMs: Math.max(0, now - p.createdAt),
+        firstLine: p.text.replace(/\s+/g, ' ').trim().slice(0, 60), injected: p.injected,
+      })) : [],
+      transcript: pane ? await proofTranscriptForPane(pane).catch(() => null) : endedSessionTranscript(t),
+      cwd: t.cwd,
+    })
+  }
+  return out
+}
+
+// The newest report each of these sessions filed — the honesty lines it is supposed to carry, which
+// is the answer to "what happened here" that the lane otherwise spends a worker turn asking for.
+function lastReportsHere(names: string[], now: number): RepoState['lastReports'] {
+  const want = new Set(names.map(n => normalizeEndpointName(n)))
+  const latest = new Map<string, RepoState['lastReports'][number]>()
+  for (const e of tailLedger(busLedgerRoom(), 400)) {
+    if ((e.kind !== 'answer' && e.kind !== 'ack') || !e.from || !want.has(normalizeEndpointName(e.from))) continue
+    latest.set(normalizeEndpointName(e.from), {
+      name: e.from, kind: e.kind, id: e.id ?? null,
+      ageMs: Math.max(0, now - e.ts), lines: extractHonestyLines(e.text),
+    })
+  }
+  return [...latest.values()].sort((a, b) => a.ageMs - b.ageMs)
+}
+
+async function gatherRepoStateFor(real: string, rec: BriefRecord | null, missing: MissingPath[]): Promise<RepoState> {
+  const now = Date.now()
+  const sessions = await repoSessionsHere(real, now)
+  const storeFile = ownerStorePath(STATE_DIR)
+  return gatherRepoState({
+    root: real,
+    sessions,
+    lastReports: lastReportsHere(sessions.map(s => s.name), now),
+    capsulePaths: rec ? { total: capsulePathTokens(rec.brief).length, missing } : null,
+    git: async args => { try { return (await exec('git', args, { cwd: real, timeout: 5000 })).stdout } catch { return null } },
+    now,
+    store: loadOwnerStore(storeFile),
+    saveStore: s => writeJsonFile(storeFile, s),
+  })
+}
+
 // The last refused body per (sender, target). NEVER REFUSE A RETRY: the gate says its piece once and
 // the lane decides — a resubmission of the same bytes is the deliberate override, not a second guess.
 // Its absence is what taught the lane `for i in 1 2; do tg spawn … && break; done` (2026-08-21).
@@ -20683,7 +20832,7 @@ async function repoDispatchPreflight(fromSid: string, real: string, body: string
   let rec = loadBriefRecord(STATE_DIR, real)
   if (!rec || isStale(rec, head, Date.now())) {
     const fallback = deterministicRepoBrief(real)
-    rec = {
+    rec = carryCorrections(rec, {
       path: real,
       brief: fallback.brief,
       generatedAt: Date.now(),
@@ -20691,7 +20840,7 @@ async function repoDispatchPreflight(fromSid: string, real: string, body: string
       violations: fallback.violations.length,
       schemaVersion: BRIEF_SCHEMA_VERSION,
       source: 'deterministic',
-    }
+    })
     saveBriefRecord(STATE_DIR, rec)
     startScout(real, fromSid)
   }
@@ -20706,7 +20855,7 @@ async function repoDispatchPreflight(fromSid: string, real: string, body: string
   const marks = findings.length ? renderContradictions(findings) : ''
   if (!unseen) return marks
   repoContextGate.markSeen(convKey, real, rec.generatedAt)
-  const capsule = `Repository context preflight — no ask/spawn was sent. Review this capsule, correct any assumptions, then retry the command:\n\n${renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing })}`
+  const capsule = `Repository context preflight — no ask/spawn was sent. Review this capsule, correct any assumptions, then retry the command:\n\n${renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source, missing, corrections: rec.corrections, now: Date.now() })}`
   return marks ? `${marks}\n\n${capsule}` : capsule
 }
 
