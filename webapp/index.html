@@ -2827,25 +2827,46 @@ function renderAccounts() {
   html += '<div class="accttop"><div class="copy"><div>Automatic orchestration</div><div class="acctmeta">May choose a better active provider/model; explicit launches still win.</div></div><button class="toggle ' + (v.auto ? '' : 'off') + '" data-acc-auto="1">' + (v.auto ? 'On' : 'Off') + '</button></div>';
   html += '<div class="accttop"><div class="copy"><div>' + (ACCOUNT_ROLE === 'chat' ? 'Chat' : 'Coding') + ' failover</div><div class="acctmeta">' + v.activeCount + ' of ' + accounts.length + ' accounts participate</div></div><button class="toggle off" data-acc-count="' + Math.max(0, v.activeCount - 1) + '" ' + (v.activeCount <= 0 ? 'disabled' : '') + '>−</button><button class="toggle off" data-acc-count="' + Math.min(accounts.length, v.activeCount + 1) + '" ' + (v.activeCount >= accounts.length ? 'disabled' : '') + '>+</button></div>';
   accounts.forEach((a, i) => {
-    if (i === v.activeCount) html += '<div class="acctdivider">Inactive · kept but never auto-selected</div>';
+    // The sheet has two greys and they are unrelated: the row's DOT is signed-in state, this
+    // divider is failover rank. Naming the cut-off keeps them from reading as one thing.
+    if (i === v.activeCount) html += '<div class="acctdivider">Below the failover cut-off — kept, never auto-selected</div>';
     const models = (a.models || []).length ? a.models : [a.model].filter(Boolean);
-    html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + esc(a.providerLabel) + ' · ' + esc(a.authLabel) + ' · ' + (a.ready ? 'Ready' : 'Needs attention') + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
+    // The dot means ONE thing — a credentials file exists for this config dir — so the words say
+    // that and nothing more. "Needs attention" named no cause and offered no next step, which made
+    // an ordinary signed-out account look broken; a Claude row is signed in or signed out, and a
+    // gateway is keyed or not. The subscription already rides in the label, so repeating
+    // "Claude native · Native login" here was two more names for the same thing.
+    const meta = a.id.startsWith('claude:')
+      ? 'Claude · ' + (a.ready ? 'Signed in' : 'Signed out')
+      : esc(a.providerLabel) + ' · ' + esc(a.authLabel) + ' · ' + (a.ready ? 'Ready' : 'Needs a key');
+    html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + meta + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
     if (models.length) html += '<select class="seg" data-acc-model="1" style="width:100%;margin-top:8px">' + models.map(m => '<option value="' + esc(m) + '" ' + (m === a.model ? 'selected' : '') + '>' + esc(m.replace(/\[1m\]$/, '')) + '</option>').join('') + '</select>';
-    // 🚀 hands off to the SPAWN sheet with this account preselected — one launcher, two hosts, the
-    // same rule the dial row follows. A second launcher here would be a second set of dials to keep
-    // in step with the first. 🔑 is write-only: it takes a new key and never renders the old one.
-    html += '<div class="acctactions"><button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button><button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>'
-      + '<button data-acc-launch="1">Launch</button>'
-      + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Remove</button>' : '')
-      // A Claude account row removes through the two-step plan/confirm, never the gateway path: the
-      // row can stand for several config dirs and the confirm has to name them.
-      + (a.id.startsWith('claude:') && a.id !== 'claude:main' ? '<button data-acc-rmclaude="1">Remove</button>' : '')
-      // Log out ENDS THE LOGIN on this box; Remove only unregisters the config dir ("the files on
-      // disk stay"). Different acts, so different buttons — and `main` gets this one, because it is
-      // excluded from Remove for a structural reason that does not carry. Same affordance the
-      // GitHub sheet already renders per account, so the sheet learns no new vocabulary.
+    // THE ROW'S ACTIONS FOLLOW ITS STATE. There is no per-row Launch any more: the launcher concept
+    // is retired whole (the owner, 2026-08-21 — "I don't need a 🚀 button for each account"), not
+    // relocated, so new sessions come from the `+` FAB and `tg spawn` where they always belonged.
+    // A SIGNED-OUT row gets exactly one action, `Sign in`, which is the way back in — without it,
+    // removing Launch would leave the app with no path out of a logout at all.
+    // 🔑 Key is write-only: it takes a new key and never renders the old one.
+    html += '<div class="acctactions">'
+      // Signed out ⇒ no role dials: making an account the chat/coding default while it cannot serve
+      // a turn is a setting that reads as broken. Sign in first, then choose.
+      + (a.ready
+          ? '<span class="acctmeta" style="align-self:center;margin-right:2px">Default for:</span>'
+            + '<button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button>'
+            + '<button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>'
+          : (a.id.startsWith('claude:') ? '<button data-acc-signin="1">Sign in</button>' : ''))
+      + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Forget</button>' : '')
+      // `Forget` unregisters the config dir and says the files stay; `Log out` ENDS the login and
+      // cannot be undone. They were both called Remove-ish and ranked backwards — the smaller act
+      // sounded bigger. Different acts, different words, and the irreversible one keeps his.
+      + (a.id.startsWith('claude:') && a.id !== 'claude:main' ? '<button data-acc-rmclaude="1">Forget</button>' : '')
       + (a.id.startsWith('claude:') && a.ready ? '<button data-acc-logout="1">Log out</button>' : '')
-      + '</div></div>';
+      + '</div>'
+      // The OTHER way in, which he already had and could not see: `/login` in a session's own chat
+      // has always been allowed (slash-policy leaves it out of BLOCKED deliberately) and v0.5.197
+      // fixed its surfaceless case. One line, signed-out rows only.
+      + (a.id.startsWith('claude:') && !a.ready ? '<div class="acctmeta" style="margin-top:6px">…or run /login in a session already on this account.</div>' : '')
+      + '</div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
   body.innerHTML = html;
@@ -2887,14 +2908,23 @@ function renderAccounts() {
     if (!p || !confirm(p.text)) return;
     if (!await writeOp('/api/provider-accounts/action', { action: 'logout-claude', name })) return;
     // No success bar: SUCCESS CONFIRMATIONS ARE OFF here (the owner, 2026-07-30) and the repaint IS
-    // the outcome — the row's dot goes grey, its meta line reads "Needs attention", and Launch
-    // becomes the way back in.
+    // the outcome — the row's dot goes grey, its meta line reads "Signed out", and Sign in becomes
+    // the way back in.
     PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
   });
-  body.querySelectorAll('[data-acc-launch]').forEach(b => b.onclick = () => {
-    const id = b.closest('[data-account]').dataset.account;
-    closeSheet('accounts');
-    openSpawnSheet({ account: id, label: accountLabel(id) });
+  // 🔑 Sign in — one step, where Log out is two: nothing is destroyed, and a confirm between him and
+  // a login screen is friction on the recovery path. It opens NO spawn sheet and offers no picker;
+  // the daemon starts a headless pane on this account and the link arrives in his DM.
+  //
+  // THIS ONE DOES RAISE A BAR, and it is the stated exception rather than a lapse: the rule is that
+  // a confirmation may be dropped only when the surface behind it says the same thing, and here the
+  // repaint says nothing at all — the row stays grey until the login lands minutes later, on a
+  // different surface entirely. That is exactly `showOk`'s one live precedent (the dial's
+  // "… requested…"): it reports a REQUEST, and the outcome reports itself later.
+  body.querySelectorAll('[data-acc-signin]').forEach(b => b.onclick = async () => {
+    const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
+    const d = await writeOp('/api/provider-accounts/action', { action: 'signin-claude', name });
+    if (d) showOk(d.text);
   });
   // The key never round-trips: the field starts empty whatever is stored, and nothing reads it back.
   body.querySelectorAll('[data-acc-key]').forEach(b => b.onclick = async () => {
@@ -5040,7 +5070,7 @@ const DIAL_MODES = [
 // DIAL_MODES, so the two hosts cannot disagree about which options exist.
 // No surface here either — every session created from this sheet gets a topic, by the owner's
 // ruling. `headless` remains an API-only option for the throwaways agents spawn over the bus.
-const spawnSel = { model: "", effort: "", mode: "", account: "", type: "session", agent: "" };
+const spawnSel = { model: "", effort: "", mode: "", type: "session", agent: "" };
 // The sheet's first fork. Same [value, name, description] shape as the dial lists it sits beside.
 const DIAL_TYPES = [
   ["session", "Coding session", "A Claude Code session in its own topic and folder"],
@@ -5134,11 +5164,12 @@ function closeSheet(id) {
   s.classList.remove("up");
   setTimeout(() => s.classList.remove("show", "p2"), 180);   // matches .sheet's transition
 }
-// `on` (optional) is the Accounts sheet's 🚀 handing this sheet an account to launch on — the ONLY
-// difference a delegated launch makes. Cleared on every open so a plain "+" never inherits it.
-async function openSpawnSheet(on) {
-  spawnSel.account = on && on.account ? on.account : "";
-  $("spawnhead").textContent = spawnSel.account ? "New session on " + (on.label || spawnSel.account) : "New session";
+// Takes NO account. The Accounts sheet's 🚀 was this function's only delegating caller and the
+// launcher concept is retired (the owner, 2026-08-21) — a signed-out row now offers `Sign in`, which
+// starts a headless login pane and never opens this sheet. `$("newfab").onclick` passes a click
+// Event, so the old parameter was also only ever inert here by accident.
+async function openSpawnSheet() {
+  $("spawnhead").textContent = "New session";
   // .show BEFORE painting, for the dial's own reason: a display:none subtree measures 0, so
   // dialHeight would pin the track at zero and the sheet would open empty.
   $("spawn").classList.remove("p2");
@@ -5197,9 +5228,6 @@ $("spgo").onclick = async () => {
     ...(spawnSel.model ? { model: spawnSel.model } : {}),
     ...(spawnSel.effort ? { effort: spawnSel.effort } : {}),
     ...(spawnSel.mode ? { mode: spawnSel.mode } : {}),
-    // A delegated launch (Accounts → 🚀) names the account; a plain "+" sends nothing and the
-    // daemon resolves the role default at spawn time, exactly as it always has.
-    ...(spawnSel.account ? { account: spawnSel.account } : {}),
   });
   $("spgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
@@ -5262,10 +5290,9 @@ $("accclose").onclick = () => closeSheet("accounts");
 $("accounts").onclick = e => { if (e.target.id === "accounts") closeSheet("accounts"); };
 $("accadd").onclick = () => { $("accform").classList.add("show"); $("accadd").style.display = "none"; $("acclabel").focus(); };
 // ➕ Claude account: a NAME, not a login. It creates that account's config dir; the sign-in comes
-// later on its first Launch, where the CLI's own URL is relayed — which is why one prompt is the
-// whole flow here, and why the confirmation points at Launch as the next step.
+// after, from the new row's own `Sign in` button — which is why one prompt is the whole flow here.
 $("accaddclaude").onclick = async () => {
-  const name = prompt("Name the new Claude account — short and simple, e.g. work.\n\nIt gets its own config dir (~/.claude-<name>). You'll sign in the first time you launch a session on it.");
+  const name = prompt("Name the new Claude account — short and simple, e.g. work.\n\nIt gets its own config dir (~/.claude-<name>). Tap Sign in on its row afterwards to log in.");
   if (!name) return;
   const d = await writeOp("/api/provider-accounts/action", { action: "add-claude", name: name.trim().toLowerCase() });
   if (!d) return;   // writeOp surfaced the daemon's own refusal (bad name, already exists)

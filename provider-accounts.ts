@@ -55,8 +55,8 @@ export type ProviderAccountView = {
   order: number
   model: string | null
   models: string[]
-  // Config dirs this row stands for. One entry for every row except a Claude account reached through
-  // more than one config dir, where the row is the account and this names the profiles behind it.
+  // The config dir(s) this row stands for. Always exactly one since rows went per-account
+  // (v0.5.201) — kept as a list because the shape is part of the view every consumer reads.
   members: string[]
 }
 
@@ -82,9 +82,12 @@ type ProjectionInput = {
   codeDefault?: string | null
   models?: Record<string, string[] | null | undefined>
   auto?: boolean
-  // The subscription behind a config dir (account-identity.ts). Config dirs sharing a key collapse
-  // to one row. Absent → every config dir is its own row, i.e. the pre-grouping behaviour.
-  identityOf?: (accountName: string) => { key: string; label?: string | null } | null
+  /**
+   * Whose subscription an account is signed into, for the row's label suffix. A LABEL, not a
+   * grouping key: rows are one-per-account since v0.5.201, so nothing here keys on identity any
+   * more and the key this used to carry had no reader left.
+   */
+  labelOf?: (accountName: string) => string | null
 }
 
 export function projectProviderAccounts(input: ProjectionInput): ProviderAccountsView {
@@ -92,10 +95,14 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
     ? input.chain.length
     : Math.max(0, Math.min(input.chain.length, Math.trunc(input.activeCount)))
   const claude = new Map(input.claudeAccounts.map(a => [a.name, a]))
-  const identityOf = input.identityOf
-  // Grouping is keyed the same way for every consumer, so the panel, the Mini App and `tg readout
-  // providers` cannot disagree about what counts as one account.
-  const groupKey = (name: string): string => identityOf?.(name)?.key ?? `claude:${name}`
+  const labelOf = input.labelOf
+  // Keyed the same way for every consumer, so the panel, the Mini App and `tg readout providers`
+  // cannot disagree about what counts as one row.
+  // ONE ROW PER ACCOUNT since v0.5.201 (owner's ruling, 2026-08-21) — keyed on the NAME, never the
+  // subscription identity, so two config dirs sharing one login are two rows with their own state
+  // and their own actions. `labelOf` is still passed and still used, for the LABEL below: it is
+  // what keeps two separate logins apart once the name no longer implies the subscription.
+  const groupKey = (name: string): string => `claude:${name}`
   const chainIndexOf = new Map(input.chain.map((hop, i) => [hop, i] as const))
   const accounts = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
     const hop = group.hops[0]!
@@ -103,10 +110,16 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
     if (hop.kind === 'claude') {
       const members = group.hops.map(h => claude.get(h.account || '')).filter((x): x is { name: string; ready: boolean } => !!x)
       if (!members.length) return []
-      const label = (members.length > 1 ? identityOf?.(members[0]!.name)?.label : null) || `Claude · ${members[0]!.name}`
+      // THE ACCOUNT NAME LEADS. `members` is length 1 now, and `main` and `chat` share a
+      // subscription — so a subscription-only label would print two identical rows, the failure the
+      // old grouping existed to prevent. The identity stays as the suffix: it is what distinguishes
+      // two SEPARATE logins once the name no longer implies one.
+      const identity = labelOf?.(members[0]!.name)
+      const label = identity ? `${members[0]!.name} — ${identity}` : `Claude · ${members[0]!.name}`
       return [{
         id: hopKey(hop), provider: 'claude', providerLabel: 'Claude native', label, auth: 'native', authLabel: 'Native login',
-        // Usable if any config dir behind it is signed in — the row is the subscription, not the dir.
+        // One dir per row now, so this IS that dir's own state — which is what makes the row's
+        // colour honest, and what lets Log out / Sign in target it unambiguously.
         ready: members.some(m => m.ready), active: chainIndex < activeBoundary, order: 0, model: null,
         models: ['opus', 'fable', 'sonnet', 'haiku'], members: members.map(m => m.name),
       }]

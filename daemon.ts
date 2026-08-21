@@ -168,6 +168,7 @@ import {
 } from './calls.ts'
 import { planOwnerFileSend, type OwnerFileVerdict } from './owner-file.ts'
 import { logoutConfirmText, logoutResultText, logoutPartialText, type LogoutPlan, type LogoutSession } from './account-logout.ts'
+import { planSignin, planSigninSweep, signinDoneText, signinExpiredText, SIGNIN_TTL_MS, type SigninRecord } from './account-signin.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
@@ -840,6 +841,28 @@ function clearResumeCard(pane: string): void {
   if (!(pane in rows)) return
   delete rows[pane]
   saveResumeCards(rows)
+}
+
+// Live sign-in panes, keyed by account. PERSISTED, and the record goes down BEFORE the sweep can
+// act on it — the /terminal ruling (v0.5.189): a record with no timer recovers, a timer with no
+// record cannot survive the next restart, and this box saw 149 of those in nine days. Its deadline
+// is absolute, so a daemon that comes back mid-window finishes the original one.
+const SIGNIN_PANE_FILE = join(STATE_DIR, 'signin-panes.json')
+const loadSigninPanes = (): Record<string, SigninRecord> =>
+  readJsonFile<Record<string, SigninRecord>>(SIGNIN_PANE_FILE, {})
+function saveSigninPanes(rows: Record<string, SigninRecord>): void {
+  try { writeJsonFile(SIGNIN_PANE_FILE, rows) } catch {}
+}
+function putSigninPane(r: SigninRecord): void {
+  const rows = loadSigninPanes()
+  rows[r.account] = r
+  saveSigninPanes(rows)
+}
+function clearSigninPane(account: string): void {
+  const rows = loadSigninPanes()
+  if (!(account in rows)) return
+  delete rows[account]
+  saveSigninPanes(rows)
 }
 
 // The chats the owner actually reads: his DM chat lanes ("the main chat" in his words), falling back
@@ -14269,27 +14292,41 @@ async function fleetModelHosts(model: string): Promise<string[]> {
   return hits.filter((x): x is string => !!x)
 }
 
-// Which SUBSCRIPTION a registered config dir belongs to — the grouping key every "accounts" list
-// uses (account-identity.ts). An unregistered or unreadable dir keys on its own name, so a missing
-// oauthAccount can only ever split a row, never merge two.
-function accountIdentityOf(name: string): { key: string; label: string | null } {
+// WHOSE subscription a registered config dir is signed into — `suchag@gmail.com · Max 20x` — for
+// the row's label. It used to return a grouping KEY as well; nothing reads one since rows went
+// per-account (v0.5.201), and leaving a key here would invite the next reader to re-collapse them.
+// `readAccountIdentity` still exposes its key for anyone who genuinely needs subscription identity.
+// Unregistered or no readable email ⇒ null, and the row falls back to the account name alone.
+function accountIdentityLabel(name: string): string | null {
   const acct = accountByName(name)
-  if (!acct) return { key: `claude:${name}`, label: null }
+  if (!acct) return null
   const id = readAccountIdentity(acct.configDir)
-  return { key: id.key, label: id.email ? id.label : null }
+  return id.email ? id.label : null
 }
-const accountGroupKey = (name: string): string => accountIdentityOf(name).key
+// ONE ROW PER REGISTERED ACCOUNT, not per subscription (owner's ruling, 2026-08-21). This returned
+// the IDENTITY key, so `main` and `chat` — one Max 20x login across two config dirs — collapsed into
+// a single row. That row was "ready" if EITHER dir was signed in, while 🚪/Log out acted on the
+// FIRST, so signing one out left the row green with a button that errored on the second tap and no
+// path at all to the dir that needed attention. Returning the hopKey makes each claude hop its own
+// group: `hopKey(claude)` is already `claude:${account}`, so group.key === hopKey and every existing
+// caller (hopGroupFor, moveHopGroup, accountRowLabel, the ↑/↓ handlers) keeps working untouched.
+// Gateways and Codex were never grouped by this — chainGroups keys those by hopKey already.
+const accountGroupKey = (name: string): string => `claude:${name}`
 // The row a hop belongs to, and the hops behind a row. `chainGroups` is the single definition of
 // both, so the panel's ↑/↓, 🚀 and 🗑 always speak for exactly what the row shows.
 function hopGroupFor(chain: FailoverHop[], key: string): FailoverHop[] {
   return chainGroups(chain, accountGroupKey).find(g => g.hops.some(h => hopKey(h) === key))?.hops ?? []
 }
-// What a Claude row is CALLED: the subscription (suchag@gmail.com · Max 20x) when the login is
-// readable, else the config dir's registered name — never a list of profiles, which is the thing
-// this row exists to stop showing.
+// What a Claude row is CALLED. THE ACCOUNT NAME LEADS, and that is load-bearing rather than
+// cosmetic: rows are per-account since v0.5.201, and `main` and `chat` share one subscription — so
+// the old subscription-only label would render them as two IDENTICAL rows, which is the failure the
+// grouping existed to prevent, arriving from the other side. The subscription stays as the suffix
+// because it is what tells two SEPARATE logins apart. An unreadable identity (or one that is just
+// the dir's own name) leaves the name alone, never a dangling separator.
 function accountRowLabel(hops: FailoverHop[]): string {
   const first = hops[0]?.account || ''
-  return accountIdentityOf(first).label || first
+  const identity = accountIdentityLabel(first)
+  return identity && identity !== first ? `${first} — ${identity}` : first
 }
 
 // ➕ 🌐 sub-panel: pick a popular provider (base URL + model pre-filled → straight to the key) or
@@ -15043,6 +15080,72 @@ async function chatLaneAccountNames(): Promise<string[]> {
   return [...names]
 }
 
+// Start (or adopt) the headless pane whose only job is to reach this account's login screen. Called
+// from both surfaces; returns what to tell the tapper. See account-signin.ts for why headless is
+// both correct and only safe since v0.5.197.
+async function startAccountSignin(acct: Account): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const plan = planSignin(accountLoggedIn(acct), loadSigninPanes()[acct.name] ?? null, Date.now())
+  if (plan.kind === 'already') return { ok: false, error: `${acct.name} is already signed in` }
+  if (plan.kind === 'adopt') {
+    // Still alive ⇒ point at it rather than racing it. A dead one is cleared and the tap retried,
+    // so a stale record can never make the button permanently inert.
+    if (await paneAlive(plan.record.pane).catch(() => true)) {
+      return { ok: true, text: `🔑 A sign-in for ${acct.name} is already running — its link is on the way to your DM.` }
+    }
+    clearSigninPane(acct.name)
+  }
+  // $HOME, not the config dir: the ACCOUNT is CLAUDE_CONFIG_DIR, which is what decides which login
+  // this establishes (his ruling). Headless ⇒ no topic, no card, no surface of its own.
+  const sid = genSessionId()
+  setTopic(sid, { headless: true, cwd: homedir(), name: `signin-${acct.name}`, closed: false, createdAt: Date.now() })
+  const pane = await spawnSession(homedir(), '', sid, acct, 'claude', undefined, { mode: 'bypassPermissions' as CcMode })
+  if (!pane) {
+    removeTopic(sid)
+    logDecision({ family: 'ctl', what: `signin @${acct.name}`, target: acct.name, pane: null, decision: 'REFUSED', predicate: 'spawn failed — see the daemon log' })
+    return { ok: false, error: `couldn't start a sign-in session for ${acct.name}` }
+  }
+  // Record BEFORE anything can act on it (v0.5.189): a record with no sweep tick recovers next tick;
+  // a pane with no record is one nothing will ever retire.
+  putSigninPane({ account: acct.name, configDir: acct.configDir, pane, sessionId: sid, until: Date.now() + SIGNIN_TTL_MS })
+  process.stderr.write(`daemon: signin pane ${pane} up for ${acct.name} (${acct.configDir}) — headless, ttl ${SIGNIN_TTL_MS / 60_000}m\n`)
+  return { ok: true, text: `🔑 Signing in to ${acct.name} — the login link will arrive in your DM shortly. Nothing else is needed here.` }
+}
+
+// Retire a sign-in pane the moment it has done its job, or when its window closes. Rides the same
+// cadence as the other account sweeps; every terminal branch clears the record LAST, so a failure
+// mid-retire leaves something for the next tick rather than an orphaned pane.
+async function sweepSigninPanes(): Promise<void> {
+  const rows = loadSigninPanes()
+  for (const r of Object.values(rows)) {
+    const acct = accountByName(r.account)
+    // The account was unregistered under us — nothing left to sign in to.
+    if (!acct) { await closeSessionPane(r.pane, 'signin-account-gone').catch(() => {}); removeTopic(r.sessionId); clearSigninPane(r.account); continue }
+    const alive = await paneAlive(r.pane).then(x => x as boolean | 'unknown').catch(() => 'unknown' as const)
+    const verdict = planSigninSweep(r, accountLoggedIn(acct), alive, Date.now())
+    if (verdict.kind === 'wait') continue
+    // `closeSessionPane`, NEVER `exitSessionPane` — and this pane is the strongest case there is for
+    // the distinction. `/exit` only lands at a normal prompt, and a sign-in pane is BY DEFINITION
+    // parked on a modal that has never reached one: caught live on the canary 2026-08-21, where the
+    // record and topic row were cleared correctly while `%289` survived, and the typed `/exit` went
+    // into the CLI's "Paste code here" field and came back as `OAuth error: Invalid code`. So the
+    // escalation (Escape → retry → `tmux kill-pane`) is not belt-and-braces here, it is the only
+    // path that ends this pane. Blocks up to ~20s, which is why the sweep awaits it per row.
+    if (verdict.kind !== 'gone') await closeSessionPane(r.pane, `signin-${verdict.kind}`).catch(() => {})
+    removeTopic(r.sessionId)
+    if (verdict.kind === 'done') {
+      process.stderr.write(`daemon: signin COMPLETE ${r.account} (${r.configDir}) — credentials present, pane ${r.pane} retired\n`)
+      for (const chat of ownerCardChats()) await channel.sendText(chat, signinDoneText(r.account)).catch(() => {})
+    } else if (verdict.kind === 'expired') {
+      // Said out loud, always: a pane that quietly disappeared after 30 minutes reads as success.
+      process.stderr.write(`daemon: signin EXPIRED ${r.account} (${r.configDir}) — no credentials after ${SIGNIN_TTL_MS / 60_000}m, pane ${r.pane} retired\n`)
+      for (const chat of ownerCardChats()) await channel.sendText(chat, signinExpiredText(r.account)).catch(() => {})
+    } else {
+      process.stderr.write(`daemon: signin pane ${r.pane} for ${r.account} is gone — record dropped\n`)
+    }
+    clearSigninPane(r.account)
+  }
+}
+
 // The log line's MCP count, where `null` is a fact and not a zero: `mcp` is tri-state now, and
 // `null.length` would have been the crash while `(mcp ?? []).length` would quietly log "0 mcp
 // login(s)" for a file nobody could read — the same understatement the confirmation stopped making.
@@ -15553,9 +15656,9 @@ bot.command('account', async ctx => {
     if (!r.ok) { await ctx.reply(`❌ ${r.error}`); return }
     await ctx.reply(
       `✅ Account <b>${escapeHtml(r.account.name)}</b> registered → <code>${escapeHtml(r.account.configDir)}</code>\n\n` +
-      `Tap below to start a session on it — Claude will ask you to log in once (the sign-in link relays here). ` +
+      `Tap below and the sign-in link arrives in your DM — nothing else is needed. ` +
       `After that, sessions, /resume, and usage limits all track this account on their own.`,
-      { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
+      { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🔑 Sign in to ${r.account.name}`, `acct:signin:${r.account.name}`) })
     return
   }
   if (sub === 'remove' && name) {
@@ -15599,7 +15702,9 @@ async function accountsPanelText(): Promise<string> {
     const acct = accts[0]
     const snap = acct ? readUsageSnapshot(undefined, acct) : null
     const pct = snap?.fiveHour ? ` · ${Math.round(snap.fiveHour.pct)}% of 5h` : ''
-    const login = accts.length && !accts.some(accountLoggedIn) ? ' · ⚠️ not logged in' : ''
+    // "signed out", not "⚠️ not logged in": it is a state, not a fault, and the row already offers
+    // the one action that fixes it (🔑 Sign in). The warning glyph made a normal state look broken.
+    const login = accts.length && !accts.some(accountLoggedIn) ? ' · signed out' : ''
     const focused = accts.some(x => x.name === focusedAcct.name) && focus.activePaneId ? ' ← focused session' : ''
     return `${i + 1}. 👤 <b>${escapeHtml(accountRowLabel(group.hops))}</b>${pct}${login}${focused}`
   })
@@ -15634,20 +15739,29 @@ function accountsPanelKeyboard(): InlineKeyboard {
     const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${accountRowLabel(group.hops)}`
     kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
     if (h.kind === 'claude') {
-      // 🚀 launches on the group's representative config dir — for the shared account that is
-      // `main`, deliberately: it is the dir the coding fleet already runs on. A specific profile is
-      // still reachable with `tg spawn --account <name>` / `cc-bridge <slot> <name>`.
-      kb.text('🚀', `acct:launch:${h.account}`)
-      // 🚪 ends this account's LOGIN on this box — a different act from 🗑, which only unregisters it.
-      // Shown for `main` too, deliberately: main is protected from 🗑 because unregistering it would
-      // break account resolution, and that reasoning does not carry to signing it out.
-      // Acts on the row's REPRESENTATIVE config dir, exactly as 🚀 does; the confirm names that dir,
-      // so a row standing for two profiles cannot silently sign out the one you did not mean.
-      const repAcct = accountByName(h.account!)
-      if (repAcct && accountLoggedIn(repAcct)) kb.text('🚪', `acct:out:${h.account}`)
-      // 🗑 unregisters every config dir behind the row, so it goes through a confirm that names them
-      // — and `main` is never removable, which also protects any group containing it.
-      if (!group.hops.some(x => x.account === 'main')) kb.text('🗑', `acct:rmg:${h.account}`)
+      // THE ROW'S ACTIONS FOLLOW ITS STATE, and it has exactly one destructive act plus one way
+      // back in — never both at once. There is no 🚀 here any more: the launcher concept is retired
+      // whole (owner, 2026-08-21, "I don't need a 🚀 button for each account"), not relocated.
+      // New sessions come from `tg spawn` / the app's `+`, which is where they always belonged.
+      //
+      // WORDS, not bare glyphs. 🚪 and 🗑 side by side were two unlabelled doors distinguished only
+      // by which emoji you happened to know, while acting on different things — and retiring 🚀 is
+      // what freed the width to say so. If a row ever overflows, the words win and the glyphs go.
+      const acct = accountByName(h.account!)
+      if (acct && accountLoggedIn(acct)) {
+        // Ends this account's LOGIN on this box — a different act from 🗑, which only unregisters
+        // it. `main` gets this: it is excluded from 🗑 because unregistering it would break account
+        // resolution, and that reasoning does not carry to signing it out.
+        kb.text('🚪 Log out', `acct:out:${h.account}`)
+      } else if (acct) {
+        // The ONLY action a signed-out row offers, and the reason the launcher could be retired at
+        // all: a headless pane whose whole job is to reach the login screen. Not a launcher — no
+        // spawn sheet, no picker, no topic.
+        kb.text('🔑 Sign in', `acct:signin:${h.account}`)
+      }
+      // 🗑 unregisters this row's config dir (one per row since v0.5.201) — and `main` is never
+      // removable, because account resolution is built on it.
+      if (h.account !== 'main') kb.text('🗑 Forget', `acct:rmg:${h.account}`)
     } else if (h.kind === 'gateway') {
       kb.text('✏️', `gw:model:${h.name}`).text('🔑', `gw:key:${h.name}`).text('🗑', `gw:rm:${h.name}`)
     }
@@ -16893,7 +17007,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Accounts sub-panel (settings → 👤 Accounts, or the /account command's buttons).
-  const acctMatch = /^acct:(panel|back|add|rmg:([A-Za-z0-9_-]+)|rmgo:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+)|out:([A-Za-z0-9_-]+)|outgo:([A-Za-z0-9_-]+))$/.exec(data)
+  const acctMatch = /^acct:(panel|back|add|rmg:([A-Za-z0-9_-]+)|rmgo:([A-Za-z0-9_-]+)|signin:([A-Za-z0-9_-]+)|out:([A-Za-z0-9_-]+)|outgo:([A-Za-z0-9_-]+))$/.exec(data)
   if (acctMatch) {
     if (!(await cbAuth(ctx))) return
     if (acctMatch[1] === 'back') {
@@ -16978,22 +17092,21 @@ bot.on('callback_query:data', async ctx => {
       await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutResultText(name, r.said))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
       return
     }
+    // 🔑 Sign in — the ONLY action a signed-out row offers, and the replacement for the 🚀 that used
+    // to sit on every row (retired whole, owner 2026-08-21). NOT a launcher: it opens no spawn
+    // sheet, offers no folder or account picker, and creates no topic. It starts a headless pane on
+    // this account whose one job is to reach the login screen, and the link relays to his DM.
+    //
+    // SINGLE-STEP, deliberately, where 🚪 is two: signing in destroys nothing, and a confirm between
+    // him and a login screen is friction on the recovery path.
     if (acctMatch[4]) {
-      // 🚀 Launch a session on this account — the from-Telegram path (the terminal is launch-once;
-      // claude-tg 1 <name> stays as the terminal equivalent). Spawned in the focused session's
-      // folder (else $HOME); a first-time account hits the login screen, whose URL relays here.
       const acct = accountByName(acctMatch[4])
       if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
-      const dir = (focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null) ?? homedir()
-      await ctx.answerCallbackQuery({ text: `Starting a ${acct.name} session…` }).catch(() => {})
-      const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, acct, 'claude', codingSpawnHarness())
-      const note = ok
-        ? `🚀 Starting a <b>${escapeHtml(acct.name)}</b> session in <code>${escapeHtml(dir)}</code>` +
-          `${isTopicMode() ? ' — it gets its own topic shortly' : ''}.` +
-          (accountLoggedIn(acct) ? '' : '\n🔑 First run on this account — a sign-in link will appear here; tap it, then reply to that message with your code.')
-        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`
+      await ctx.answerCallbackQuery({ text: `Signing in to ${acct.name}…` }).catch(() => {})
+      const r = await startAccountSignin(acct)
       const thread = ctx.callbackQuery.message?.message_thread_id
-      await channel.sendText(String(ctx.chat!.id), note, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      await channel.sendText(String(ctx.chat!.id), r.ok ? escapeHtml(r.text) : `❌ ${escapeHtml(r.error)}`,
+        { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
@@ -20840,8 +20953,8 @@ bot.on('message:text', async ctx => {
           }
           await ctx.reply(
             `✅ Account <b>${escapeHtml(r.account.name)}</b> registered → <code>${escapeHtml(r.account.configDir)}</code>\n\n` +
-            `Tap below to start a session on it — Claude will ask you to log in once (the sign-in link relays here).`,
-            { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
+            `Tap below and the sign-in link arrives in your DM — nothing else is needed.`,
+            { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🔑 Sign in to ${r.account.name}`, `acct:signin:${r.account.name}`) })
           return
         }
         // The name for a new hermes agent (/agents → ➕, after profile + mode). Last step: write the
@@ -21803,6 +21916,9 @@ function syncFleetCredentials(): void {
   } catch (e) { process.stderr.write(`daemon: credential sync failed: ${e}\n`) }
 }
 setInterval(() => syncFleetCredentials(), 60_000).unref()
+// Retire sign-in panes that have done their job or run out of window. Rehydrated from disk on every
+// tick rather than held in memory, so a daemon restart mid-window costs one tick and not the pane.
+setInterval(() => void sweepSigninPanes(), 30_000).unref()
 // Agent bus (agent-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref()
 
@@ -22364,7 +22480,7 @@ async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<P
     gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
     models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
-    identityOf: accountIdentityOf,
+    labelOf: accountIdentityLabel,
   })
   // ✳️ Codex model/effort ride with THIS panel because that is where /settings keeps them — the
   // failover half of 👤 Accounts — and the 1:1 parity ruling took them off the app's settings root.
@@ -22635,6 +22751,16 @@ async function webappProviderAccountAction(userId: string, action: Record<string
     }
     process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
     return { ok: true, text: logoutResultText(name, r.said) }
+  }
+  // 🔑 Sign in — the mini app's half of the same single-step action. One step, unlike the logout
+  // above and for the opposite reason: nothing is destroyed, and the login screen is the recovery
+  // path. No spawn sheet and no account picker reach this; the row already names the account.
+  if (kind === 'signin-claude') {
+    const name = String(action.name ?? '')
+    const acct = accountByName(name)
+    if (!acct) return { error: 'unknown account' }
+    const r = await startAccountSignin(acct)
+    return r.ok ? { ok: true, text: r.text } : { error: r.error }
   }
   // 🔑 Replace a gateway's API key. WRITE-ONLY on purpose: the existing key is never rendered, never
   // returned, and never round-trips through the browser — the field takes a new one or nothing. The

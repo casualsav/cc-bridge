@@ -135,19 +135,24 @@ test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
   // Its exclusion from Remove is structural (unregistering breaks account resolution) and does not
   // carry to ending a login. Withholding it would recreate the exact gap he reported.
   // Anchored on the row builder's start, not on the button name — a slice that begins AT the needle
-  // cuts off the condition being asserted, which is the whole subject here.
-  const rowStart = page.indexOf("'<div class=\"acctactions\">")
+  // cuts off the condition being asserted, which is the whole subject here. And anchored INSIDE
+  // renderAccounts: the GitHub sheet emits the same `<div class="acctactions">` earlier in the file,
+  // so a bare indexOf reads the wrong component (this test used to span both by accident).
+  const fnStart = page.indexOf('function renderAccounts()')
+  expect(fnStart).toBeGreaterThan(0)
+  const rowStart = page.indexOf("'<div class=\"acctactions\">", fnStart)
   expect(rowStart).toBeGreaterThan(0)
-  const rowJs = page.slice(rowStart, page.indexOf("+ '</div></div>';", rowStart))
-  expect(rowJs).toContain("a.id !== 'claude:main' ? '<button data-acc-rmclaude")   // Remove: main excluded
+  const rowJs = page.slice(rowStart, page.indexOf("+ '</div>'", rowStart))
+  expect(rowJs).toContain("a.id !== 'claude:main' ? '<button data-acc-rmclaude")   // Forget: main excluded
   expect(rowJs).toContain("a.ready ? '<button data-acc-logout")                    // Log out: main included
   expect(rowJs).not.toContain("a.id !== 'claude:main' ? '<button data-acc-logout")
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))   // the function's own body, never a magic length
-  expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
-  expect(kb).toContain('accountLoggedIn(repAcct)')
-  // …while 🗑 keeps its main guard, so the two acts stay distinguishable.
-  expect(kb).toContain("if (!group.hops.some(x => x.account === 'main')) kb.text('🗑'")
+  expect(kb).toContain("kb.text('🚪 Log out', `acct:out:${h.account}`)")
+  expect(kb).toContain('accountLoggedIn(acct)')
+  // …while 🗑 keeps its main guard, so the two acts stay distinguishable. Rows are per-account since
+  // v0.5.201, so the guard is a name test rather than a walk over the group's hops.
+  expect(kb).toContain("if (h.account !== 'main') kb.text('🗑 Forget'")
 })
 
 test('CALL SITE: the Telegram row action is the same two steps and the same words', () => {

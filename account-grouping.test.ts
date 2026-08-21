@@ -114,23 +114,39 @@ describe('projectProviderAccounts', () => {
     chain: CHAIN,
     chatDefault: 'claude:chat',
     codeDefault: 'claude:main',
-    identityOf: (name) => ({ key: idOf(name), label: name === 'work' ? 'second@example.com · Pro' : 'owner@example.com · Max 20x' }),
+    labelOf: (name) => name === 'work' ? 'second@example.com · Pro' : 'owner@example.com · Max 20x',
   })
-  test('one row for the shared account, first, naming both profiles', () => {
-    expect(view.accounts.length).toBe(3)
-    expect(view.accounts[0]!.label).toBe('owner@example.com · Max 20x')
-    expect(view.accounts[0]!.members).toEqual(['main', 'chat'])
-    expect(view.accounts.map(a => a.id)).toEqual(['claude:main', 'claude:work', 'gateway:minimax'])
+  // v0.5.201, owner's ruling 2026-08-21: ROWS ARE PER ACCOUNT. `main` and `chat` are one
+  // subscription across two config dirs and used to collapse into a single row — which then read
+  // "ready" if EITHER dir was signed in, while Log out acted on the FIRST. Signing one out left a
+  // green row whose button errored on the second tap, with no path to the dir that needed one.
+  test('two config dirs on ONE subscription are TWO rows — each with its own state', () => {
+    expect(view.accounts.length).toBe(4)
+    expect(view.accounts.map(a => a.id)).toEqual(['claude:main', 'claude:chat', 'claude:work', 'gateway:minimax'])
+    // Every row stands for exactly one config dir, which is what makes `ready` that dir's own fact.
+    for (const a of view.accounts) expect(a.members.length).toBe(1)
   })
-  test('a role default pointing at a collapsed profile highlights its account row', () => {
-    expect(view.defaults.chat).toBe('claude:main')
+  test('THE ACCOUNT NAME LEADS, or one subscription renders as two identical rows', () => {
+    // The failure the old grouping existed to prevent, arriving from the other side: `main` and
+    // `chat` share `owner@example.com · Max 20x`, so a subscription-only label is indistinguishable.
+    expect(view.accounts[0]!.label).toBe('main — owner@example.com · Max 20x')
+    expect(view.accounts[1]!.label).toBe('chat — owner@example.com · Max 20x')
+    expect(view.accounts[0]!.label).not.toBe(view.accounts[1]!.label)
+    // …and the subscription is still there, because it is what tells two SEPARATE logins apart.
+    expect(view.accounts[2]!.label).toBe('work — second@example.com · Pro')
+  })
+  test('a role default now highlights the row it actually names', () => {
+    // It used to resolve to the GROUP's representative, so a chat default of `claude:chat` lit the
+    // `main` row. With per-account rows the default lights its own.
+    expect(view.defaults.chat).toBe('claude:chat')
     expect(view.defaults.code).toBe('claude:main')
   })
-  test('without an identity source every config dir stays its own row', () => {
-    const ungrouped = projectProviderAccounts({
+  test('no label source ⇒ the account name alone, never a dangling separator', () => {
+    const bare = projectProviderAccounts({
       claudeAccounts: [{ name: 'main', ready: true }, { name: 'chat', ready: true }],
       gateways: {}, gatewayReady: {}, chain: CHAIN.slice(0, 2),
     })
-    expect(ungrouped.accounts.map(a => a.label)).toEqual(['Claude · main', 'Claude · chat'])
+    expect(bare.accounts.map(a => a.label)).toEqual(['Claude · main', 'Claude · chat'])
+    for (const a of bare.accounts) expect(a.label).not.toContain('—')
   })
 })

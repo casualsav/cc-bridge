@@ -338,6 +338,20 @@ applied where it was missing. Proof: `terminal-lifecycle.test.ts` (source-bound;
 must fail against a pre-0.5.189 `daemon.ts`) and `bun scripts/terminal-card-probe.ts <dir>`, whose four
 scheduler claims must all FAIL against the deployed build.
 
+**A PANE PARKED ON A MODAL CANNOT BE CLOSED BY `/exit`, and the sign-in pane is that case by
+definition** (v0.5.202, 2026-08-21). `exitSessionPane` types `/exit`, which only lands at a normal
+prompt; `closeSessionPane` is the one that escalates (Escape → retry → `tmux kill-pane`). An account
+row's `Sign in` spawns a headless pane whose whole job is to sit on the login screen, so it never
+reaches a prompt — the first live canary run cleared the record and the topic row while the pane kept
+running, and the typed `/exit` went into the CLI's own "Paste code here" field and came back as
+`OAuth error: Invalid code`. Every unit test passed against that build: the defect lives entirely in
+which of two close functions is called. `sweepSigninPanes` uses `closeSessionPane` and
+`account-signin.test.ts` asserts `exitSessionPane` appears nowhere in it. Rows are per-account (not
+per subscription) since v0.5.201, which is what lets `Sign in` / `Log out` name one config dir —
+`accountRowLabel` must lead with the ACCOUNT NAME or `main` and `chat`, one subscription across two
+dirs, render as two identical rows. Proof: `account-signin.test.ts` (5 call-site tests fail against
+0.5.200) and `$(tg shared)/bridgeaccts/`.
+
 **Retiring a slash command means a stub handler, never a deleted one** — an unregistered command
 falls through to the unknown-command relay, which types it into the live TUI where the palette
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
