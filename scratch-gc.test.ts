@@ -285,6 +285,10 @@ test('call site: a refusal removes nothing AND says so — the branch that was s
   expect(sweep).toContain('if (plan.refused) {')
   expect(sweep).toContain('scratch-gc removed nothing —')
   expect(sweep).toContain('scratch-gc could not remove')
+  // …and a sweep that removes nothing is otherwise silent, which is indistinguishable from a sweep
+  // that never ran — so the first one of each daemon reports whatever it saw. Once, not hourly.
+  expect(sweep).toContain('if (!scratchGcReported) {')
+  expect(sweep).toContain('scratch-gc first sweep on')
 })
 
 test('call site: the lock is taken before the walk and released whatever happens', () => {

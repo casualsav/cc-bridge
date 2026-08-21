@@ -22472,6 +22472,11 @@ const SCRATCH_GC_LOCK_MAX_AGE_MS = 10 * 60_000
 // which is the honest starting value: it means "nothing known to be reapable", and that is what the
 // refusal then says.
 let scratchHeldBytes = 0
+// A sweep that removes nothing is SILENT by design — an hourly "removed 0" is the noise the delivery
+// log's throttle exists to prevent. But silence is also what a sweep that never ran looks like, and on
+// the box where this shipped there was nothing to reap by the time it deployed, so the first sweep of
+// each daemon says what it saw whatever the outcome. One line per process, not per hour.
+let scratchGcReported = false
 
 // Three channel daemons and a second instance can all be live. The lock is advisory and the sweep is
 // idempotent anyway (unlinking a path that is already gone is a no-op) — it exists so two sweeps do
@@ -22505,6 +22510,13 @@ async function sweepScratchGc(): Promise<void> {
       process.stderr.write(`daemon: scratch-gc removed ${res.removed.length} entries under ${got.root}, freed ${fmtGcBytes(res.freedBytes)}`
         + ` (kept ${plan.keep.length}: ${gcKeepTally(plan)})\n`)
       for (const f of res.failed) process.stderr.write(`daemon: scratch-gc could not remove ${f.path} — ${f.err}\n`)
+    }
+    if (!scratchGcReported) {
+      scratchGcReported = true
+      const p = readTmpPressure(got.root)
+      process.stderr.write(`daemon: scratch-gc first sweep on ${got.root} — ${got.evidence.entries.length} candidates, `
+        + `${plan.remove.length} removable, ${plan.keep.length} kept${plan.refused ? ` (REFUSED: ${plan.refused})` : ''}`
+        + `${p ? `, ${p.usedPct.toFixed(1)}% used` : ''}\n`)
     }
     await warnTmpPressure(got.root, got.evidence.entries)
   } finally { try { rmSync(SCRATCH_GC_LOCK, { force: true }) } catch {} }
