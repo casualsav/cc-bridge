@@ -52,6 +52,10 @@ test('blankedCredentialsAlert fires for a blanked file and stays quiet for a liv
   expect(blankedCredentialsAlert(missing)).toBeNull()
 })
 
+// Realistic expiries, not 1000/2000: freshestCredentials now refuses an already-expired source, so
+// the old sentinel values would be refused rather than ranked. The ORDERING these tests assert is
+// unchanged; only the scale is.
+const H = 60 * 60 * 1000
 const tok = (expiresAt: number) => JSON.stringify({
   claudeAiOauth: { accessToken: 'sk-ant-oat01-x', refreshToken: 'sk-ant-ort01-y', expiresAt, refreshTokenExpiresAt: expiresAt + 1, scopes: [], subscriptionType: 'max' },
 })
@@ -59,8 +63,8 @@ const tok = (expiresAt: number) => JSON.stringify({
 test('freshestCredentials picks the newest live token and never a blanked file', () => {
   const older = join(dir, 'older.json')
   const newer = join(dir, 'newer.json')
-  writeFileSync(older, tok(1000))
-  writeFileSync(newer, tok(2000))
+  writeFileSync(older, tok(Date.now() + 2 * H))
+  writeFileSync(newer, tok(Date.now() + 7 * H))
   expect(freshestCredentials([older, newer])).toBe(newer)
   expect(freshestCredentials([older, newer, blanked])).toBe(newer)   // blanked is excluded, never a source
   expect(freshestCredentials([blanked, missing])).toBeNull()          // nothing live
@@ -70,9 +74,9 @@ test('syncCredentials converges a staler dir onto the freshest token', () => {
   const d1 = join(dir, 's1'), d2 = join(dir, 's2')
   mkdirSync(d1); mkdirSync(d2)
   const f1 = join(d1, '.credentials.json'), f2 = join(d2, '.credentials.json')
-  writeFileSync(f1, tok(2000))   // freshest
-  writeFileSync(f2, tok(1000))   // staler
-  const updated = syncCredentials([d1, d2])
+  writeFileSync(f1, tok(Date.now() + 7 * H))   // freshest
+  writeFileSync(f2, tok(Date.now() + 2 * H))   // staler
+  const { updated } = syncCredentials([d1, d2])
   expect(updated).toEqual([f2])
   expect(readFileSync(f2, 'utf8')).toBe(readFileSync(f1, 'utf8'))   // converged
 })
@@ -82,12 +86,13 @@ test('control: a dir already holding the freshest token is untouched (no rewrite
   const d1 = join(dir, 'c1'), d2 = join(dir, 'c2')
   mkdirSync(d1); mkdirSync(d2)
   const f1 = join(d1, '.credentials.json'), f2 = join(d2, '.credentials.json')
-  writeFileSync(f1, tok(2000))
-  writeFileSync(f2, tok(2000))   // identical to the freshest
+  const at = Date.now() + 7 * H
+  writeFileSync(f1, tok(at))
+  writeFileSync(f2, tok(at))   // identical to the freshest
   const mtimeBefore = statSync(f2).mtimeMs
-  const updated = syncCredentials([d1, d2])
-  expect(updated).toEqual([])                     // nothing rewritten
-  expect(readFileSync(f2, 'utf8')).toBe(tok(2000)) // byte-identical
+  const { updated } = syncCredentials([d1, d2])
+  expect(updated).toEqual([])                   // nothing rewritten
+  expect(readFileSync(f2, 'utf8')).toBe(tok(at)) // byte-identical
   expect(statSync(f2).mtimeMs).toBe(mtimeBefore)   // no mtime churn
 })
 

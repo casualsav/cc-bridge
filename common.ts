@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Buffer } from 'node:buffer'
 
 export const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -124,12 +124,51 @@ export function blankedCredentialsAlert(credentialsPath: string): string | null 
   return '🚨 Main account OAuth credentials are BLANKED (empty tokens) — Claude sessions will demand /login. Restore a live copy (the chat account still has one) or run /login; the fleet is wedged until then.'
 }
 
+// A source token's expiresAt must land inside this window, measured from now. Claude Code mints ~8h
+// access tokens, so 30 days is ~90x headroom over anything this fleet produces and cannot bite a real
+// one — while a hand-written far-future value cannot pass at all.
+//
+// This bound is the whole defence, and it exists because the selection key below is a number the
+// daemon does not control. On 2026-08-21 a throwaway account (`~/.claude-lotest`, registered like any
+// other) held a fabricated token with expiresAt in 2099. It beat every real ~7h token, so every sync
+// tick overwrote ~/.claude, ~/.claude-scout and ~/.claude-chat with it — and, because the tick runs
+// every 60s, it re-overwrote each fresh token the owner minted by hand. Every login he completed had a
+// <=60-second life; the log shows one such cycle in three seconds (04:45:03 "login finished" ->
+// 04:45:06 the same pane demanding login again). Proof: credentials-poison.test.ts.
+export const MAX_SOURCE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000
+
+// Why a candidate cannot be a sync SOURCE, or null when it can be. Split out from the reducer so the
+// caller can log the refusal: a source silently dropped is how the next occurrence becomes as
+// unreconstructable as this one was (twelve `credential sync updated` lines over nine days, not one of
+// them naming where the bytes came from).
+export type SourceRefusal = 'expired' | 'implausible' | 'unregistered'
+
+// Options for the two functions below. `now` and `canSource` are injected rather than read here so the
+// unit tests can drive both without a clock or an accounts.json.
+export type CredentialSyncOptions = {
+  now?: number
+  // May this config dir be a SOURCE? The daemon passes a predicate built from a FRESH read of
+  // accounts.json at sync time (credentialSyncDirs' registry, re-read) — so a dir that reached the
+  // caller's list some other way can still be a destination but can never be the thing every other
+  // dir is overwritten with. Absent = no registration check (the tests' default, and any caller that
+  // has no registry to consult).
+  canSource?: (configDir: string) => boolean
+  onRefuse?: (path: string, why: SourceRefusal) => void
+}
+
 // The freshest LIVE credentials file among several config dirs, or null when none is live. "Freshest"
 // is the highest access-token expiresAt — a refresh mints a fresh ~7h expiry, so the rotated token
 // always wins — tie-broken by refreshTokenExpiresAt. Blanked / missing / malformed files are excluded
 // (hasLiveOauthCredentials): a blanked file is never a source, freshest-token-wins is never stale-
 // over-fresh.
-export function freshestCredentials(paths: string[]): string | null {
+//
+// A candidate must additionally be PLAUSIBLE — unexpired, inside MAX_SOURCE_LIFETIME_MS, and (when the
+// caller supplies canSource) a registered account dir. "Unexpired" is new alongside the bound and is
+// the same hole seen from the other end: nothing here ever checked that a source token was still
+// valid, so an expired file could be elected and copied over a live one purely for having the larger
+// number.
+export function freshestCredentials(paths: string[], opts: CredentialSyncOptions = {}): string | null {
+  const now = opts.now ?? Date.now()
   let best: string | null = null
   let bestAt = -1
   let bestRefreshAt = -1
@@ -139,10 +178,39 @@ export function freshestCredentials(paths: string[]): string | null {
       const cred = JSON.parse(readFileSync(p, 'utf8')) as { claudeAiOauth?: { expiresAt?: number; refreshTokenExpiresAt?: number } }
       const at = cred.claudeAiOauth?.expiresAt ?? 0
       const rt = cred.claudeAiOauth?.refreshTokenExpiresAt ?? 0
+      // Refused BEFORE the comparison, so an implausible candidate cannot win and cannot tie-break.
+      if (at <= now) { opts.onRefuse?.(p, 'expired'); continue }
+      if (at > now + MAX_SOURCE_LIFETIME_MS) { opts.onRefuse?.(p, 'implausible'); continue }
+      if (opts.canSource && !opts.canSource(dirname(p))) { opts.onRefuse?.(p, 'unregistered'); continue }
       if (at > bestAt || (at === bestAt && rt > bestRefreshAt)) { best = p; bestAt = at; bestRefreshAt = rt }
     } catch { /* not live / unreadable — already excluded above */ }
   }
   return best
+}
+
+// Keep this many timestamped backups per config dir. Three is enough to walk back through a bad tick
+// and its two neighbours; more is just credential material on disk.
+const CREDENTIAL_BACKUPS_KEPT = 3
+const BACKUP_PREFIX = '.credentials.json.bak-'
+
+// Copy a destination's CURRENT bytes aside before they are overwritten, newest three kept.
+//
+// This is the half that does not depend on being right about the next failure mode: whatever elects a
+// bad source, the token it replaced is still on disk and recovery is a `cp` instead of a re-login the
+// next tick will undo. A backup that cannot be written must not stop the sync (the destination is
+// stale, and refusing to converge it is its own outage) — but it is reported, because a silent failure
+// here is the one that only matters on the day it is needed.
+function backupCredentials(file: string, now: number): string | null {
+  try {
+    const dir = dirname(file)
+    const bak = join(dir, `${BACKUP_PREFIX}${now}`)
+    writeFileSync(bak, readFileSync(file), { mode: 0o600 })
+    const olds = readdirSync(dir).filter(n => n.startsWith(BACKUP_PREFIX)).sort()
+    for (const n of olds.slice(0, Math.max(0, olds.length - CREDENTIAL_BACKUPS_KEPT))) {
+      try { unlinkSync(join(dir, n)) } catch { /* someone else pruned it */ }
+    }
+    return bak
+  } catch { return null }
 }
 
 // Converge a set of config dirs' .credentials.json onto the freshest live token. SYMMETRIC: any dir
@@ -150,12 +218,17 @@ export function freshestCredentials(paths: string[]): string | null {
 // in one config dir can no longer strand the others (the shared-login failure of 2026-08-01/02). The
 // source dir's own file is never rewritten. Returns the rewritten paths. A dir already holding the
 // freshest token is byte-compared and left untouched — no rewrite, no mtime churn (the caller's
-// control).
-export function syncCredentials(configDirs: string[]): string[] {
+// control). Every rewrite is preceded by a timestamped backup of what it replaced (backupCredentials).
+//
+// Returns the source alongside the rewritten paths so the caller can NAME it: the log line used to
+// print destinations only, which is why the 2026-08-21 propagation left no trace of its own origin.
+export function syncCredentials(configDirs: string[], opts: CredentialSyncOptions = {}): { src: string | null; updated: string[]; backupFailed: string[] } {
+  const now = opts.now ?? Date.now()
   const files = configDirs.map(d => join(d, '.credentials.json'))
-  const src = freshestCredentials(files)
-  if (!src) return []
+  const src = freshestCredentials(files, opts)
+  if (!src) return { src: null, updated: [], backupFailed: [] }
   const updated: string[] = []
+  const backupFailed: string[] = []
   let srcText: string | null = null
   for (const f of files) {
     if (f === src) continue
@@ -163,11 +236,12 @@ export function syncCredentials(configDirs: string[]): string[] {
       const cur = readFileSync(f, 'utf8')
       if (srcText === null) srcText = readFileSync(src, 'utf8')
       if (cur === srcText) continue   // byte-identical — no rewrite, no mtime churn
+      if (!backupCredentials(f, now)) backupFailed.push(f)
       writeFileSync(f, srcText, { mode: 0o600 })
       updated.push(f)
     } catch { /* unreadable dest — leave it; next tick retries */ }
   }
-  return updated
+  return { src, updated, backupFailed }
 }
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
