@@ -78,7 +78,7 @@ test('richHtmlBreaks handles a <pre> with a language attribute, and text with no
 // text". A fix applied only where the report pointed would have left the spawn mirror raw.
 
 test('no chevron card is built from escaped-but-unrendered agent text', () => {
-  const cards = [...daemon.matchAll(/<details><summary>\$\{header\}<\/summary>\$\{([^}]+)\}/g)].map(m => m[1]!)
+  const cards = [...daemon.matchAll(/<details><summary>\$\{(?:header|spawnHeader)\}<\/summary>\$\{([^}]+)\}/g)].map(m => m[1]!)
   expect(cards.length).toBe(2)   // sendBusCard + the spawn task mirror
   for (const expr of cards) {
     expect(expr, 'a chevron card must render its body, not escape it').toContain('rendered')
@@ -90,10 +90,11 @@ test('the owner card renders every answer, not only the ones carrying a table', 
   const fn = daemon.slice(daemon.indexOf('async function sendOwnerAnswerCard('), daemon.indexOf('// The chat lane\'s copy of a worker\'s post'))
   // The gate that caused it: `hasMarkdownTable` alone meant every table-less answer fell to the raw
   // branch. It now mirrors sendAgentText's rule, where the owner's ruling on the trade already lives.
-  expect(fn).toContain('!hasFencedCode || hasMarkdownTable(shown)')
-  // …and the classic branch renders too, so neither route reaches him raw.
-  expect(fn).toContain('${mdToTelegramHtml(shown)}')
-  expect(fn).not.toContain('${escapeHtml(shown)}')
+  expect(fn).toContain('!hasFencedCode || hasMarkdownTable(body)')
+  // …and the classic branch renders too, so neither route reaches him raw. It caps on the way (the
+  // classic carrier tops out at ~4,096 characters, `bus-body.ts`), which the rich branch does not.
+  expect(fn).toContain('${mdToTelegramHtml(capBusBody(body, POST_CAP))}')
+  expect(fn).not.toMatch(/\$\{escapeHtml\((?:shown|body)\)\}/)
   // The ENVELOPE stays bridge-built and escaped — that split is what makes impersonation structural
   // rather than a matter of trusting the body.
   expect(fn).toContain('escapeHtml(fromName)')

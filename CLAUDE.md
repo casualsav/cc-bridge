@@ -689,23 +689,25 @@ confirmation, because "@chat messaged @you" must be true when shown) is the re-r
 daemon.ts>` must fail exactly its three call-site tests) and `bun scripts/bus-card-edit-probe.ts`
 (a real Telegram round trip, canary token, with a no-op re-edit as the control).
 
-**AN OWNER-FACING BUS BODY IS SPLIT INTO NUMBERED PARTS, NEVER CUT — and there are FIVE builders, two
-of them hand-rolled** (v0.5.187–188, 2026-08-21). Telegram caps a message at 4096 characters and every
-mirror ended in `body.slice(0, CAP) + '…'` (3500/3800), so a long brief reached his screen missing its
-ending while the session it addressed had it in full — reported on a ~4.5 KB kickoff brief, whose mirror
-is not `sendBusCard` at all but the spawn founding-message chevron built beside it. `splitBusBody`
-(`bus-split.ts`) is the one splitter: parts REASSEMBLE byte for byte (a seam that eats a newline is the
-same defect as a cut, smaller), the source text is split rather than the rendered HTML because rendering
-never lengthens visible text, and past `BUS_MAX_PARTS` it says how much is not shown instead of trailing
-an ellipsis. Three things are load-bearing: the send and the queued-marker EDIT go through ONE
-`busCardParts`, or confirming a queued ask rewrites a 3-part card's first message with different words;
-the notification is per BODY, not per message (part 1 buzzes, continuations are silent — three buzzes is
-how 📨 stops meaning "read this", which amends the notifying promise in `rich-by-content.test.ts`); and
-the enumeration is the coverage, since a split applied only where the symptom was reported would leave
-the spawn mirror cutting. The mini-app feed is NOT in this class (`outbound-feed.ts` caps at 64 KB).
-Proof: `bus-split.test.ts` (source-bound half must fail against HEAD) and
-`bun scripts/bus-split-probe.ts` — a real canary round trip that reads back the text TELEGRAM STORED
-for each part and diffs the reassembly against the original.
+**ONE BUS BODY IS ONE MESSAGE, AND THE CAP FOLLOWS THE CARRIER — never N-of-M** (v0.5.199, owner's
+ruling 2026-08-21: *"I never wanted messages to be split into one of two, two of two… If that's the only
+other option, I'd like the first way we had it before restored"*). v0.5.188 replaced the old
+`body.slice(0, CAP) + '…'` with a splitter at the same 3500/3800 caps — but those came from classic
+`sendMessage`'s 4096 ceiling, while every bus mirror is sent as a RICH message, and **measured live
+2026-08-21: rich holds ~39,400 characters, classic ~4,096**. Bus bodies run 3.5–7.3 KB routinely, so
+every one of them split (19 in one day's log). `capBusBody` (`bus-body.ts`) restores the pre-0.5.188 cut
+byte for byte and is reached only where the carrier truly cannot take the body: `RICH_BODY_CAP` is 12,000
+— 1.6x the largest body ever seen here, and low enough that markup expansion cannot push the rendered
+HTML into a refusal, whose fallback is the carrier that DOES cut. Three things are load-bearing: the
+classic fallbacks **re-cap** (`ASK_QUOTE_CAP`), or a body sized for rich is refused into a `.catch(() =>
+{})` and nothing reaches his screen; the send and the queued-marker EDIT share `busCardShown`; and the
+enumeration is the coverage — five capped sites, counted in the test, because the spawn founding chevron
+is hand-rolled beside `sendBusCard` and the 📨 card is TWO wrappers over one body (`sendAttentionCard`,
+merged here when the post took the rich carrier — byte-identical copies of a look-rule are the render-parity
+class one section up). The mini-app feed is NOT in this class (`outbound-feed.ts` caps at 64 KB). Proof:
+`bus-body.test.ts` (source-bound half must fail against HEAD) and `bun scripts/bus-body-probe.ts` — a real
+canary round trip that reads back the rich blocks TELEGRAM STORED and diffs them against the original,
+with the classic carrier refusing the same body as its control.
 
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships

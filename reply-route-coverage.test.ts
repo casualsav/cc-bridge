@@ -25,8 +25,10 @@ const bodyOf = (fn: string, len = 2600): string => {
 // Every function that puts a SESSION's words (or a card whose subject is a session) into his DM.
 // Adding a new one without a route row is the bug this list exists to catch.
 const SESSION_AUTHORED = [
-  ['async function sendPost(', 'a worker speaking to the humans — the one that broke'],
-  ['async function sendOwnerAnswerCard(', 'a worker answering something he addressed to it'],
+  // The post and the owner-answer card are two wrappers over ONE card since v0.5.199 (the post took
+  // the rich carrier, and a pair of byte-identical copies is how a look-rule drifts) — so the row
+  // that matters is asserted once, on the card they both send through.
+  ['async function sendAttentionCard(', 'a worker speaking to the humans, and one answering him'],
   ['async function sendBusCard(', 'the chevron card, whose subject is a session'],
   ['async function notifyBusText(', 'the one-line bus notice (spawn card, spawn failures)'],
   ['async function sendAgentText(', 'the relayed reply — the ordinary case'],
@@ -58,10 +60,13 @@ test('the post handler passes the AUTHOR, not nothing — the row needs a subjec
 // it stops meaning "read this" — which is the failure that cannot be seen from inside the code.
 
 test('both surfaces that reach for a human carry the SAME header — 📨 @name, no other word', () => {
-  const post = bodyOf('async function sendPost(', 1400)
-  const answer = bodyOf('async function sendOwnerAnswerCard(', 2900)   // the split wrapper + the part builder (bus-split.ts)
-  expect(post).toContain('📨 <b>@${escapeHtml(fromName)}</b>')
-  expect(answer).toContain('📨 <b>@${escapeHtml(fromName)}</b>')   // the classic branch, identical to the post's
+  // One card, two wrappers (v0.5.199) — which is the strongest form this assertion can take: the
+  // two headers cannot drift apart while there is only one of them. The wrappers are named here so
+  // a third surface reaching for a human is added to the same card rather than beside it.
+  expect(daemon).toContain("sendAttentionCard(chat, fromName, body, fromSid, 'post')")
+  expect(daemon).toContain("sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card')")
+  const answer = bodyOf('async function sendAttentionCard(', 2900)
+  expect(answer).toContain('📨 <b>@${escapeHtml(fromName)}</b>')   // the classic branch…
   expect(answer).toContain('📨 **@${fromName}**')                  // …and the rich branch, so it can't depend on the renderer
   // "From" is gone from both branches: the glyph says a session is talking, the name says which.
   expect(answer).not.toContain('From @')

@@ -24,7 +24,8 @@ returns early, silently and correctly. So a probe proves the PANE half of anythi
 transcript, the delivery proof — and can prove nothing at all about a card, a mirror, a split, a
 notification or a route. For those, watch real fleet traffic (the daemon log names the surface), or
 use the canary bot's own chat with `richmsg.ts`'s `callTelegram`, whose `sendMessage` response
-carries back the exact text Telegram stored (`scripts/bus-split-probe.ts` does this and diffs it).
+carries back the exact text Telegram stored — and `sendRichMessage` echoes the parsed rich blocks
+(`scripts/bus-body-probe.ts` does this and diffs them).
 Headless is per session and worth checking before designing a repro: `topics.json` → `headless`.
 
 ## `tg roster` "busy" is not pane state
@@ -142,8 +143,9 @@ Restore what the rig wrote: `dmChat` back to `{}`, `scheduled-messages.json` and
   starts reading, where the ask block actually is, and the verdict BOTH the current and the pre-fix
   anchors produce. `watch <pane> --for <s> --out <f>` samples the pane stamp against the CLI's session
   record across a `/clear` (they agree within a second on CLI 2.1.238 — the stale-stamp theory is dead).
-- `bun scripts/bus-split-probe.ts` — sends a long body to the CANARY chat in parts, reads back the text
-  Telegram stored for each, reassembles and diffs. Deletes what it sent unless `--keep`.
+- `bun scripts/bus-body-probe.ts` — sends a 9 KB body to the CANARY chat as ONE card, reads back the
+  rich blocks Telegram stored and diffs them; its control sends the same body through the classic
+  carrier, which must refuse it. Deletes what it sent unless `--keep`.
 - `bun scripts/paste-size-probe.ts --pane <id> [--legacy]` — how big a payload can reach a pane's input
   box, per primitive. `--legacy` is the control and must FAIL at 16,343 bytes; it exits non-zero if it
   ever succeeds everywhere, so "the old way was fine" cannot come back green.

@@ -35,7 +35,7 @@ import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml, hasMarkdownTable } from './markdown.ts'
-import { splitBusBody, partedHeader } from './bus-split.ts'
+import { capBusBody, RICH_BODY_CAP } from './bus-body.ts'
 import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash, bridgeOnlyReason, type NavTarget, type CardKind } from './slash-policy.ts'
 import { collectDiff, type DiffCard } from './session-cards.ts'
@@ -4336,19 +4336,11 @@ const POST_CAP = 3800
 // The body is RENDERED for the same reason the chevron cards now are (v0.5.45). This flat card was
 // missed by that sweep because the enumeration keyed on `<details><summary>`, and a post carries no
 // chevron — so it kept shipping raw markdown after the rest stopped.
-async function sendPost(chat: string, fromName: string, body: string, fromSid?: string | null): Promise<void> {
-  const parts = splitBusBody(body, POST_CAP)
-  // ONE buzz per body, not one per part: the notification is the whole meaning of this class (📨 = a
-  // session is reaching for a human), and three of them for one message is how that stops being true.
-  for (let i = 0; i < parts.length; i++) await sendPostPart(chat, partedHeader(`📨 <b>@${escapeHtml(fromName)}</b>`, i + 1, parts.length), parts[i]!, fromSid, i > 0)
-}
-async function sendPostPart(chat: string, header: string, shown: string, fromSid?: string | null, silent = false): Promise<void> {
-  const html = `${header}\n\n${mdToTelegramHtml(shown)}`
-  const ref = await channel.sendText(chat, html, { silent }).catch(e => {
-    process.stderr.write(`daemon: post send failed: ${e}\n`); return null
-  })
-  rememberMsgRoute(chat, ref?.messageId, fromSid)
-}
+// A post takes the RICH carrier first, like every other card in this class (v0.5.199, his ruling:
+// "a long post to a human is exactly the body that must not be cut"). It was the one member still
+// sending classic-only, so its ceiling was 4,096 characters where its siblings' is ~39,400.
+const sendPost = (chat: string, fromName: string, body: string, fromSid?: string | null): Promise<void> =>
+  sendAttentionCard(chat, fromName, body, fromSid, 'post')
 
 // Telegram's caption limit. A caption past it is a post with a file attached, not a caption.
 const OWNER_FILE_CAPTION_CAP = 1024
@@ -4369,7 +4361,7 @@ async function sendOwnerFile(
   const inline = !!body && words.length + 64 <= OWNER_FILE_CAPTION_CAP
   const ids: number[] = []
   // Too long to ride the file: send it as its own notifying message rather than cutting it, the
-  // same call bus-split.ts makes one surface down, and leave the header alone on the attachment.
+  // same call bus-body.ts makes one surface down, and leave the header alone on the attachment.
   if (body && !inline) {
     const ref = await channel.sendText(chat, `${header}\n\n${body}`).catch(e => {
       process.stderr.write(`daemon: owner file caption send failed: ${e}\n`); return null
@@ -4405,48 +4397,52 @@ async function sendOwnerFile(
 // must NEVER take it, because a glyph that appears on traffic he does not have to read stops meaning
 // "read this". Bridge-authored decisions keep their own icons (🔐 permission, 🧠 held spawn) — those
 // are the bridge asking, not a session speaking.
-const OWNER_ANSWER_CAP = POST_CAP
+async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
+  return sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card')
+}
+// ONE card behind both wrappers. They had been byte-identical copies since 2026-08-10, when the last
+// property that disagreed (the header) was settled — and a look-rule settled for one copy of a pair
+// is the class that put literal `**bold**` on his phone twice (CLAUDE.md, render parity). The post
+// getting the rich carrier is what would otherwise have made them differ again, in the direction
+// that cuts: classic tops out at ~4,096 characters, rich at ~39,400 (`bus-body.ts`).
+//
 // A TABLE IN THE ANSWER TAKES THE RICH RENDERER (the owner, 2026-08-09, on receiving a ccusage table
 // through this card as raw pipes: "when things like tables are displayed, it should pick it up and be
-// a rich message"). This card escapes its body into classic HTML, which is right for ordinary prose
+// a rich message"). The classic branch escapes its body into HTML, which is right for ordinary prose
 // and cannot render a table at all — so the same answer read cleanly when a worker replied in chat
 // (the relay path sends rich) and read as pipe soup when he addressed the worker directly. The
-// content decides, not the surface. Everything else about the card is unchanged: expanded,
-// notifying, and routable, all three by his earlier ruling.
-async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
-  const parts = splitBusBody(body, OWNER_ANSWER_CAP)
-  for (let i = 0; i < parts.length; i++) await sendOwnerAnswerCardPart(chat, fromName, parts[i]!, subjectSid, i + 1, parts.length)
-}
-async function sendOwnerAnswerCardPart(chat: string, fromName: string, shown: string, subjectSid: string, part: number, total: number): Promise<void> {
-  // The marker is appended to the header rather than folded into the name, so the ENVELOPE stays the
-  // same two literals it has always been — bridge-built, escaped, identical to the post's.
-  const mark = total > 1 ? ` · ${part}/${total}` : ''
+// content decides, not the surface. Everything else is unchanged: expanded, notifying, routable.
+async function sendAttentionCard(chat: string, fromName: string, body: string, subjectSid: string | null | undefined, what: string): Promise<void> {
   // The rich carrier used to be gated on a TABLE, so every answer without one — the overwhelming
   // majority — fell to the `escapeHtml` line below and reached him as raw markdown. The gate now
   // mirrors sendAgentText's exactly, which is where the owner's ruling on this trade already lives:
   // rich renders a fenced code block worse than the classic <pre> does (no copy button, wrapping
   // instead of contained scroll), so code routes classic — unless a TABLE is also present, which
   // classic cannot render at all. Either way the body is RENDERED; only the renderer differs.
-  const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(shown)
-  if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(shown))) {
+  const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(body)
+  if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(body))) {
     try {
-      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **@${fromName}**${mark}\n\n${shown}`), { disableNotification: part > 1 })
+      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **@${fromName}**\n\n${capBusBody(body, RICH_BODY_CAP)}`), {})
       rememberMsgRoute(chat, m?.message_id, subjectSid)
       return
     } catch (e) {
       // Same split as every other rich send: only a REFUSAL frees us to send the card again. An
       // unknown outcome may already be on his phone, and a second copy of an answer he is waiting
       // on is worse than the table he loses by not retrying.
-      if (!telegramRefused(e)) { process.stderr.write(`daemon: owner answer card from @${fromName} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
-      process.stderr.write(`daemon: owner answer card rich send failed, falling back to HTML: ${e}\n`)
+      if (!telegramRefused(e)) { process.stderr.write(`daemon: ${what} from @${fromName} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
+      process.stderr.write(`daemon: ${what} rich send failed, falling back to HTML: ${e}\n`)
     }
   }
   // The ENVELOPE stays bridge-built and escaped; only the BODY is rendered. That split is the whole
   // anti-impersonation story: an agent's text passes through a renderer that escapes first and emits
   // a fixed tag whitelist, so it can never produce the header's markup or close it.
-  const html = `📨 <b>@${escapeHtml(fromName)}</b>${mark}\n\n${mdToTelegramHtml(shown)}`
-  const ref = await channel.sendText(chat, html, { silent: part > 1 }).catch(e => {
-    process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null
+  //
+  // …and this is the one branch where the body is still CUT, because the carrier under it genuinely
+  // cannot take more (`POST_CAP`, unchanged since before the parts). Reached only when he has turned
+  // rendering off, when the body carries fenced code, or when a rich send was refused.
+  const html = `📨 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(capBusBody(body, POST_CAP))}`
+  const ref = await channel.sendText(chat, html).catch(e => {
+    process.stderr.write(`daemon: ${what} from @${fromName} failed: ${e}\n`); return null
   })
   rememberMsgRoute(chat, ref?.messageId, subjectSid)
 }
@@ -4472,31 +4468,17 @@ async function notifyLanesOfPost(fromSid: string | null, fromName: string, body:
 // `subjectSid` is the session the card is ABOUT, not the surface it lands on — replying to
 // "Spawned @test" means talking to @test, not to the session that spawned it. Cards with no session
 // as their subject (bridge UI: the pin card, settings, readouts) pass nothing and stay unroutable.
-// The body a card carries, in the parts it takes — never a cut (`bus-split.ts`). ONE function, shared
-// by the send and by the queued-marker EDIT: the edit rewrites part 1 from the row, so if the two
-// disagreed about where part 1 ends, confirming a queued ask would silently rewrite a 3-part card's
-// first message with a different first 3,500 characters.
-const busCardParts = (header: string, body: string): Array<{ header: string; body: string }> => {
-  const parts = splitBusBody(body, ASK_QUOTE_CAP)
-  return parts.map((b, i) => ({ header: partedHeader(header, i + 1, parts.length), body: b }))
-}
+// The body a chevron card carries: ONE message, whole, because the carrier is a rich message and that
+// holds ~39,400 characters (`bus-body.ts`). Shared by the send and by the queued-marker EDIT, so the
+// two can never disagree about what the card says. The classic fallback has its own, much lower
+// ceiling and caps separately, at the call site that uses it.
+const busCardShown = (body: string): string => capBusBody(body, RICH_BODY_CAP)
 // The rich card's envelope, shared by the send and by the queued-marker edit — so the render, and
 // with it the escaping the whole card's safety rests on, can never drift between drawing a card and
 // rewriting it.
 const busCardRichHtml = (header: string, rendered: string): string => `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>`
 async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string, subjectSid?: string | null): Promise<SenderCard | null> {
-  // Sequential, so the parts arrive in order — and the FIRST part's card is the one returned, because
-  // it is the one `editAskSentCards` rewrites when the delivery is proved.
-  let first: SenderCard | null = null
-  const parts = busCardParts(header, body)
-  if (parts.length > 1) process.stderr.write(`daemon: bus card to chat ${chat}${thread != null ? `/${thread}` : ''} split into ${parts.length} parts (${body.length} chars)\n`)
-  for (let i = 0; i < parts.length; i++) {
-    const card = await sendBusCardPart(chat, thread, parts[i]!.header, parts[i]!.body, subjectSid)
-    if (i === 0) first = card
-  }
-  return first
-}
-async function sendBusCardPart(chat: string, thread: number | undefined, header: string, shown: string, subjectSid?: string | null): Promise<SenderCard | null> {
+  const shown = busCardShown(body)
   // RENDERED, not escaped. `escapeHtml` alone put the agent's raw markdown on his phone — literal
   // `**bold**`, and a code span's backticks sitting hard against the next letter, which reads as an
   // accent over it (measured: Telegram stores plain U+0060, so this was never an entity bug — see
@@ -4510,7 +4492,9 @@ async function sendBusCardPart(chat: string, thread: number | undefined, header:
   const richHtml = busCardRichHtml(header, rendered)
   // `<pre>` nested inside an expandable blockquote is accepted by the classic parser (verified live
   // against the API, 2026-08-10) — so the degraded path renders too, rather than falling back to raw.
-  const fallback = `${header}\n<blockquote expandable>${rendered}</blockquote>`
+  // It re-caps at the CLASSIC ceiling: this carrier refuses anything past ~4,096 characters, and a
+  // refusal here is swallowed, so a body sized for the rich card would leave nothing on his screen.
+  const fallback = `${header}\n<blockquote expandable>${mdToTelegramHtml(capBusBody(shown, ASK_QUOTE_CAP))}</blockquote>`
   try {
     const m = await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
     rememberMsgRoute(chat, m?.message_id, subjectSid)
@@ -4552,8 +4536,7 @@ const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusV
 // rebuilt from the row rather than closed over, for the reason ownerMsgId is on the row — the sweep
 // that confirms a queued ask is usually a later process entirely.
 async function editAskSentCards(p: BusPending): Promise<void> {
-  const first = busCardParts(busSentHeader(p.noReply ? 'ack' : 'ask', p.toName), p.text)[0]!
-  const html = busCardRichHtml(first.header, mdToTelegramHtml(first.body))
+  const html = busCardRichHtml(busSentHeader(p.noReply ? 'ack' : 'ask', p.toName), mdToTelegramHtml(busCardShown(p.text)))
   for (const c of p.senderCards ?? []) {
     await editRichMessage(TOKEN!, c.chat, c.msgId, { html })
       .catch(e => process.stderr.write(`daemon: ask ${p.id} sender card edit failed (chat ${c.chat} msg ${c.msgId}) — it keeps its queued marker: ${e}\n`))
@@ -10435,19 +10418,19 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       const spawnHeader = `<b>@${escapeHtml(p ? fromName : 'owner')}</b> messaged <b>@${escapeHtml(topicName)}</b>`
       // The SECOND chevron-card builder, and the reason a fix here is enumerated rather than applied
       // where the symptom was reported: this one is hand-rolled beside sendBusCard, so a render fix
-      // made only there would leave every spawn's first message reaching him as raw markdown — and a
-      // SPLIT made only there would leave every founding brief cut at 3,500 characters, which is the
-      // surface the owner actually reported (a ~4.5 KB kickoff brief, 2026-08-21).
-      for (const { header, body: partBody } of busCardParts(spawnHeader, firstMsg)) {
-        const rendered = mdToTelegramHtml(partBody)
-        try {
-          await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>` }, { messageThreadId: threadId, disableNotification: true })
-        } catch (e) {
-          // Same split as sendAgentText's fallback: a refusal means the card never landed, an unknown
-          // outcome means this mirror may already be in the topic.
-          if (!telegramRefused(e)) { process.stderr.write(`daemon: spawn task mirror for @${topicName} has an UNKNOWN outcome, NOT re-sending it as HTML: ${e}\n`); return }
-          void channel.sendText(group, `${header}\n<blockquote expandable>${rendered}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
-        }
+      // made only there would leave every spawn's first message reaching him as raw markdown, and a
+      // CAP made only there would leave every founding brief cut at 3,500 characters — the surface
+      // the ~4.5 KB kickoff brief was reported on, 2026-08-21.
+      const shown = busCardShown(firstMsg)
+      const rendered = mdToTelegramHtml(shown)
+      try {
+        await sendRichMessage(TOKEN!, group, { html: `<details><summary>${spawnHeader}</summary>${richHtmlBreaks(rendered)}</details>` }, { messageThreadId: threadId, disableNotification: true })
+      } catch (e) {
+        // Same split as sendAgentText's fallback: a refusal means the card never landed, an unknown
+        // outcome means this mirror may already be in the topic.
+        if (!telegramRefused(e)) { process.stderr.write(`daemon: spawn task mirror for @${topicName} has an UNKNOWN outcome, NOT re-sending it as HTML: ${e}\n`); return }
+        // …and the classic carrier under it re-caps, for the reason sendBusCard's fallback does.
+        void channel.sendText(group, `${spawnHeader}\n<blockquote expandable>${mdToTelegramHtml(capBusBody(shown, ASK_QUOTE_CAP))}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
       }
      } finally { if (p) busInFlight.delete(p.id) }
     })()
