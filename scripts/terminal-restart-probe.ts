@@ -1,13 +1,19 @@
 // (b) THE LIVE RESTART RUN: a live /terminal card whose daemon dies inside its 30-second window is
 // deleted by the daemon that comes back, and says so.
 //
-//   bun scripts/terminal-restart-probe.ts orphan --chat <id> [--instance telegram-test]
+//   bun scripts/terminal-restart-probe.ts orphan --chat <id> [--in <secs>] [--pane %N] [--instance telegram-test]
 //   bun scripts/terminal-restart-probe.ts watch  --mid <id> [--instance telegram-test]
 //
 // `orphan` is self-driving and is the mode to use unless a human is at the keyboard: the bot posts a
-// card-shaped message, a record for it is written with `until` ALREADY PAST, the daemon is killed,
-// and the daemon that comes back must delete the message on its recovery pass. That exercises the
-// half that was broken — record → startup → delete → log — with no Telegram user needed.
+// card-shaped message, a record for it is written, the daemon is killed, and the daemon that comes
+// back must finish the card on its recovery pass. Two passes, and BOTH are the gate (@chat, ack 40):
+//
+//   --in 0   (default)  the record is already EXPIRED → the restart must DELETE it straight away
+//   --in 20             the record still has 20s on it → the restart must RE-ARM it, and the delete
+//                       must follow when the ORIGINAL window closes, not 30s after the restart
+//
+// The second pass is the one that proves `until` is an absolute deadline rather than a duration.
+// Together they exercise record → startup → delete → log with no Telegram user needed.
 //
 // `watch` is for the human-driven variant: the owner types /terminal, this reads the record the
 // handler wrote, kills the daemon inside the window, and verifies the same two lines. It proves the
@@ -45,14 +51,20 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const logSize = (): number => (existsSync(LOG) ? readFileSync(LOG).length : 0)
 const logSince = (n: number): string => (existsSync(LOG) ? readFileSync(LOG, 'utf8').slice(n) : '')
 
-async function restartAndWatch(mid: number, chat: string, from: number): Promise<void> {
+async function restartAndWatch(mid: number, chat: string, from: number, expectRearm = false, budgetS = 120): Promise<void> {
   const pid = parseInt(readFileSync(PIDF, 'utf8'), 10)
   console.log(`killing daemon pid ${pid} (the watchdog respawns it)`)
   process.kill(pid, 'SIGTERM')
-  for (let i = 0; i < 120; i++) {
+  let sawRearm = false
+  for (let i = 0; i < budgetS; i++) {
     await sleep(1000)
     const tail = logSince(from)
+    if (!sawRearm && new RegExp(`terminal card ${chat}:${mid} re-armed`).test(tail)) {
+      sawRearm = true
+      console.log(`re-armed at +${i + 1}s — the original window is being finished, not restarted`)
+    }
     if (/terminal card\(s\) orphaned by a restart/.test(tail) && new RegExp(`terminal card ${chat}:${mid} deleted`).test(tail)) {
+      if (expectRearm && !sawRearm) { console.log('\nFAIL — deleted without ever re-arming: the restart treated a live window as expired'); process.exit(1) }
       console.log('\n--- the two lines ---')
       for (const l of tail.split('\n').filter(l => /orphaned by a restart|terminal card /.test(l))) console.log(l)
       // The message is gone from the chat: a second delete must come back "not found".
@@ -77,11 +89,16 @@ if (MODE === 'orphan') {
   if (!sent.ok) { console.error(`send failed: ${JSON.stringify(sent)}`); process.exit(1) }
   const mid = (sent.result as { message_id: number }).message_id
   console.log(`posted card ${chat}:${mid}`)
+  const inS = parseInt(arg('--in') ?? '0', 10)
+  // A pane that cannot be read is fine and is itself worth exercising: the refresh tick's render
+  // throws, the scheduler drops the frame, and the DELETE must still land on time.
+  const pane = arg('--pane') ?? '%0'
   const store = existsSync(CARDS) ? JSON.parse(readFileSync(CARDS, 'utf8')) : {}
-  store[`${chat}:${mid}`] = { chat, msgId: mid, pane: '%0', lines: 30, limit: 4096, until: Date.now() - 1000 }
+  const until = inS > 0 ? Date.now() + inS * 1000 : Date.now() - 1000
+  store[`${chat}:${mid}`] = { chat, msgId: mid, pane, lines: 30, limit: 4096, until }
   writeFileSync(CARDS, JSON.stringify(store, null, 2), { mode: 0o600 })
-  console.log(`wrote an ALREADY-EXPIRED record to ${CARDS}`)
-  await restartAndWatch(mid, chat, logSize())
+  console.log(`wrote a record to ${CARDS} — ${inS > 0 ? `${inS}s left in its window (expect RE-ARM then delete)` : 'ALREADY EXPIRED (expect an immediate delete)'}`)
+  await restartAndWatch(mid, chat, logSize(), inS > 0, 120 + inS)
 } else if (MODE === 'watch') {
   const mid = parseInt(arg('--mid') ?? '', 10)
   if (!Number.isFinite(mid)) { console.error('need --mid <id>'); process.exit(2) }
