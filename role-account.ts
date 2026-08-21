@@ -39,9 +39,10 @@ export function roleAccountKind(id: string): RoleAccountKind | null {
 
 // The picker's rows, projected from the SAME view the Accounts panel and the mini-app sheet render
 // (`projectProviderAccounts`) — which is what keeps the three surfaces from naming the same account
-// two different ways. Nothing is filtered: an unauthed built-in stays visible as a ○ row (owner's
-// ruling, 2026-08-21), because "codex · OpenAI subscription" is a thing he has and would not
-// otherwise find, and rule 2 above is what makes showing it safe.
+// two different ways. Nothing is filtered HERE: what a role may pick is decided upstream, by what the
+// view carries. Since v0.5.212 that is the accounts and providers the owner ADDED and nothing else
+// (his ruling, 2026-08-21) — the proxy built-ins are no longer projected, so the ○ rows left are his
+// own signed-out accounts and unkeyed gateways, which rule 2 above is what makes safe to show.
 export function roleAccountOptions(view: ProviderAccountsView): RoleAccountRow[] {
   const rows: RoleAccountRow[] = view.accounts.map(account => ({
     id: account.id,

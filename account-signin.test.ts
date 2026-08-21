@@ -12,6 +12,7 @@ import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { planSignin, planSigninSweep, signinDoneText, signinExpiredText, SIGNIN_TTL_MS, type SigninRecord } from './account-signin.ts'
+import { planAccountGroup } from './account-group.ts'
 
 const SRC = process.env.CC_BRIDGE_SRC_DIR || import.meta.dir
 const daemon = readFileSync(join(SRC, 'daemon.ts'), 'utf8')
@@ -109,11 +110,19 @@ test('CALL SITE: `Sign in` appears on SIGNED-OUT rows only, on both surfaces', (
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))
   // Sign in keeps its words; 🚪 lost them in v0.5.204 (owner: the row's buttons were too big). What
-  // this test is actually about is below — that a row can never offer both.
-  expect(kb).toContain("kb.text('🔑 Sign in', `acct:signin:${h.account}`)")
+  // this test is actually about is below — that no CONFIG DIR can be offered both.
+  expect(kb).toContain("kb.text('🔑 Sign in', `acct:signin:${row.signin[0]}`)")
   expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
-  // else-if, so the two are mutually exclusive by construction rather than by two agreeing guards.
-  expect(kb).toMatch(/accountLoggedIn\(acct\)\)\s*\{[\s\S]*?\}\s*else if \(acct\)/)
+  // Disjoint BY CONSTRUCTION, and since v0.5.212 that construction is `planAccountGroup`'s two
+  // lists rather than an else-if: a row stands for every config dir behind one subscription, so a
+  // one-dir row still offers exactly one of the two, while a MIXED row offers 🚪 for the dir that is
+  // signed in AND a named 🔑 for the one that is out — the state the else-if could not draw at all.
+  expect(kb).toContain('if (row.logout.length)')
+  // …and the bare "Sign in" label is reserved for a ONE-dir row: on a mixed row the 🚪 beside it
+  // acts on the other dir, so the 🔑 names its own (`🔑 main`) or the pair cannot be told apart.
+  expect(kb).toContain('if (row.signin.length === 1 && accts.length === 1)')
+  const mixed = planAccountGroup([{ name: 'main', loggedIn: false }, { name: 'chat', loggedIn: true }])
+  expect(mixed.signin.filter(n => mixed.logout.includes(n))).toEqual([])
 })
 
 test('CALL SITE: the spawn is HEADLESS, on $HOME, and its record goes down BEFORE its timer', () => {

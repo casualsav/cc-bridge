@@ -517,6 +517,19 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
     `a built-in default is NAMED in the block's header (got ${JSON.stringify(head)})`);
   const sub = await p.$eval("#acctdefaults .setrow .sub", n => n.textContent.trim()).catch(() => "");
   ok(sub === "set by the provider", `a built-in has no model control anywhere, and the row says so (got ${JSON.stringify(sub)})`);
+
+  // …AND THE SERVER SENDS NONE OF THEM SINCE v0.5.212 (the owner: the pickers should list only the
+  // accounts/providers he ADDED), so the fixture above is now a "if one ever arrives" guard and THIS
+  // is the shipped shape. A title over an empty block is a promise the payload did not make, so the
+  // header goes with the rows — nothing about the failover half may change either.
+  await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
+    [{ ...withProxies("claude:main"), accounts: withProxies("claude:main").accounts.filter(x => !x.roleOnly) }, settingsFixture(true)]);
+  await p.evaluate(() => openAccounts()).catch(() => {});
+  await p.waitForTimeout(300);
+  const bare = await p.$$eval("#accbody .accttop .copy", ns => ns.map(n => n.textContent.trim()));
+  ok(!bare.some(h => h.includes("Built-in providers")), `no role-only rows ⇒ no built-in section at all, header included (got ${JSON.stringify(bare)})`);
+  ok((await p.$$('[data-account^="proxy:"]')).length === 0, "no role-only rows ⇒ no built-in row");
+  ok(bare.some(h => h === "Coding failover2 of 2 accounts participate"), `the failover half is untouched by their absence (got ${JSON.stringify(bare)})`);
   await p.close();
 }
 

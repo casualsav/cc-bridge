@@ -30,6 +30,7 @@ import { claimInstance } from './instance-lock.ts'
 anchorCwd('daemon')
 import { activeFailoverChain, chainGroups, hopKey, resolveChain, pickNextHop, moveHop, moveHopGroup } from './failover-chain.ts'
 import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
+import { planAccountGroup } from './account-group.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
@@ -77,7 +78,7 @@ import {
 } from './harness-gateway.ts'
 import {
   resolveRoleHarness, roleHarnessSummary, harnessModelUpdate, roleModelChips, spawnLaunchHarness,
-  ROLE_BUILTIN_PROVIDERS, type SessionRole,
+  type SessionRole,
 } from './role-provider.ts'
 import {
   roleAccountOptions, roleAccountLabel, roleRowGlyph, planRoleSelection, applyRoleAccount,
@@ -2314,23 +2315,10 @@ async function proxyProviderReady(provider: BuiltinHarnessProvider): Promise<boo
   catch { return false }
 }
 
-// RENDERING a role picker or the app's accounts sheet asks all four built-ins at once, and each is a
-// subprocess — so the answer is cached, the way `gatewayProbeSuccess` caches its probe. A tap never
-// reads this: `rp:set` re-runs the live check (`planRoleSelection`'s whole premise is that a
-// keyboard can be hours old). Failures live a tenth as long as successes, so a sign-in the owner
-// just performed shows up on the next screen instead of five minutes later.
-const proxyReadyCache = new Map<string, { at: number; ready: boolean }>()
-async function proxyReadinessMap(): Promise<Record<string, boolean>> {
-  const now = Date.now()
-  const entries = await Promise.all(ROLE_BUILTIN_PROVIDERS.map(async name => {
-    const hit = proxyReadyCache.get(name)
-    if (hit && now - hit.at < (hit.ready ? 300_000 : 30_000)) return [name, hit.ready] as const
-    const ready = await proxyProviderReady(name)
-    proxyReadyCache.set(name, { at: Date.now(), ready })
-    return [name, ready] as const
-  }))
-  return Object.fromEntries(entries)
-}
+// The four built-ins' readiness was cached here for the role picker and the app's accounts sheet,
+// which listed them as rows. Neither offers them any more (owner's ruling, 2026-08-21 —
+// `buildProviderAccountsView` passes no `proxyReady`), so nothing renders their state and the cache
+// went with them. `proxyProviderReady` itself stays: a session LAUNCHING on a proxy still checks it.
 
 const gatewayProbeSuccess = new Map<string, number>()
 async function gatewayProviderReady(profile: Extract<HarnessProfile, { provider: 'gateway' }>): Promise<boolean> {
@@ -13915,8 +13903,8 @@ function baseRowValue(): string {
 }
 // A role's default in the fewest words that still identify it: which account, which model. The
 // account is named by its ID's own name part rather than its rendered label, and that is what makes
-// this row SYNCHRONOUS — a label needs the accounts view, the view needs `proxyReadinessMap()`, and
-// four subprocesses on every /settings paint is not a price a summary line may charge. Stripping the
+// this row SYNCHRONOUS — a rendered label needs the accounts view, which is an async build with a
+// gateway read in it, and that is not a price a summary line may charge. Stripping the
 // subscription suffix off `main — suchag@gmail.com · Max 20x` yields the account name exactly, so
 // the short form loses nothing the long one carried at this width.
 function roleDefaultShort(role: SessionRole): string {
@@ -14359,39 +14347,52 @@ async function fleetModelHosts(model: string): Promise<string[]> {
 }
 
 // WHOSE subscription a registered config dir is signed into — `suchag@gmail.com · Max 20x` — for
-// the row's label. It used to return a grouping KEY as well; nothing reads one since rows went
-// per-account (v0.5.201), and leaving a key here would invite the next reader to re-collapse them.
-// `readAccountIdentity` still exposes its key for anyone who genuinely needs subscription identity.
-// Unregistered or no readable email ⇒ null, and the row falls back to the account name alone.
+// the row's label. `readAccountIdentity` also exposes the grouping KEY, which `accountGroupKey`
+// below reads; this one answers the narrower question and returns null when there is no email to
+// print. Unregistered or no readable email ⇒ null, and the row falls back to the account name alone.
 function accountIdentityLabel(name: string): string | null {
   const acct = accountByName(name)
   if (!acct) return null
   const id = readAccountIdentity(acct.configDir)
   return id.email ? id.label : null
 }
-// ONE ROW PER REGISTERED ACCOUNT, not per subscription (owner's ruling, 2026-08-21). This returned
-// the IDENTITY key, so `main` and `chat` — one Max 20x login across two config dirs — collapsed into
-// a single row. That row was "ready" if EITHER dir was signed in, while 🚪/Log out acted on the
-// FIRST, so signing one out left the row green with a button that errored on the second tap and no
-// path at all to the dir that needed attention. Returning the hopKey makes each claude hop its own
-// group: `hopKey(claude)` is already `claude:${account}`, so group.key === hopKey and every existing
-// caller (hopGroupFor, moveHopGroup, accountRowLabel, the ↑/↓ handlers) keeps working untouched.
-// Gateways and Codex were never grouped by this — chainGroups keys those by hopKey already.
-const accountGroupKey = (name: string): string => `claude:${name}`
+// ONE ROW PER SUBSCRIPTION (owner's ruling, 2026-08-21: "if both of them are on one account, it
+// should only have the one account listed"). `main` and `chat` are one Max 20x login across two
+// config dirs, so they are ONE row, keyed on the identity `readAccountIdentity` reads. v0.5.201
+// un-grouped these rows over the G5 defect — the collapsed row read "ready" if EITHER dir was signed
+// in while 🚪 acted on the FIRST — and that defect is closed on the ACTIONS instead
+// (`planAccountGroup`, account-group.ts): the row's state is the whole set and every button acts on
+// every dir the plan names. A dir with no readable identity keys on its own NAME, so missing
+// evidence can only ever split rows, never merge them.
+// Gateways and Codex are not grouped by this — chainGroups keys those by hopKey already.
+const accountGroupKey = (name: string): string => {
+  const acct = accountByName(name)
+  if (!acct) return `claude:${name}`
+  const key = readAccountIdentity(acct.configDir).key
+  return key.startsWith('dir:') ? `claude:${name}` : key
+}
 // The row a hop belongs to, and the hops behind a row. `chainGroups` is the single definition of
 // both, so the panel's ↑/↓, 🚀 and 🗑 always speak for exactly what the row shows.
-function hopGroupFor(chain: FailoverHop[], key: string): FailoverHop[] {
-  return chainGroups(chain, accountGroupKey).find(g => g.hops.some(h => hopKey(h) === key))?.hops ?? []
+function hopGroupFor(chain: FailoverHop[], key: string, identityOf: (name: string) => string = accountGroupKey): FailoverHop[] {
+  return chainGroups(chain, identityOf).find(g => g.hops.some(h => hopKey(h) === key))?.hops ?? []
 }
-// What a Claude row is CALLED. THE ACCOUNT NAME LEADS, and that is load-bearing rather than
-// cosmetic: rows are per-account since v0.5.201, and `main` and `chat` share one subscription — so
-// the old subscription-only label would render them as two IDENTICAL rows, which is the failure the
-// grouping existed to prevent, arriving from the other side. The subscription stays as the suffix
-// because it is what tells two SEPARATE logins apart. An unreadable identity (or one that is just
-// the dir's own name) leaves the name alone, never a dangling separator.
+// The MINI APP's accounts sheet renders one row per CONFIG DIR — `projectProviderAccounts` keys on
+// the account name and stays that way, because a role binds to a dir and the app is where that is
+// chosen. Telegram's panel renders one row per SUBSCRIPTION. So the app's ranks, its participate
+// count and its Forget plan group by DIR: handing them `accountGroupKey` would have the ± control
+// refuse its own row count, and ↑ move two rows at once, the moment two dirs share a login.
+const webappRowKey = (name: string): string => `claude:${name}`
+// What a Claude row is CALLED. A row is a SUBSCRIPTION, so when it stands for more than one config
+// dir the identity leads and the dirs follow in parentheses: he reads the list to count the accounts
+// he has, and the dirs are what the row's buttons will act on, so neither may be left off. A
+// single-dir row keeps the NAME first (`main — suchag@gmail.com · Max 20x`) — its dir is the row, and
+// a trailing `(main)` would say that twice. An unreadable identity (or one that is just the dir's own
+// name) leaves the names alone, never a dangling separator.
 function accountRowLabel(hops: FailoverHop[]): string {
-  const first = hops[0]?.account || ''
+  const names = hops.map(h => h.account || '').filter(Boolean)
+  const first = names[0] || ''
   const identity = accountIdentityLabel(first)
+  if (names.length > 1) return identity ? `${identity} (${names.join(', ')})` : names.join(', ')
   return identity && identity !== first ? `${first} — ${identity}` : first
 }
 
@@ -15798,9 +15799,9 @@ async function accountsPanelText(): Promise<string> {
   const focusedAcct = await paneAccount(focus.activePaneId)
   const a = loadAccess()
   const gateways = loadHarnessGateways()
-  // One row per ACCOUNT, not per config dir: two profiles signed into one subscription are one
-  // entry (account-identity.ts). The row names the account; its config dirs are an implementation
-  // detail nobody manages from here.
+  // One row per SUBSCRIPTION, not per config dir: two profiles signed into one login are one entry
+  // (account-identity.ts, `accountGroupKey`). The row names the subscription and the dirs behind it,
+  // and its state and buttons speak for all of them (account-group.ts).
   const lines = chainGroups(failoverChain(), accountGroupKey).map((group, i) => {
     const h = group.hops[0]!
     if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
@@ -15811,11 +15812,18 @@ async function accountsPanelText(): Promise<string> {
     }
     const accts = group.hops.map(x => accountByName(x.account!)).filter((x): x is Account => !!x)
     const acct = accts[0]
+    // One usage pool per subscription, so the first dir's snapshot is the row's — reading them all
+    // would print the same percentage twice.
     const snap = acct ? readUsageSnapshot(undefined, acct) : null
     const pct = snap?.fiveHour ? ` · ${Math.round(snap.fiveHour.pct)}% of 5h` : ''
     // "signed out", not "⚠️ not logged in": it is a state, not a fault, and the row already offers
     // the one action that fixes it (🔑 Sign in). The warning glyph made a normal state look broken.
-    const login = accts.length && !accts.some(accountLoggedIn) ? ' · signed out' : ''
+    // A row standing for several dirs states the SET's state and NAMES the dirs that are out — the
+    // G5 defect was a mixed row rounding itself to green, and this is that fact said out loud.
+    const row = planAccountGroup(accts.map(x => ({ name: x.name, loggedIn: accountLoggedIn(x) })))
+    const login = !accts.length ? ''
+      : row.state === 'out' ? ' · signed out'
+      : row.state === 'mixed' ? ` · ${escapeHtml(row.signin.join(', '))} signed out` : ''
     const focused = accts.some(x => x.name === focusedAcct.name) && focus.activePaneId ? ' ← focused session' : ''
     return `${i + 1}. 👤 <b>${escapeHtml(accountRowLabel(group.hops))}</b>${pct}${login}${focused}`
   })
@@ -15866,8 +15874,9 @@ function accountsPanelKeyboard(): InlineKeyboard {
     const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${accountRowLabel(group.hops)}`
     kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
     if (h.kind === 'claude') {
-      // THE ROW'S ACTIONS FOLLOW ITS STATE, and it has exactly one destructive act plus one way
-      // back in — never both at once. There is no 🚀 here any more: the launcher concept is retired
+      // THE ROW'S ACTIONS FOLLOW ITS STATE: one destructive act per dir plus a way back in, and no
+      // dir is ever offered both (they come off two disjoint lists — a MIXED row shows 🚪 for the
+      // dir that is in and 🔑 for the one that is out). There is no 🚀 here any more: the launcher concept is retired
       // whole (owner, 2026-08-21, "I don't need a 🚀 button for each account"), not relocated.
       // New sessions come from `tg spawn` / the app's `+`, which is where they always belonged.
       //
@@ -15878,21 +15887,29 @@ function accountsPanelKeyboard(): InlineKeyboard {
       // CONFIRM screens are where the words live and must stay ("🚪 Log out", "🗑 Remove", each over
       // text naming the account and what it costs). The gateway row beside this one has been bare
       // ✏️/🔑/🗑 all along, so this is the panel's own idiom, not a new one.
-      const acct = accountByName(h.account!)
-      if (acct && accountLoggedIn(acct)) {
-        // Ends this account's LOGIN on this box — a different act from 🗑, which only unregisters
-        // it. `main` gets this: it is excluded from 🗑 because unregistering it would break account
-        // resolution, and that reasoning does not carry to signing it out.
-        kb.text('🚪', `acct:out:${h.account}`)
-      } else if (acct) {
-        // The ONLY action a signed-out row offers, and the reason the launcher could be retired at
-        // all: a headless pane whose whole job is to reach the login screen. Not a launcher — no
-        // spawn sheet, no picker, no topic.
-        kb.text('🔑 Sign in', `acct:signin:${h.account}`)
-      }
-      // 🗑 unregisters this row's config dir (one per row since v0.5.201) — and `main` is never
-      // removable, because account resolution is built on it.
-      if (h.account !== 'main') kb.text('🗑', `acct:rmg:${h.account}`)
+      //
+      // THE ROW STANDS FOR EVERY CONFIG DIR BEHIND ONE SUBSCRIPTION, so each button acts on the SET
+      // the plan names, never on the first member — that "acts on the first" is the G5 defect
+      // (v0.5.201) that un-grouped these rows, and it is the only thing grouping them back requires.
+      // The callback carries the row's representative NAME, not the dir list: the handler re-derives
+      // the plan from a fresh read at tap time, which is the only reading that can still be true.
+      const accts = group.hops.map(x => accountByName(x.account!)).filter((x): x is Account => !!x)
+      const row = planAccountGroup(accts.map(x => ({ name: x.name, loggedIn: accountLoggedIn(x) })))
+      // Ends the LOGIN of every dir on this row that has one — a different act from 🗑, which only
+      // unregisters. `main` gets this: it is excluded from 🗑 because unregistering it would break
+      // account resolution, and that reasoning does not carry to signing it out.
+      if (row.logout.length) kb.text('🚪', `acct:out:${h.account}`)
+      // The ONLY action a signed-out row offers, and the reason the launcher could be retired at
+      // all: a headless pane whose whole job is to reach the login screen. Not a launcher — no
+      // spawn sheet, no picker, no topic. A sign-in is one such pane PER DIR, so when the row has
+      // more than one dir out, each gets its OWN named button — two identically labelled buttons
+      // relay two login links he cannot tell apart. A MIXED row names its one dir too: the 🚪 beside
+      // it acts on the OTHER dir, and a bare "Sign in" next to it does not say which is which.
+      if (row.signin.length === 1 && accts.length === 1) kb.text('🔑 Sign in', `acct:signin:${row.signin[0]}`)
+      else for (const n of row.signin) kb.text(`🔑 ${n}`, `acct:signin:${n}`)
+      // 🗑 unregisters this row's config dirs — never `main`, because account resolution is built on
+      // it, and the confirm names every dir that actually goes.
+      if (row.forget.length) kb.text('🗑', `acct:rmg:${h.account}`)
     } else if (h.kind === 'gateway') {
       kb.text('✏️', `gw:model:${h.name}`).text('🔑', `gw:key:${h.name}`).text('🗑', `gw:rm:${h.name}`)
     }
@@ -17307,39 +17324,54 @@ bot.on('callback_query:data', async ctx => {
     // act: 🗑 forgets the account, this ends its login on this box. `main` gets the button (it is
     // excluded from 🗑 only because unregistering it would break account resolution).
     if (acctMatch[5] || acctMatch[6]) {
-      const name = (acctMatch[5] || acctMatch[6])!
-      const acct = accountByName(name)
-      if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
-      if (!accountLoggedIn(acct)) { await ctx.answerCallbackQuery({ text: `${name} is not logged in.` }).catch(() => {}); return }
+      const rep = (acctMatch[5] || acctMatch[6])!
+      // The row is a SUBSCRIPTION and 🚪 ends every login behind it, so the dirs are re-derived HERE
+      // from a fresh read — the keyboard that was tapped may be hours old, and a destructive act may
+      // never be taken from what it happened to say then. A rep that is no longer in the chain still
+      // logs out its own dir rather than nothing.
+      const members = hopGroupFor(failoverChain(), `claude:${rep}`).map(h => h.account!).filter(Boolean)
+      const accts = (members.length ? members : [rep]).map(accountByName).filter((x): x is Account => !!x)
+      if (!accts.length) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
+      const row = planAccountGroup(accts.map(x => ({ name: x.name, loggedIn: accountLoggedIn(x) })))
+      if (!row.logout.length) { await ctx.answerCallbackQuery({ text: `${row.signin.join(', ') || rep} is not logged in.` }).catch(() => {}); return }
       if (acctMatch[5]) {
         await ctx.answerCallbackQuery().catch(() => {})
-        const plan = await planAccountLogout(acct)
         // The body is the SHARED formatter's plain text, escaped here — the envelope stays
-        // bridge-built, so the two surfaces cannot word one irreversible act differently.
-        await showHtmlPanel(ctx, 'edit', `🚪 ${escapeHtml(logoutConfirmText(plan))}`,
-          new InlineKeyboard().text('🚪 Log out', `acct:outgo:${name}`).text('‹ Cancel', 'acct:panel'))
+        // bridge-built, so the two surfaces cannot word one irreversible act differently. One block
+        // per dir, each naming its own config dir, sessions and MCP logins, because the single tap
+        // that follows signs out all of them.
+        const plans = await Promise.all(row.logout.map(n => planAccountLogout(accountByName(n)!)))
+        await showHtmlPanel(ctx, 'edit', `🚪 ${plans.map(plan => escapeHtml(logoutConfirmText(plan))).join('\n\n')}`,
+          new InlineKeyboard().text('🚪 Log out', `acct:outgo:${rep}`).text('‹ Cancel', 'acct:panel'))
         return
       }
-      await ctx.answerCallbackQuery({ text: `Logging out of ${name}…` }).catch(() => {})
-      const plan = await planAccountLogout(acct)
-      const r = await claudeLogout(acct)
-      if (r.kind === 'failed') {
-        logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
-        await showHtmlPanel(ctx, 'edit', `❌ Couldn't log out of <b>${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`, accountsPanelKeyboard())
-        return
+      await ctx.answerCallbackQuery({ text: `Logging out of ${row.logout.join(', ')}…` }).catch(() => {})
+      // Every dir gets its own outcome line: one of them failing says nothing about the others, and
+      // a screen that reported only the first would be the G5 defect wearing the result's clothes.
+      const said: string[] = []
+      for (const name of row.logout) {
+        const acct = accountByName(name)!
+        const plan = await planAccountLogout(acct)
+        const r = await claudeLogout(acct)
+        if (r.kind === 'failed') {
+          logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
+          said.push(`❌ Couldn't log out of <b>${escapeHtml(name)}</b> — ${escapeHtml(r.error)}`)
+          continue
+        }
+        // `partial` is NOT a failure: the file is already gone, so the row behind this panel has
+        // already gone grey. Saying "couldn't log out" over it is the contradiction G4 names.
+        if (r.kind === 'partial') {
+          // NOT logDecision: `grep "daemon: delivery "` is a contract delivery-log-sites.test.ts
+          // enumerates over refused/held/buffered/dropped, and a partial logout is none of those — it
+          // is a success with an unverified half. Its own named line instead.
+          process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
+          said.push(escapeHtml(logoutPartialText(name, r.error)))
+          continue
+        }
+        process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+        said.push(escapeHtml(logoutResultText(name, r.said)))
       }
-      // `partial` is NOT a failure: the file is already gone, so the row behind this panel has
-      // already gone grey. Saying "couldn't log out" over it is the contradiction G4 names.
-      if (r.kind === 'partial') {
-        // NOT logDecision: `grep "daemon: delivery "` is a contract delivery-log-sites.test.ts
-        // enumerates over refused/held/buffered/dropped, and a partial logout is none of those — it
-        // is a success with an unverified half. Its own named line instead.
-        process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
-        await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutPartialText(name, r.error))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
-        return
-      }
-      process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
-      await showHtmlPanel(ctx, 'edit', `${escapeHtml(logoutResultText(name, r.said))}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
+      await showHtmlPanel(ctx, 'edit', `${said.join('\n\n')}\n\n${await accountsPanelText()}`, accountsPanelKeyboard())
       return
     }
     // 🔑 Sign in — the ONLY action a signed-out row offers, and the replacement for the 🚀 that used
@@ -22913,7 +22945,11 @@ async function buildProviderAccountsView(role: SessionRole, models?: Record<stri
   const view = projectProviderAccounts({
     claudeAccounts: listAccounts().map(account => ({ name: account.name, ready: accountLoggedIn(account) })),
     gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
-    proxyReady: await proxyReadinessMap(),
+    // NO `proxyReady`, so no built-in provider rows on either surface (owner's ruling, 2026-08-21:
+    // the role pickers "should only show the list of accounts/providers that have been added in the
+    // main accounts settings"). The built-ins were the one thing on those screens he had not added.
+    // `routeForAccountId`'s `proxy:` arm and `roleAccountLabel`'s fallback stay, so a role still
+    // pointing at one from before resolves and renders instead of reading as a broken setting.
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
     ...(models ? { models } : {}), auto: prefs.limitFailover === true,
     labelOf: accountIdentityLabel,
@@ -23091,12 +23127,12 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   const chainRole: SessionRole = action.role === 'chat' ? 'chat' : 'code'
   const roleChain = chainRole === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
   const chain = resolveChain(roleChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
-  const groups = chainGroups(chain, accountGroupKey)
+  const groups = chainGroups(chain, webappRowKey)
   if (kind === 'move') {
     const id = String(action.id ?? '')
     const dir = action.dir === 'up' ? 'up' : action.dir === 'down' ? 'down' : null
     if (!dir || !chain.some(h => hopKey(h) === id)) return { error: 'bad account or direction' }
-    const moved = moveHopGroup(chain, id, dir, accountGroupKey)
+    const moved = moveHopGroup(chain, id, dir, webappRowKey)
     if (chainRole === 'chat') prefs.chatFailoverChain = moved; else prefs.codeFailoverChain = moved
     saveAccess(prefs); return { ok: true }
   }
@@ -23168,7 +23204,7 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   // name one set while the removal takes another.
   if (kind === 'remove-claude-plan' || kind === 'remove-claude') {
     const rep = String(action.name ?? '')
-    const group = hopGroupFor(failoverChain(), `claude:${rep}`)
+    const group = hopGroupFor(failoverChain(), `claude:${rep}`, webappRowKey)
     const members = group.map(h => h.account!).filter(Boolean)
     if (!members.length) return { error: 'unknown account' }
     // main and any account a chat lane is running on are never removable — the same protection the

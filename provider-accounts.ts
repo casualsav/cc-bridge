@@ -86,6 +86,11 @@ type ProjectionInput = {
    * Live `claude-code-proxy <p> auth status` per built-in. OMITTED means "this consumer does not
    * offer role transports" and no proxy row is projected at all — the failover surfaces
    * (`tg readout providers`, the chain editor) are unchanged by their existence.
+   *
+   * NO CALLER PASSES IT since v0.5.212: a role picks from the accounts the owner ADDED, and the
+   * built-ins were the one thing on those screens he had not (his ruling, 2026-08-21). The
+   * projection keeps the arm because dropping it would also delete the `roleOnly` shape every
+   * consumer branches on — and both surfaces already render nothing when no such row arrives.
    */
   proxyReady?: Record<string, boolean>
   chain: FailoverHop[]

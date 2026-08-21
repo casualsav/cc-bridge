@@ -18,6 +18,7 @@ import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { logoutConfirmText, logoutResultText, logoutPartialText, type LogoutPlan } from './account-logout.ts'
+import { planAccountGroup } from './account-group.ts'
 
 const SRC = process.env.CC_BRIDGE_SRC_DIR || import.meta.dir
 const daemon = readFileSync(join(SRC, 'daemon.ts'), 'utf8')
@@ -152,10 +153,15 @@ test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
   // so big"). The words moved to where they act — the two-step CONFIRM screens, asserted in the
   // call-site test below, which is the assertion that actually protects the reader.
   expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
-  expect(kb).toContain('accountLoggedIn(acct)')
-  // …while 🗑 keeps its main guard, so the two acts stay distinguishable. Rows are per-account since
-  // v0.5.201, so the guard is a name test rather than a walk over the group's hops.
-  expect(kb).toContain("if (h.account !== 'main') kb.text('🗑', `acct:rmg:")
+  // A row is a SUBSCRIPTION again since v0.5.212, so the button follows the plan's list — 🚪 appears
+  // while ANY config dir behind the row still has a login, `main` included.
+  expect(kb).toContain('planAccountGroup(')
+  expect(kb).toContain('loggedIn: accountLoggedIn(x)')
+  expect(kb).toContain('if (row.logout.length)')
+  // …while 🗑 keeps its main guard, so the two acts stay distinguishable — as a list that main is
+  // never in (`forget`), because the row can stand for more than one dir.
+  expect(kb).toContain("if (row.forget.length) kb.text('🗑', `acct:rmg:")
+  expect(planAccountGroup([{ name: 'main', loggedIn: true }]).forget).toEqual([])
 })
 
 test('CALL SITE: the Telegram row action is the same two steps and the same words', () => {
@@ -168,7 +174,9 @@ test('CALL SITE: the Telegram row action is the same two steps and the same word
   const body = daemon.slice(at, daemon.indexOf('if (acctMatch[4]) {', at))
   expect(body).toContain('logoutConfirmText(plan)')     // one formatter, both surfaces
   expect(body).toContain('logoutResultText(name, r.said)')
-  expect(body).toContain("`acct:outgo:${name}`")
+  // The callback carries the row's REPRESENTATIVE dir (v0.5.212); the dirs it stands for are
+  // re-derived from a fresh chain read at tap time, never carried in the keyboard.
+  expect(body).toContain("`acct:outgo:${rep}`")
   expect(body).toContain('await claudeLogout(acct)')
 })
 
@@ -258,9 +266,14 @@ test('G4 SOURCE: claudeLogout decides partial-vs-failed from the DISK, not the e
 })
 
 test('G4 CALL SITES: both surfaces branch on three outcomes, and neither logs a partial as a delivery', () => {
-  const tg = daemon.slice(daemon.indexOf('if (acctMatch[5] || acctMatch[6]) {'))
-  const app = daemon.slice(daemon.indexOf("if (kind === 'logout-claude-plan' || kind === 'logout-claude')"))
-  for (const body of [tg.slice(0, 2600), app.slice(0, 2200)]) {
+  // Anchored on each branch's own end, never a magic length — the Telegram branch grew past 2600
+  // characters in v0.5.212 when 🚪 became a loop over the row's config dirs, and a short slice fails
+  // on correct code (the trap the two tests above already document).
+  const tgAt = daemon.indexOf('if (acctMatch[5] || acctMatch[6]) {')
+  const tg = daemon.slice(tgAt, daemon.indexOf('if (acctMatch[4]) {', tgAt))
+  const appAt = daemon.indexOf("if (kind === 'logout-claude-plan' || kind === 'logout-claude')")
+  const app = daemon.slice(appAt, daemon.indexOf("if (kind === 'key')", appAt))
+  for (const body of [tg, app]) {
     expect(body).toContain("r.kind === 'failed'")
     expect(body).toContain("r.kind === 'partial'")
     expect(body).toContain('logoutPartialText')
