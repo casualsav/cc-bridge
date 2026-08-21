@@ -76,8 +76,13 @@ import {
   parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import {
-  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, spawnLaunchHarness, type SessionRole,
+  resolveRoleHarness, roleHarnessSummary, harnessModelUpdate, roleModelChips, spawnLaunchHarness,
+  ROLE_BUILTIN_PROVIDERS, type SessionRole,
 } from './role-provider.ts'
+import {
+  roleAccountOptions, roleAccountLabel, roleRowGlyph, planRoleSelection, applyRoleAccount,
+  roleAccountIdForHarness, roleAccountKind, type RoleAccountRow,
+} from './role-account.ts'
 import { GATEWAY_PRESETS } from './gateway-presets.ts'
 import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccounts, routeForAccountId, type ProviderAccountsView, type ProviderRoute } from './provider-accounts.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
@@ -104,7 +109,7 @@ import {
   pasteVerified, resubmitVerified, waitForPaneReady, clearInputBox, type PasteOutcome,
 } from './pane-io.ts'
 import type {
-  PendingEntry, GroupPolicy, Access, Session,
+  PendingEntry, GroupPolicy, Access, Session, OutputStyle,
   PendingMultiSelect, FreeTextPrompt, ChatPrompt, ScheduledMessage,
 } from './types.ts'
 import {
@@ -133,7 +138,7 @@ import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCa
   type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
-  pruneExpired, defaultAccess, type GateResult,
+  pruneExpired, defaultAccess, OUTPUT_STYLES, outputStyleArgs, type GateResult,
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
@@ -2138,11 +2143,15 @@ function saveGatewayModelAndSyncRoles(name: string, def: GatewayDefinition): voi
   const a = loadAccess()
   const id = `gateway:${name}`
   let changed = false
+  // Through `applyRoleAccount` like every other write of this pair — a gateway's model changing under
+  // a role is still the role's (account, harness) being set, and a second hand-rolled copy of that
+  // assignment is how the two prefs drifted apart in the first place (role-account.ts, defect 1).
+  const harness = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
   if (a.chatProviderAccount === id || (a.chatHarness?.provider === 'gateway' && a.chatHarness.gateway === name)) {
-    a.chatProviderAccount = id; a.chatHarness = { provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }; changed = true
+    applyRoleAccount(a, 'chat', id, harness); changed = true
   }
   if (a.codeProviderAccount === id || (a.codeHarness?.provider === 'gateway' && a.codeHarness.gateway === name)) {
-    a.codeProviderAccount = id; a.codeHarness = { provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }; changed = true
+    applyRoleAccount(a, 'code', id, harness); changed = true
   }
   if (changed) saveAccess(a)
 }
@@ -2303,6 +2312,24 @@ async function proxyProviderReady(provider: BuiltinHarnessProvider): Promise<boo
   const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
   try { await exec(bin, [provider, 'auth', 'status'], { timeout: 5000 }); return true }
   catch { return false }
+}
+
+// RENDERING a role picker or the app's accounts sheet asks all four built-ins at once, and each is a
+// subprocess — so the answer is cached, the way `gatewayProbeSuccess` caches its probe. A tap never
+// reads this: `rp:set` re-runs the live check (`planRoleSelection`'s whole premise is that a
+// keyboard can be hours old). Failures live a tenth as long as successes, so a sign-in the owner
+// just performed shows up on the next screen instead of five minutes later.
+const proxyReadyCache = new Map<string, { at: number; ready: boolean }>()
+async function proxyReadinessMap(): Promise<Record<string, boolean>> {
+  const now = Date.now()
+  const entries = await Promise.all(ROLE_BUILTIN_PROVIDERS.map(async name => {
+    const hit = proxyReadyCache.get(name)
+    if (hit && now - hit.at < (hit.ready ? 300_000 : 30_000)) return [name, hit.ready] as const
+    const ready = await proxyProviderReady(name)
+    proxyReadyCache.set(name, { at: Date.now(), ready })
+    return [name, ready] as const
+  }))
+  return Object.fromEntries(entries)
 }
 
 const gatewayProbeSuccess = new Map<string, number>()
@@ -9152,7 +9179,10 @@ async function handleCall(
         if (providerModel && !/^[A-Za-z0-9._:/+-]+(?:\[1m\])?$/.test(providerModel)) {
           write({ t: 'result', id, ok: false, text: `invalid model id '${providerModel}'` }); return
         }
-        if (providerModel && providerRoute?.harness) {
+        // Only a GATEWAY publishes a model catalog. A proxy built-in's models are the harness
+        // defaults (`normalizeHarnessProfile` refuses one that doesn't match its provider), so
+        // there is nothing to discover and nothing to check it against.
+        if (providerModel && providerRoute?.harness?.provider === 'gateway') {
           const discovered = await discoverGatewayModels(providerRoute.harness)
           if (discovered?.length && !discovered.map(x => x.replace(/\[1m\]$/, '').toLowerCase()).includes(providerModel.replace(/\[1m\]$/, ''))) {
             write({ t: 'result', id, ok: false, text: `${providerModel} is not available on ${providerAccount}` }); return
@@ -12091,6 +12121,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         // applies, now that this line asserts a pinned model too.
         : `${envPrefix}${resumeModelArgs.some(a => a.startsWith('claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : ''}${claudeHarnessLaunch(harness, claudeBin(), [
             '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []), ...resumeModelArgs,
+            ...outputStyleArgs(loadAccess().outputStyle),
           ])}`
       logLaunch(id !== null ? 'resume-in-pane' : 'cross-engine-in-pane', pane,
         resumeAlias ? `transcript-truth(${resumeAlias})` : 'cli-default', resume)
@@ -12642,7 +12673,9 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
       ].filter((f): f is string => !!f)
       const envPrefix = (account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
         + (flags.some(f => f.startsWith('--model claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : '')
-      const launch = `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), ['--allow-dangerously-skip-permissions', ...flags.flatMap(f => f.split(/\s+/))])}`
+      // outputStyleArgs is spread AFTER the flatMap, never folded into `flags`: those entries are
+      // split on whitespace, and a JSON payload is one argv element whatever it contains.
+      const launch = `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), ['--allow-dangerously-skip-permissions', ...flags.flatMap(f => f.split(/\s+/)), ...outputStyleArgs(loadAccess().outputStyle)])}`
       logLaunch('zero-turn-in-pane', t.pane, `${loadAccess().spawnModel ? 'spawn-default' : 'floor'}(${model})`, launch)
       let landed = false
       const relaunch = async () => { landed = await relaunchAgentInPane(t.pane, 'claude', launch) }
@@ -13880,29 +13913,36 @@ function baseRowValue(): string {
   if (!cur) return 'not set'
   return cur.split('/').filter(Boolean).pop() || cur
 }
-// The 🧑‍💻 row's value on both renderings of the settings panel — one function so the plain and the
-// rich table cannot disagree about what the defaults are. 'auto' says what it means in the row
-// itself: the word alone reads like a mode nobody chose.
-function spawnDefaultsSummary(): string {
-  const a = loadAccess()
-  // Same order as the panel's rows (chat first) — the summary is what the row expands into, and the
-  // two reading in opposite orders is the kind of small mismatch that reads as a bug.
-  return `💬 ${roleDials('chat')} · 🧑‍💻 ${roleDials('code')}${a.spawnAuto ? ' · auto' : ''}`
+// A role's default in the fewest words that still identify it: which account, which model. The
+// account is named by its ID's own name part rather than its rendered label, and that is what makes
+// this row SYNCHRONOUS — a label needs the accounts view, the view needs `proxyReadinessMap()`, and
+// four subprocesses on every /settings paint is not a price a summary line may charge. Stripping the
+// subscription suffix off `main — suchag@gmail.com · Max 20x` yields the account name exactly, so
+// the short form loses nothing the long one carried at this width.
+function roleDefaultShort(role: SessionRole): string {
+  const id = legacyRoleAccountId(role)
+  return `${id.slice(id.indexOf(':') + 1)}/${roleModelOf(role)}`
 }
-// The 👤 Accounts row's state line — accounts · failover · providers — shared by the settings
-// root's two renderers (settingsText/settingsMarkdown) so they can't drift. The failover chain
-// and the gateway providers live inside the Accounts panel, so one row carries all three counts.
+// The 👤 Accounts row's state line — accounts · failover · the two role defaults — shared by the
+// settings root's two renderers (settingsText/settingsMarkdown) so they can't drift. The 🧑‍💻
+// Defaults row was RETIRED into the Accounts panel (v0.5.211), so this row is now the only place the
+// root says what the roles run on; the gateway count went with it to pay for the width.
 function accountsRowSummary(): string {
   const a = loadAccess()
-  const gw = Object.keys(loadHarnessGateways()).length
-  return `${listAccounts().length} · 🔀 ${a.limitFailover === true ? 'on' : 'off'}${gw ? ` · ${gw} 🌐` : ''}`
+  return `${listAccounts().length} · 🔀 ${a.limitFailover === true ? 'on' : 'off'}` +
+    ` · 💬 ${roleDefaultShort('chat')} · 🧑‍💻 ${roleDefaultShort('code')}`
+}
+// 🗣 output style: the pref, or `default` for "nothing configured" — which is a real state and not
+// the `Default` style (unset passes no --settings at all; see outputStyleArgs).
+function outputStyleRowValue(): string {
+  return loadAccess().outputStyle ?? 'default'
 }
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${accountsRowSummary()}</b>\n` +
-    `🧑‍💻 Defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
+    `🗣 Output style — <b>${outputStyleRowValue()}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
@@ -13922,8 +13962,8 @@ function settingsMarkdown(): string {
   const a = loadAccess()
   const rows: Array<[string, string]> = [
     ['👤 Accounts', accountsRowSummary()],
-    ['🧑‍💻 Defaults', spawnDefaultsSummary()],
     ['🐙 GitHub', ghSummary()],
+    ['🗣 Output style', outputStyleRowValue()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
     ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
@@ -13935,8 +13975,8 @@ function settingsMarkdown(): string {
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
   const help = [
-    '👤 <b>Accounts</b> — the Claude accounts, the failover order, and third-party providers: add accounts, reorder the chain with ↑/↓, and add any Anthropic-compatible provider (🌐) — all in one panel.',
-    '🧑‍💻 <b>Defaults</b> — the model, effort and permission mode each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own dials keeps them.',
+    '👤 <b>Accounts</b> — the Claude accounts, the failover order, third-party providers, and what each role runs on: add accounts, reorder the chain with ↑/↓, add any Anthropic-compatible provider (🌐), and set the account, model, effort and mode for 💬 the chat agent and 🧑‍💻 coding sessions separately — all in one panel. A session that already has its own dials keeps them.',
+    '🗣 <b>Output style</b> — Claude Code’s own <code>outputStyle</code>: how a session writes (terse, explanatory, teaching…). It is part of the system prompt, so it applies to NEW sessions — a running one picks it up on its next <code>/clear</code> or restart.',
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
     '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
@@ -14007,18 +14047,14 @@ type SettingsRootRow = { id: string; name: string; keys: string[]; value?: strin
 function settingsRows(): SettingsRootRow[] {
   const a = loadAccess()
   return [
+    // The role dials are no longer a ROW here — they live inside 👤 Accounts, one tap in, because a
+    // role picks an ACCOUNT and its model/effort/mode in one place or the two surfaces disagree
+    // about what "the chat default" is (v0.5.211). `webappReadSettings` still SERVES all eight keys:
+    // the app draws them inside its own accounts sheet, so the payload has to carry them even though
+    // no root row names them any more.
     { id: 'accounts', name: '👤 Accounts', keys: ['accounts'], panel: 'accounts' },
-    // The two roles are GROUPS here, not a flat key list, so the app can render one button each
-    // (the accounts sheet's language) instead of six rows. The grouping is the daemon's, like every
-    // other condition on this screen: a client-side key list would be a second copy of it. `keys`
-    // stays the flat union — it is what the app checks a row against before drawing it.
-    { id: 'spawnDefaults', name: '🧑‍💻 Defaults', keys: ['spawnModel', 'spawnEffort', 'spawnMode', 'chatModel', 'chatEffort', 'chatMode', 'spawnAuto', 'fableForAgents'], value: spawnDefaultsSummary(),
-      groups: [
-        { label: MODEL_ROLE_LABEL.chat, keys: ['chatModel', 'chatEffort', 'chatMode'], value: roleDials('chat') },
-        { label: MODEL_ROLE_LABEL.code, keys: ['spawnModel', 'spawnEffort', 'spawnMode'], value: roleDials('code') },
-        { label: '🦾 Agent spawns', keys: ['spawnAuto', 'fableForAgents'] },
-      ] },
     { id: 'github', name: '🐙 GitHub', keys: ['github'], panel: 'github' },
+    { id: 'outputStyle', name: '🗣 Output style', keys: ['outputStyle'] },
     { id: 'batchAllow', name: '⚡ Batch allow', keys: ['batchAllow'] },
     { id: 'transcribe', name: '🎙️ Voice transcription', keys: ['transcribeBackend', 'transcribeModel'], value: transcribeStatus() },
     { id: 'tts', name: '🔊 Voice replies', keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice', 'ttsSpeed'], value: a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off' },
@@ -14044,7 +14080,7 @@ const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
 // settingsText()/settingsMarkdown() above, including the conditional Base folder row.
 function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
-    ['👤', 'acct:panel'], ['🧑‍💻', 'spd:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
+    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['🗣', 'set:outputstyle'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧹', 'set:confirmreset'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
@@ -14210,6 +14246,18 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
       if (key === 'chatMode') a.chatMode = mode; else a.spawnMode = mode
       saveAccess(a); return null
     }
+    // ---- 🗣 output style: Claude Code's own settings.json key, passed at launch as --settings.
+    // Validated against the five built-ins because the CLI does NOT: `--settings
+    // '{"outputStyle":"Bogus"}'` exits 0, prints nothing, and answers in the default style (probed
+    // live against 2.1.239), so an unvalidated write is a setting that reads as applied and is not.
+    // '' clears it back to "nothing configured" — no --settings at all, not the `Default` style.
+    case 'outputStyle': {
+      if (value === '' || value === null) { delete a.outputStyle; saveAccess(a); return null }
+      const v = oneOf(value, OUTPUT_STYLES)
+      if (!v) return `unknown output style — one of: ${OUTPUT_STYLES.join(' | ')}`
+      a.outputStyle = v as OutputStyle
+      saveAccess(a); return null
+    }
     // ---- 📂 base folder: must already EXIST. New topics fan out under it, so a mkdir here would
     // invent a surprise root rather than a one-off session dir.
     case 'baseFolder': {
@@ -14256,80 +14304,34 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
 // The two roles' display names, once — the panel row, the picker header and the settings summary all
 // read them from here so a rename cannot land in two of the three.
 const MODEL_ROLE_LABEL: Record<SessionRole, string> = { code: '🧑‍💻 Coding sessions', chat: '💬 Chat agent' }
-const roleDials = (role: SessionRole): string =>
-  `${configuredSpawnModel(role)} · ${configuredSpawnEffort(role)} · ${modeRowLabel(role)}`
 // A role's mode as a person reads it. Unset says so in words: "no default" is not the `default`
 // mode, and rendering the two the same would make an unconfigured box look configured.
 const modeRowLabel = (role: SessionRole): string => {
   const m = configuredSpawnMode(role)
   return m ? modeLabel(m) : 'no default'
 }
-
-function spawnDefaultsText(): string {
-  const a = loadAccess()
-  return `🧑‍💻 <b>Defaults</b>\n\n` +
-    `${MODEL_ROLE_LABEL.chat} — <b>${escapeHtml(roleDials('chat'))}</b>\n` +
-    `${MODEL_ROLE_LABEL.code} — <b>${escapeHtml(roleDials('code'))}</b>\n` +
-    `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
-    `⏸️ Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
+// WHICH MODEL A ROLE ACTUALLY LAUNCHES ON, which is not one pref but two depending on where the role
+// points. A Claude account takes its model from the spawn defaults (`chatModel`/`spawnModel`); a
+// gateway or proxy built-in carries its OWN model on the harness, and the alias prefs do not reach
+// it at all — `resumeCliModel` drops the alias (role-provider.ts's `spawnLaunchHarness` carries that
+// class). Reading only `configuredSpawnModel` here is what let a panel say `fable` for a role
+// running on DeepSeek. `roleLaunchRoute` already resolves the same fork every spawn does, so the
+// panel and the launch cannot answer differently.
+function roleModelOf(role: SessionRole): string {
+  const harness = roleLaunchRoute(role).harness
+  // Native carries no model of its own even where the type still admits one — both producers of this
+  // field drop an anthropic profile to `undefined`, and the spawn defaults are the answer there.
+  return harness && harness.provider !== 'anthropic'
+    ? harness.model.replace(/\[1m\]$/, '')
+    : configuredSpawnModel(role)
 }
 
-// Each ROLE opens its own picker. Four model chips and six effort chips per role will not fit one
-// keyboard, and flattening them makes ten chips whose role you can only tell by reading — so the
-// roles are rows here and the dials live one tap in. `spd:r:<role>` opens; `spd:m:<role>:<alias>`
-// and `spd:e:<role>:<level>` set.
-function spawnDefaultsKeyboard(): InlineKeyboard {
-  const a = loadAccess()
-  const kb = new InlineKeyboard()
-  // Chat first, coding second — his ordering (2026-08-03). The lane he talks to every day sits above
-  // the sessions it launches.
-  kb.text(`${MODEL_ROLE_LABEL.chat} — ${roleDials('chat')}`, 'spd:r:chat').row()
-  kb.text(`${MODEL_ROLE_LABEL.code} — ${roleDials('code')}`, 'spd:r:code').row()
-  // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
-  // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
-  // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
-  // Both rows are the STATE, not an instruction: the word on the button is what is true right now and
-  // a tap flips it (owner, 2026-07-29). A checkbox glyph beside the word said the same thing twice.
-  kb.text(`🦾 Auto mode (agent picks) — ${onOff(a.spawnAuto === true)}`, 'spd:a:toggle').row()
-  kb.text(`⏸️ Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
-  return kb.text('‹ Back', 'spd:back')
-}
-
-// One role's dials. Header names the role, so a picker opened two taps deep still says what it sets.
-function modelRolePickerText(role: SessionRole): string {
-  return `${MODEL_ROLE_LABEL[role]}\n\n` +
-    `🧠 Model — <b>${escapeHtml(configuredSpawnModel(role))}</b>\n` +
-    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort(role))}</b>\n` +
-    `🧷 Mode — <b>${escapeHtml(modeRowLabel(role))}</b>` +
-    (role === 'chat' && loadAccess().chatModel === undefined
-      ? `\n\n<i>Following the coding default — pick one to split them.</i>` : '')
-}
-function modelRolePickerKeyboard(role: SessionRole): InlineKeyboard {
-  const a = loadAccess()
-  const fableOff = fablePolicy(a.fableForAgents) === 'refuse'
-  const model = configuredSpawnModel(role), effort = configuredSpawnEffort(role)
-  const kb = new InlineKeyboard()
-  // A model the owner has switched off for coding agents is not OFFERED as their default either —
-  // picking it here would set a default no agent-spawned session can start on. His own per-session
-  // picker still lists it: that is his pick, not an agent's. The switch is about what an AGENT may
-  // pick, so it gates the CODING row only — the chat lane is his own surface, never an agent's.
-  for (const m of MODEL_ALIASES) {
-    if (m === FABLE && fableOff && role === 'code') continue
-    kb.text(`${model === m ? '✅ ' : ''}${m}`, `spd:m:${role}:${m}`)
-  }
-  kb.row()
-  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${role}:${e}`)
-  kb.row()
-  // Five modes over two rows, and a tap on the CURRENT one clears it back to "no default" — the only
-  // way out of a configured mode, since there is no sixth chip for "none" (a chip for the absence of
-  // a setting reads as a setting). `spd:d:` = defaults→mode, beside spd:m: model and spd:e: effort.
-  const mode = configuredSpawnMode(role)
-  MODES.forEach((m, i) => {
-    kb.text(`${mode === m ? '✅ ' : ''}${modeLabel(m)}`, `spd:d:${role}:${m}`)
-    if (i === 2) kb.row()
-  })
-  return kb.row().text('‹ Back', 'spd:panel')
-}
+// `spawnDefaultsText/Keyboard` and `modelRolePickerText/Keyboard` are RETIRED here (v0.5.211). The
+// 🧑‍💻 Defaults panel they drew was the second half of one setting: it set a role's model/effort/mode
+// while 👤 Accounts set the same role's ACCOUNT, and the two screens could not see each other — which
+// is how a role bound to DeepSeek in one still advertised `fable` in the other. Both are rebuilt as
+// `roleDefaultsText/Keyboard(role)` beside the account list they belong with; the `spd:*` callbacks
+// they minted all survive and repaint there, so a keyboard from before the move still works.
 
 // The try-in-order failover chain (Claude accounts + Codex + gateways) a usage-limited session
 // moves to. Shared resolution (failover-chain.ts) with attemptLimitFailover, so the panel's
@@ -14401,11 +14403,42 @@ function gatewayAddPanelText(): string {
     `so you only enter your API key. Or choose Custom for any other Anthropic-compatible endpoint.` +
     `\n\n<i>Model is editable later from 👤 Accounts (✏️) or with</i> <code>/harness gateway &lt;name&gt; &lt;model&gt;</code>.`
 }
-function gatewayAddPanelKeyboard(): InlineKeyboard {
+// `back` is where ‹ Back returns to: the Accounts panel for its own two ➕ buttons, the role picker
+// for the ➕ row folded into the accounts list. A Claude account leads, because "add an account" is
+// the thing the role screen is most often missing and the gateway presets are the alternative to it.
+function gatewayAddPanelKeyboard(back = 'acct:panel'): InlineKeyboard {
   const configured = loadHarnessGateways()
   const kb = new InlineKeyboard()
+  kb.text('👤 Claude account', 'acct:add').row()
   for (const p of GATEWAY_PRESETS) kb.text(`🌐 ${p.label}${configured[p.key] ? ' ✓' : ''}`, `gw:add:${p.key}`).row()
-  return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', 'acct:panel')
+  return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', back)
+}
+
+// 🗣 Output-style sub-panel: the five built-ins Claude Code ships, each with the CLI's own account
+// of what it does. The footer is the whole reason this needs a panel rather than a cycling root
+// toggle — the setting is part of the system prompt, so a tap here changes nothing about the
+// sessions already running and saying so is the difference between "it works" and "it's broken".
+const OUTPUT_STYLE_BLURBS: Record<OutputStyle, string> = {
+  Default: 'Claude Code as it ships — nothing added, nothing taken away.',
+  Proactive: 'executes immediately, minimizes interruptions, prefers action over planning',
+  Concise: 'responds tersely, leading with results and skipping preamble and narration',
+  Explanatory: 'explains its implementation choices and codebase patterns',
+  Learning: 'pauses and asks you to write small pieces of code',
+}
+function outputStyleText(): string {
+  const cur = loadAccess().outputStyle
+  return `🗣 <b>Output style</b> — <b>${cur ?? 'default'}</b>\n\n` +
+    OUTPUT_STYLES.map(s => `${s === cur ? '✅ ' : ''}<b>${s}</b> — ${OUTPUT_STYLE_BLURBS[s]}`).join('\n') +
+    `\n\n<i>Applies to new sessions. A running session picks it up on its next /clear or restart.</i>`
+}
+function outputStyleKeyboard(): InlineKeyboard {
+  const cur = loadAccess().outputStyle
+  const kb = new InlineKeyboard()
+  OUTPUT_STYLES.forEach((s, i) => {
+    kb.text(s === cur ? `✅ ${s}` : s, `os:${s}`)
+    if (i % 3 === 2) kb.row()
+  })
+  return kb.row().text('‹ Back', 'os:back')
 }
 
 // Voice-replies sub-panel (ROADMAP #15): mode off/all + engine piper/openai/elevenlabs.
@@ -15102,26 +15135,28 @@ function roleLaunchRoute(role: SessionRole, fallback: Account = MAIN_ACCOUNT): R
 function roleHarnessOf(role: SessionRole): HarnessProfile {
   return resolveRoleHarness(role === 'chat' ? loadAccess().chatHarness : loadAccess().codeHarness)
 }
+// `setRoleAccount` is GONE (v0.5.211): it wrote the pref and nothing else, which is the half of the
+// act that made Telegram's pick differ from the app's. `selectRoleAccount` is the one entry point for
+// both surfaces and does the same write through the same `applyRoleAccount`, plus the live switch.
+
+// The ✏️ model editor's writer: it changes a role's MODEL, never which account the role points at.
+// A gateway's new model is persisted into the gateway DEFINITION first (and synced into every other
+// role on it), then the pair is written back under the id the role already had — which is why this
+// no longer deletes `chatProviderAccount`: the account binding is not this button's to erase.
 function setRoleHarness(role: SessionRole, profile: HarnessProfile): void {
-  let a = loadAccess()
   let canonical = profile
   if (profile.provider === 'gateway') {
     const def = loadHarnessGateways()[profile.gateway]
     if (def) {
       const updated = { ...def, model: profile.model, smallModel: profile.smallModel }
       saveGatewayModelAndSyncRoles(profile.gateway, updated)
-      a = loadAccess()
       canonical = { provider: 'gateway', gateway: profile.gateway, model: updated.model, smallModel: updated.smallModel }
     }
-    if (role === 'chat') a.chatProviderAccount = `gateway:${profile.gateway}`
-    else a.codeProviderAccount = `gateway:${profile.gateway}`
-  } else {
-    if (role === 'chat') delete a.chatProviderAccount; else delete a.codeProviderAccount
   }
-  // Native is the absence of a role — storing {provider:'anthropic'} would just be noise.
-  if (canonical.provider === 'anthropic') { if (role === 'chat') delete a.chatHarness; else delete a.codeHarness }
-  else if (role === 'chat') a.chatHarness = canonical
-  else a.codeHarness = canonical
+  const id = roleAccountIdForHarness(canonical)
+  if (!id) return   // native has no model of its own; harnessModelUpdate refuses it before we get here
+  const a = loadAccess()
+  applyRoleAccount(a, role, id, canonical)
   saveAccess(a)
 }
 
@@ -15265,10 +15300,19 @@ async function planAccountLogout(a: Account): Promise<LogoutPlan> {
   return { account: a.name, configDir: a.configDir, identity: await accountIdentity(a), mcp: accountMcpLogins(a), sessions, unknownSessions }
 }
 
-async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
+// What the chat lane is running RIGHT NOW, named the way the picker names a row: its account, plus
+// its per-session harness when that is not native. The panel line needs the ACCOUNT — the harness
+// alone cannot tell `main` from `chat`, which is exactly why the headline used to answer "Claude
+// (native)" to "which of my accounts runs chat". Null when no lane is up.
+async function liveChatLaneSummary(view: ProviderAccountsView): Promise<string | null> {
   for (const lane of listDmChatSessions()) {
     const pane = await paneForSession(lane.sessionId).catch(() => null)
-    if (pane) return paneHarnessProfile(pane)
+    if (!pane) continue
+    const account = await paneAccount(pane).catch(() => null)
+    if (!account) continue
+    const harness = await paneHarnessProfile(pane)
+    const base = roleAccountLabel(view, `claude:${account.name}`)
+    return harness.provider === 'anthropic' ? base : `${base} · ${roleHarnessSummary(harness, loadHarnessGateways())}`
   }
   return null
 }
@@ -15472,6 +15516,9 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         '--allow-dangerously-skip-permissions',
         ...(extra.trim() ? extra.trim().split(/\s+/) : []),
         ...launchFlags.flatMap(flag => flag.split(/\s+/)),
+        // Last, and outside the flatMap: the JSON is ONE argv element (claudeHarnessLaunch quotes
+        // each), where every launchFlag above is a string that gets split on whitespace.
+        ...outputStyleArgs(loadAccess().outputStyle),
       ]
       // A pinned full model id (MODEL_ALIAS_IDS) isn't in this CLI build's advisor catalog yet, so
       // the CLI would boot with the advisor tool silently disabled — its own warning names this
@@ -15783,18 +15830,34 @@ async function accountsPanelText(): Promise<string> {
       : readiness.state === 'sandbox-blocked'
         ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
         : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
+  // THE DEFAULTS BLOCK SITS AT THE FOOT, not as two headlines at the top. It names the ACCOUNT (via
+  // `legacyRoleAccountId` — the same value the mini app's role cards show and the same one every
+  // spawn resolves, so the two surfaces cannot answer one question two ways) AND the three dials that
+  // used to live behind a separate 🧑‍💻 Defaults row on the settings root. One role, one line, one
+  // screen: the split is what let a role read `chat` here and `fable` there for the same setting.
+  // Foot rather than head because the numbered chain is what the panel is FOR — the headlines pushed
+  // it down a screen, which is the complaint that retired the instructions paragraph below.
+  const view = await buildProviderAccountsView('code').catch(() => null)
+  const roleLine = async (role: SessionRole): Promise<string> => {
+    const label = view ? escapeHtml(roleAccountLabel(view, legacyRoleAccountId(role))) : '…'
+    const dials = `${escapeHtml(roleModelOf(role))} · ${escapeHtml(configuredSpawnEffort(role))} · ${escapeHtml(modeRowLabel(role))}`
+    // The live lane is named ONLY when it disagrees with the default — the suffix is a discrepancy
+    // report, and printing it on every paint would train him to stop reading it.
+    const live = role === 'chat' && view ? await liveChatLaneSummary(view).catch(() => null) : null
+    const drift = live && view && live !== roleAccountLabel(view, legacyRoleAccountId('chat'))
+      ? ` · live lane: ${escapeHtml(live)}` : ''
+    return `${role === 'chat' ? '💬 Chat' : '🧑‍💻 Coding'} — <b>${label}</b> · ${dials}${drift}`
+  }
   return `👤 <b>Accounts &amp; failover</b> — failover <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
-    `${rolePanelLine('lane', await liveChatLaneHarness().catch(() => null), resolveRoleHarness(a.chatHarness), gateways)}\n` +
-    `${rolePanelLine('coding', null, resolveRoleHarness(a.codeHarness), gateways)}\n\n` +
     // No instructions block: the buttons are self-describing and the paragraph that used to sit
     // here pushed the list itself off the first screen. Removed on the owner's instruction.
-    `${lines.join('\n')}${codexCfg}`
+    `${lines.join('\n')}${codexCfg}\n\n` +
+    `<b>Defaults</b>\n${await roleLine('chat')}\n${await roleLine('code')}`
 }
 function accountsPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const kb = new InlineKeyboard()
   kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
-  kb.text('💬 Chat', 'rp:chat').text('🧑‍💻 Coding', 'rp:code').row()
   // Row per account group; the group's FIRST hop is its representative, so callback data stays a
   // plain hopKey and ↑/↓/🚀/🗑 all address the same thing the row shows.
   for (const group of chainGroups(failoverChain(), accountGroupKey)) {
@@ -15840,6 +15903,10 @@ function accountsPanelKeyboard(): InlineKeyboard {
     kb.text(`✳️ Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
       .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
+  // The two role doors sit DIRECTLY under the block they open (the Defaults lines at the foot of the
+  // text), not at the top of the keyboard where they were — a button a screen away from the state it
+  // edits is the arrangement that made these read as a second, unrelated setting.
+  kb.text('💬 Chat', 'rp:chat').text('🧑‍💻 Coding', 'rp:code').row()
   return kb.text('➕ Account', 'acct:add').text('➕ Provider', 'gw:add').text('‹ Back', 'acct:back')
 }
 
@@ -15848,32 +15915,143 @@ function accountsPanelKeyboard(): InlineKeyboard {
 // explicit /harness, a topic's recorded one) always wins; the role only fills in where nothing
 // else was chosen. Picking Native deletes the role (absence = native), so prefs.json stays clean.
 const ROLE_LABEL: Record<SessionRole, string> = { chat: '💬 Chat', code: '🧑‍💻 Coding sessions' }
-async function rolePickerText(role: SessionRole): Promise<string> {
-  const gateways = loadHarnessGateways()
-  const roleSum = roleHarnessSummary(roleHarnessOf(role), gateways)
-  // The lane's line names the LIVE harness; the picker edits the DEFAULT, so when they differ the
-  // header says both — a user picking "what the chat runs on" must see the running truth.
-  const live = role === 'chat' ? await liveChatLaneHarness().catch(() => null) : null
-  const liveSum = live ? roleHarnessSummary(live, gateways) : null
-  const options = roleProviderOptions(gateways).map(o => `• ${escapeHtml(o.label)}`).join('\n')
-  const head = liveSum && liveSum !== roleSum
-    ? `${ROLE_LABEL[role]} — <b>${roleSum}</b> (new lanes) · live lane: <b>${liveSum}</b>`
-    : `${ROLE_LABEL[role]} — <b>${roleSum}</b>`
-  return `${head}\n\n` +
-    (role === 'chat'
-      ? `This sets the default for NEW chat lanes — the live lane keeps its current provider until it restarts (<code>/harness</code> switches it now). Tap one:\n\n${options}\n\n`
-      : `New coding sessions spawn on the provider you pick. Tap one:\n\n${options}\n\n`) +
-    `✏️ edits the role's default model; <code>/model &lt;id&gt;</code> inside a session overrides it for that session only.`
+
+// ONE SCREEN PER ROLE: the account list AND the three dials that account launches with. It was a
+// HARNESS list — Native plus four proxy built-ins — which held not one of the Claude accounts he had
+// added, and picking anything on it deleted the account binding the mini app had written (owner's
+// report, 2026-08-21; role-account.ts carries the class). The dials joined it in v0.5.211: they had
+// their own 🧑‍💻 Defaults panel on the settings root, one screen away from the account they apply to,
+// so a role on DeepSeek advertised a Claude alias there and neither screen was wrong on its own.
+// Every account row is tappable including the ○ ones: what makes that safe is `rp:set`'s live
+// readiness check, not hiding them.
+async function roleDefaultsRows(role: SessionRole): Promise<{ rows: RoleAccountRow[]; view: ProviderAccountsView }> {
+  const view = await buildProviderAccountsView(role)
+  return { rows: roleAccountOptions(view), view }
 }
-function rolePickerKeyboard(role: SessionRole): InlineKeyboard {
-  const cur = roleHarnessOf(role)
-  const curKey = cur.provider === 'anthropic' ? 'native' : cur.provider === 'gateway' ? `gw:${cur.gateway}` : cur.provider
-  const kb = new InlineKeyboard()
-  for (const o of roleProviderOptions(loadHarnessGateways())) {
-    kb.text(`${o.key === curKey ? '● ' : ''}${o.label}`, `rp:set:${role}:${o.key}`).row()
+// The model chips for whatever this role's account IS. Discovery is a network read per gateway, so
+// it happens once here and the keyboard builder below stays synchronous. A gateway that cannot be
+// reached yields `null`, which `roleModelChips` renders as ✏️-only — never as an empty catalog.
+async function roleModelChipsFor(role: SessionRole): Promise<Array<{ label: string; data: string }>> {
+  const id = legacyRoleAccountId(role)
+  const kind = roleAccountKind(id)
+  if (kind === 'gateway') {
+    const name = id.slice('gateway:'.length)
+    const def = loadHarnessGateways()[name]
+    const discovered = def
+      ? await discoverGatewayModels({ provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }).catch(() => null)
+      : null
+    return roleModelChips({ kind: 'gateway', current: def?.model ?? '', discovered }, role)
   }
-  if (cur.provider !== 'anthropic') kb.text('✏️ Model', `rp:model:${role}`)
+  if (kind === 'proxy') return roleModelChips({ kind: 'proxy' }, role)
+  return roleModelChips({
+    kind: 'claude', current: configuredSpawnModel(role),
+    fableOff: fablePolicy(loadAccess().fableForAgents) === 'refuse', role,
+  }, role)
+}
+// A gateway definition carries ONE model, so two roles pointing at the same gateway share it and a
+// pick on this screen silently moves the other role too. Said out loud, because the alternative —
+// discovering it by watching the other role change — is the kind of surprise this rebuild exists to
+// remove. Null when the roles are on different accounts, which is the ordinary case.
+function roleGatewayShared(role: SessionRole): string | null {
+  const id = legacyRoleAccountId(role)
+  if (roleAccountKind(id) !== 'gateway') return null
+  const other: SessionRole = role === 'chat' ? 'code' : 'chat'
+  if (legacyRoleAccountId(other) !== id) return null
+  return `Shared with ${other === 'chat' ? '💬 Chat' : '🧑‍💻 Coding'} — a gateway has one model.`
+}
+async function roleDefaultsText(role: SessionRole, view: ProviderAccountsView): Promise<string> {
+  const a = loadAccess()
+  const cur = legacyRoleAccountId(role)
+  const curLabel = escapeHtml(roleAccountLabel(view, cur))
+  // The lane's line names the LIVE account; this screen edits the DEFAULT, so when they differ the
+  // header says both — someone setting "what the chat runs on" must see the running truth.
+  const live = role === 'chat' ? await liveChatLaneSummary(view).catch(() => null) : null
+  const drift = live && live !== roleAccountLabel(view, cur) ? ` · live lane: <b>${escapeHtml(live)}</b>` : ''
+  const dials = `👤 Account — <b>${curLabel}</b>${drift}\n` +
+    `🧠 Model — <b>${escapeHtml(roleModelOf(role))}</b>\n` +
+    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort(role))}</b>\n` +
+    `🧷 Mode — <b>${escapeHtml(modeRowLabel(role))}</b>` +
+    // The two agent-spawn switches are CODING's alone: they govern what an agent may launch, and the
+    // chat lane is his own surface, never an agent's.
+    (role === 'code'
+      ? `\n🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
+        `⏸️ Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
+      : '')
+  // What a pick DOES, in outcomes rather than mechanism. Telegram switches the running chat lane now
+  // (`selectRoleAccount`, the same core the mini app calls), so the chat copy promises exactly that
+  // and the four ways it can land are the tap's own answer text. Coding has no single live session,
+  // so its line says what it cannot do instead of pointing at /harness — which changes a topic's
+  // transport and cannot change its Claude account at all.
+  const what = role === 'chat'
+    ? `Your chat lane starts on this account. Picking a different one switches the lane you're talking to now, keeping this conversation — or tells you why it couldn't.`
+    : `New coding sessions run on this account. Sessions already running keep what they started on.`
+  const shared = roleGatewayShared(role)
+  // A chat role that has never had its own model FOLLOWS the coding one — a real state, and one the
+  // reader cannot infer from a model name that happens to match. Only for a Claude account: a
+  // gateway's model is the gateway's, and the alias prefs do not reach it.
+  const following = role === 'chat' && a.chatModel === undefined && roleAccountKind(cur) === 'claude'
+    ? `\n\n<i>Following the coding default — pick one to split them.</i>` : ''
+  return `${MODEL_ROLE_LABEL[role]}\n\n${dials}\n\n${what}\n\n` +
+    `<i>● can serve a turn now · ○ needs signing in first.</i>` +
+    (shared ? `\n\n<i>${escapeHtml(shared)}</i>` : '') + following
+}
+// Account rows, then the dials, in the order the text lists them. `spd:*` callbacks are unchanged
+// from the retired 🧑‍💻 Defaults panel — the buttons moved, the writers did not.
+function roleDefaultsKeyboard(rows: RoleAccountRow[], role: SessionRole, chips: Array<{ label: string; data: string }>): InlineKeyboard {
+  const a = loadAccess()
+  const kb = new InlineKeyboard()
+  for (const row of rows) {
+    kb.text(`${roleRowGlyph(row)}${row.label}`, row.kind === 'add' ? `rp:add:${role}` : `rp:set:${role}:${row.id}`).row()
+  }
+  // Model chips wrap at four so a gateway's eight sit two deep rather than in one unreadable strip.
+  chips.forEach((chip, i) => {
+    kb.text(chip.label, chip.data)
+    if (i % 4 === 3 && i < chips.length - 1) kb.row()
+  })
+  kb.row()
+  const effort = configuredSpawnEffort(role)
+  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${role}:${e}`)
+  kb.row()
+  // Five modes over two rows, and a tap on the CURRENT one clears it back to "no default" — the only
+  // way out of a configured mode, since there is no sixth chip for "none" (a chip for the absence of
+  // a setting reads as a setting). `spd:d:` = defaults→mode, beside spd:m: model and spd:e: effort.
+  const mode = configuredSpawnMode(role)
+  MODES.forEach((m, i) => {
+    kb.text(`${mode === m ? '✅ ' : ''}${modeLabel(m)}`, `spd:d:${role}:${m}`)
+    if (i === 2) kb.row()
+  })
+  kb.row()
+  if (role === 'code') {
+    // Both rows are the STATE, not an instruction: the word on the button is what is true right now
+    // and a tap flips it (owner, 2026-07-29). A checkbox glyph beside the word said the same twice.
+    kb.text(`🦾 Auto mode (agent picks) — ${onOff(a.spawnAuto === true)}`, 'spd:a:toggle').row()
+    kb.text(`⏸️ Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
+  }
   return kb.text('‹ Back', 'rp:back')
+}
+// Readiness AT THE TAP, live — no cache, because this is the answer that decides whether a setting
+// changes. A Claude account is its `.credentials.json`; a gateway is its Messages preflight; a
+// built-in is `claude-code-proxy <p> auth status` plus a reachable proxy — the same three reads the
+// panel's glyphs and `/harness`'s refusal use, so no surface can claim a state another denies.
+async function roleAccountReady(id: string): Promise<boolean> {
+  const route = routeForAccountId(id, loadHarnessGateways())
+  if (!route) return false
+  if (route.account) {
+    const account = accountByName(route.account)
+    return !!account && accountLoggedIn(account)
+  }
+  return route.harness ? harnessProviderReady(route.harness) : false
+}
+function roleRefusalText(text: string): string {
+  const [head, ...rest] = text.split('\n\n')
+  const body = rest.join('\n\n').split('\n')
+  // The command is the point of the card, so it is the one thing rendered as something copyable.
+  return `<b>${escapeHtml(head!)}</b>\n\n${body.map(line => line.startsWith('claude-code-proxy') || line.includes('claude-code-proxy ')
+    ? `<code>${escapeHtml(line)}</code>` : escapeHtml(line)).join('\n')}`
+}
+async function showRolePicker(ctx: Context, role: SessionRole): Promise<void> {
+  const { rows, view } = await roleDefaultsRows(role)
+  await showHtmlPanel(ctx, 'edit', await roleDefaultsText(role, view), roleDefaultsKeyboard(rows, role, await roleModelChipsFor(role)))
 }
 
 // The GitHub panel (settings → 🐙 GitHub): gh CLI accounts, with switch/logout per account and
@@ -16821,7 +16999,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|voice|batch|tts|confirmreset|base|switchboard|filebrowser)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|voice|batch|tts|confirmreset|base|switchboard|filebrowser|outputstyle)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -16833,6 +17011,10 @@ bot.on('callback_query:data', async ctx => {
     }
     if (setMatch[1] === 'tts') {
       await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
+      return
+    }
+    if (setMatch[1] === 'outputstyle') {
+      await showHtmlPanel(ctx, 'edit', outputStyleText(), outputStyleKeyboard())
       return
     }
     if (setMatch[1] === 'base') {
@@ -17184,7 +17366,7 @@ bot.on('callback_query:data', async ctx => {
 
   // 💬 Chat / 🧑💻 Coding role pickers (Accounts panel): open the picker, or ✏️ edit the role's
   // model. The role is a DEFAULT for NEW spawns — an existing session's own harness always wins.
-  const rpMatch = /^rp:(chat|code|back|model:(chat|code))$/.exec(data)
+  const rpMatch = /^rp:(chat|code|back|model:(chat|code)|add:(chat|code))$/.exec(data)
   if (rpMatch) {
     if (!(await cbAuth(ctx))) return
     if (rpMatch[1] === 'back') {
@@ -17204,29 +17386,87 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'rpmodel', role })
       return
     }
-    await showHtmlPanel(ctx, 'edit', await rolePickerText(rpMatch[1] as SessionRole), rolePickerKeyboard(rpMatch[1] as SessionRole))
+    if (rpMatch[1].startsWith('add:')) {
+      // ONE door, from the screen where the list is empty. Same sub-panel the Accounts panel's two ➕
+      // buttons open, with ➕ Account folded in as its first row — a role screen offering nothing but
+      // accounts he does not have yet is the dead end this closes.
+      await ctx.answerCallbackQuery().catch(() => {})
+      await showHtmlPanel(ctx, 'edit', gatewayAddPanelText(), gatewayAddPanelKeyboard(`rp:${rpMatch[3]}`))
+      return
+    }
+    await showRolePicker(ctx, rpMatch[1] as SessionRole)
     return
   }
-  // rp:set:<role>:<pick> — apply a picked provider to a role (native / gateway / built-in).
-  const rpSetMatch = /^rp:set:(chat|code):(native|codex|kimi|grok|cursor|gw:[a-z0-9][a-z0-9_-]{0,31})$/.exec(data)
+  // rp:gm:<role>:<i> — a gateway model chip, addressed BY INDEX into the discovered catalog. The
+  // index is re-resolved against a fresh discovery at press time rather than trusted: a keyboard can
+  // be hours old, the catalog is the provider's and moves without telling us, and a stale index
+  // would silently set a DIFFERENT model than the one whose name he tapped. Out of range refuses
+  // instead of clamping — there is no nearest-neighbour answer to "which model did he mean".
+  const rpGwModel = /^rp:gm:(chat|code):(\d{1,2})$/.exec(data)
+  if (rpGwModel) {
+    if (!(await cbAuth(ctx))) return
+    const role = rpGwModel[1] as SessionRole
+    const id = legacyRoleAccountId(role)
+    const name = roleAccountKind(id) === 'gateway' ? id.slice('gateway:'.length) : null
+    const def = name ? loadHarnessGateways()[name] : undefined
+    const models = def
+      ? await discoverGatewayModels({ provider: 'gateway', gateway: name!, model: def.model, smallModel: def.smallModel }, true).catch(() => null)
+      : null
+    const picked = models?.[Number(rpGwModel[2])]
+    if (!picked) { await ctx.answerCallbackQuery({ text: 'List changed — reopen.', show_alert: true }).catch(() => {}); return }
+    // Through the ✏️ editor's own writer: the gateway DEFINITION is what carries a model, so this
+    // syncs every role on that gateway and writes the pair back under the id the role already had.
+    setRoleHarness(role, { provider: 'gateway', gateway: name!, model: picked, smallModel: def!.smallModel })
+    await ctx.answerCallbackQuery({ text: `${ROLE_LABEL[role]} → ${picked.replace(/\[1m\]$/, '')}` }).catch(() => {})
+    await showRolePicker(ctx, role)
+    return
+  }
+  // rp:set:<role>:<account id> — point a role at an account: a Claude config dir, a gateway, or a
+  // proxy built-in. The id IS the stored value; the harness is derived (role-account.ts).
+  const rpSetMatch = /^rp:set:(chat|code):((?:claude|gateway|proxy):[A-Za-z0-9][A-Za-z0-9_.-]{0,40})$/.exec(data)
   if (rpSetMatch) {
     if (!(await cbAuth(ctx))) return
     const role = rpSetMatch[1] as SessionRole
-    const pick = rpSetMatch[2]!
-    if (pick === 'native') {
-      setRoleHarness(role, { provider: 'anthropic' })
-    } else if (pick.startsWith('gw:')) {
-      const name = pick.slice(3)
-      const def = loadHarnessGateways()[name]
-      if (!def) { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
-      setRoleHarness(role, normalizeHarnessProfile({ provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }))
-    } else {
-      const profile = parseHarnessSpec(pick)
-      if (!profile || profile.provider === 'anthropic') { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
-      setRoleHarness(role, profile)
+    const id = rpSetMatch[2]!
+    const { rows, view } = await roleDefaultsRows(role)
+    const row = rows.find(r => r.id === id)
+    if (!row) { await ctx.answerCallbackQuery({ text: 'That account is gone — reopen this list.' }).catch(() => {}); return }
+    // READ THE STATE AT THE TAP, never off the row: this keyboard can be hours old, and a pick that
+    // cannot serve a turn used to succeed here and fail silently at every later spawn.
+    const plan = planRoleSelection(row, await roleAccountReady(id), role, process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy')
+    if (plan.kind === 'refuse') {
+      await ctx.answerCallbackQuery({ text: plan.text.split('\n')[0]!, show_alert: true }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', roleRefusalText(plan.text), new InlineKeyboard().text('‹ Back to the list', `rp:${role}`))
+      return
     }
-    await ctx.answerCallbackQuery({ text: `${ROLE_LABEL[role]} → ${roleHarnessSummary(roleHarnessOf(role), loadHarnessGateways())}` }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', await rolePickerText(role), rolePickerKeyboard(role))
+    // THE SAME LIVE SWITCH THE MINI APP PERFORMS, not a bare pref write — one core, so the promise
+    // this screen makes ("switches the lane you're talking to now, keeping this conversation") is
+    // kept here exactly as it is there. `ctx.from.id` is the tapper, which is what resolves WHICH
+    // chat lane is his; a callback always carries one.
+    const label = roleAccountLabel(view, id)
+    const outcome = await selectRoleAccount(role, id, String(ctx.from?.id ?? ''))
+    if ('error' in outcome) {
+      // The four states of DESIGN §4, and the two that are not plain failures say so in their own
+      // words: mid-turn is "try again when it's idle" (nothing was changed and nothing is wrong),
+      // a failed switch is "your chat was restored". Everything else falls through to the core's
+      // own sentence rather than being flattened into one generic apology.
+      const text = /mid-turn|is busy/.test(outcome.error)
+        ? `Your chat is mid-turn — pick again when it's idle. Nothing was changed.`
+        : /did not reach a usable prompt|could not be restored|restored/.test(outcome.error)
+          ? `That provider didn't reach a usable prompt; your chat was restored. Nothing was changed.`
+          : `${outcome.error.charAt(0).toUpperCase()}${outcome.error.slice(1)}.`
+      await ctx.answerCallbackQuery({ text, show_alert: true }).catch(() => {})
+      await showRolePicker(ctx, role)
+      return
+    }
+    await ctx.answerCallbackQuery({
+      text: role === 'chat'
+        ? (outcome.activated
+          ? `💬 Chat now runs on ${label}. This conversation carried over.`
+          : `💬 New chat lanes start on ${label}.`)
+        : `New coding sessions run on ${label}. Sessions already running keep what they started on.`,
+    }).catch(() => {})
+    await showRolePicker(ctx, role)
     return
   }
 
@@ -17288,6 +17528,20 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(() => {})
     }
     await showHtmlPanel(ctx, 'edit', await ghPanelText(), ghPanelKeyboard())
+    return
+  }
+
+  // 🗣 Output-style sub-panel: one tap per style, ‹ Back to the root. The style names are the
+  // callback data verbatim (they are the CLI's own strings and applySetting is the allowlist), so a
+  // sixth built-in needs no edit here.
+  const osMatch = new RegExp(`^os:(${OUTPUT_STYLES.join('|')}|back)$`).exec(data)
+  if (osMatch) {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (osMatch[1] === 'back') { await showSettings(ctx, 'edit'); return }
+    const err = await applySetting('outputStyle', osMatch[1])
+    if (err) { await ctx.answerCallbackQuery({ text: err, show_alert: true }).catch(() => {}); return }
+    await showHtmlPanel(ctx, 'edit', outputStyleText(), outputStyleKeyboard())
     return
   }
 
@@ -17581,11 +17835,15 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🧑‍💻 Defaults sub-panel — open / back (settings ⇄ panel).
+  // 🧑‍💻 Defaults sub-panel — RETIRED into 👤 Accounts (v0.5.211), and these two arms are the stubs
+  // that keep old keyboards working. A message from before the move still carries `spd:panel` on its
+  // ‹ Back and on the settings root's own button, and an unregistered callback is not a no-op: it
+  // falls through to the unknown-command relay. They open the panel the dials moved INTO, which is
+  // where a tap aimed at them now belongs.
   if (data === 'spd:panel' || data === 'spd:back') {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    if (data === 'spd:panel') await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    if (data === 'spd:panel') await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     else await showSettings(ctx, 'edit')
     return
   }
@@ -17599,7 +17857,9 @@ bot.on('callback_query:data', async ctx => {
     const next = !loadAccess().spawnAuto
     await applySetting('spawnAuto', next)
     await ctx.answerCallbackQuery({ text: next ? 'Agent spawns pick their own model and effort.' : 'Agent spawns use your defaults.' }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    // Both agent-spawn switches live on the CODING role's screen now, which is the only one that
+    // renders them — repainting anything else would leave the tapped button showing its old state.
+    await showRolePicker(ctx, 'code')
     return
   }
   // 🔥 Whether Fable is available to CODING AGENTS at all. Same store-only-the-non-default rule as
@@ -17613,21 +17873,21 @@ bot.on('callback_query:data', async ctx => {
     const next = fablePolicy(loadAccess().fableForAgents) === 'approve' ? 'allow' : 'default'
     await applySetting('fableForAgents', next)
     await ctx.answerCallbackQuery({ text: next === 'allow' ? 'Agent Fable spawns start immediately — no approval.' : 'A Fable spawn waits for your tap.' }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    await showRolePicker(ctx, 'code')
     return
   }
   // 🧑‍💻 model/effort pick — persisted; the default every coding session launches on.
-  // One ROLE's picker, opened from its row on the panel.
+  // `spd:r:<role>` was the retired panel's row for one role; it is now the same door `rp:chat` /
+  // `rp:code` open, kept so a keyboard minted before the move still lands somewhere real.
   const spdRole = /^spd:r:(code|chat)$/.exec(data)
   if (spdRole) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    const role = spdRole[1] as SessionRole
-    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
+    await showRolePicker(ctx, spdRole[1] as SessionRole)
     return
   }
   // The mode chips. Tapping the mode that is already set CLEARS it (back to "no default"), which is
-  // the only way out — see modelRolePickerKeyboard for why there is no "none" chip.
+  // the only way out — see roleDefaultsKeyboard for why there is no "none" chip.
   const spdMode = /^spd:d:(code|chat):([A-Za-z]+)$/.exec(data)
   if (spdMode) {
     if (!(await cbAuth(ctx))) return
@@ -17637,7 +17897,7 @@ bot.on('callback_query:data', async ctx => {
     const err = await applySetting(key, configuredSpawnMode(role) === picked ? '' : picked)
     if (err) { await ctx.answerCallbackQuery({ text: 'Unknown mode.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery().catch(() => {})
-    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
+    await showRolePicker(ctx, role)
     return
   }
   const spdSet = /^spd:(m|e):(code|chat):([a-z]+)$/.exec(data)
@@ -17654,7 +17914,7 @@ bot.on('callback_query:data', async ctx => {
     const err = await applySetting(setKey, v)
     if (err) { await ctx.answerCallbackQuery({ text: kind === 'm' ? 'Unknown model.' : 'Unknown effort.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery().catch(() => {})
-    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
+    await showRolePicker(ctx, role)
     return
   }
 
@@ -22639,21 +22899,23 @@ function legacyRoleAccountId(role: SessionRole): string {
   const harness = resolveRoleHarness(role === 'chat' ? prefs.chatHarness : prefs.codeHarness)
   return harness.provider === 'gateway' ? `gateway:${harness.gateway}` : 'claude:main'
 }
-async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<ProviderAccountsView> {
+// THE list of accounts, for every surface that offers one — the app's sheet, the Telegram role
+// picker, the Accounts-panel headline. One builder on purpose: two constructions of "the accounts"
+// is how the picker came to hold five options with not one of his Claude accounts among them.
+// `models` is the app's per-row dropdown and costs a discovery fetch per gateway, so the callers
+// that only need names pass none.
+async function buildProviderAccountsView(role: SessionRole, models?: Record<string, string[] | null>): Promise<ProviderAccountsView> {
   const prefs = loadAccess()
   const gateways = loadHarnessGateways()
   const savedChain = role === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
   const savedActiveCount = role === 'chat' ? (prefs.chatFailoverActiveCount ?? prefs.failoverActiveCount) : (prefs.codeFailoverActiveCount ?? prefs.failoverActiveCount)
   const chain = resolveChain(savedChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
-  const discovered = await Promise.all(Object.entries(gateways).map(async ([name, def]) => {
-    const profile = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
-    return [name, await discoverGatewayModels(profile)] as const
-  }))
   const view = projectProviderAccounts({
     claudeAccounts: listAccounts().map(account => ({ name: account.name, ready: accountLoggedIn(account) })),
     gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
+    proxyReady: await proxyReadinessMap(),
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
-    models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
+    ...(models ? { models } : {}), auto: prefs.limitFailover === true,
     labelOf: accountIdentityLabel,
   })
   // ✳️ Codex model/effort ride with THIS panel because that is where /settings keeps them — the
@@ -22661,6 +22923,14 @@ async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<P
   // Same gate as accountsPanelKeyboard's: no Codex, no dials.
   if (codexAvailable()) view.codex = { model: codexLaunchModel() || 'default', effort: codexLaunchEffort() || 'default', efforts: CODEX_EFFORTS.map(e => e || 'default') }
   return view
+}
+async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<ProviderAccountsView> {
+  const gateways = loadHarnessGateways()
+  const discovered = await Promise.all(Object.entries(gateways).map(async ([name, def]) => {
+    const profile = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
+    return [name, await discoverGatewayModels(profile)] as const
+  }))
+  return buildProviderAccountsView(role, Object.fromEntries(discovered))
 }
 
 type WebappChatActivation = { rollback: () => Promise<boolean> }
@@ -22766,6 +23036,54 @@ async function activateWebappChatRoute(pane: string, route: ProviderRoute): Prom
   }
 }
 
+// POINTING A ROLE AT AN ACCOUNT, FOR EVERY SURFACE — the mini app's account row and Telegram's
+// `rp:set` are the same act and now run the same code. They were not: the app performed a
+// transactional live switch of the running chat lane (idle checks, transcript mirror, restart,
+// rollback) while Telegram wrote the pref and told him the lane "keeps its current provider until it
+// restarts" — one sentence true on one surface and false on the other, for one setting (DESIGN §4).
+//
+// `activated` is what the caller renders: TRUE means the running lane was carried over, FALSE means
+// there was no live lane to move and only the default changed. Both are successes and they are
+// different sentences, which is why this returns the flag rather than a boolean ok.
+async function selectRoleAccount(
+  role: SessionRole, id: string, userId: string,
+): Promise<{ ok: true; activated: boolean } | { error: string }> {
+  const route = routeForAccountId(id, loadHarnessGateways())
+  if (!route || (route.account && !accountByName(route.account))) return { error: 'bad role or account' }
+  // Only the CHAT role has a single live session to move; coding has many, and restarting them is
+  // not what picking a default means.
+  const pane = role === 'chat' ? await webappCurrentChatPane(userId) : null
+  const switchKey = pane ? await paneDeliveryKey(pane) : null
+  if (switchKey && harnessSwitchingSessions.has(switchKey)) return { error: 'a provider switch is already in progress for the current chat' }
+  if (switchKey) harnessSwitchingSessions.add(switchKey)
+  let rollbackCurrentChat: (() => Promise<boolean>) | undefined
+  try {
+    const select = () => applyProviderDefaultSelection(role, {
+      ...(pane ? { activateCurrentChat: async () => {
+        const activated = await activateWebappChatRoute(pane, route)
+        if ('error' in activated) return activated.error
+        rollbackCurrentChat = activated.rollback
+        return null
+      } } : {}),
+      // The account id is the setting and the harness is derived from it, in ONE writer, so the two
+      // surfaces cannot store the pair two ways (role-account.ts).
+      persistDefault: () => {
+        const latest = loadAccess()
+        applyRoleAccount(latest, role, id, route.harness)
+        saveAccess(latest)
+      },
+      rollbackCurrentChat: async () => rollbackCurrentChat ? rollbackCurrentChat() : true,
+    })
+    // Keep activation, default persistence, and any rollback inside one delivery critical section.
+    // Otherwise a queued Telegram turn could land after activation but before a failed save restores it.
+    return pane && switchKey
+      ? await withPaneDelivery(switchKey, select, () => ({ error: 'the current chat is busy — choose the account again when it is idle' }))
+      : await select()
+  } finally {
+    if (switchKey) harnessSwitchingSessions.delete(switchKey)
+  }
+}
+
 async function webappProviderAccountAction(userId: string, action: Record<string, unknown>): Promise<{ error: string } | Record<string, unknown>> {
   const kind = String(action.action ?? '')
   const prefs = loadAccess()
@@ -22798,38 +23116,10 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   if (kind === 'default') {
     const role = action.role === 'chat' ? 'chat' : action.role === 'code' ? 'code' : null
     const id = String(action.id ?? '')
-    const route = routeForAccountId(id, gateways)
-    if (!role || !route || (route.account && !accountByName(route.account))) return { error: 'bad role or account' }
-    const pane = role === 'chat' ? await webappCurrentChatPane(userId) : null
-    const switchKey = pane ? await paneDeliveryKey(pane) : null
-    if (switchKey && harnessSwitchingSessions.has(switchKey)) return { error: 'a provider switch is already in progress for the current chat' }
-    if (switchKey) harnessSwitchingSessions.add(switchKey)
-    let rollbackCurrentChat: (() => Promise<boolean>) | undefined
-    try {
-      const select = () => applyProviderDefaultSelection(role, {
-        ...(pane ? { activateCurrentChat: async () => {
-          const activated = await activateWebappChatRoute(pane, route)
-          if ('error' in activated) return activated.error
-          rollbackCurrentChat = activated.rollback
-          return null
-        } } : {}),
-        persistDefault: () => {
-          const latest = loadAccess()
-          if (role === 'chat') latest.chatProviderAccount = id; else latest.codeProviderAccount = id
-          if (route.harness) { if (role === 'chat') latest.chatHarness = route.harness; else latest.codeHarness = route.harness }
-          else { if (role === 'chat') delete latest.chatHarness; else delete latest.codeHarness }
-          saveAccess(latest)
-        },
-        rollbackCurrentChat: async () => rollbackCurrentChat ? rollbackCurrentChat() : true,
-      })
-      // Keep activation, default persistence, and any rollback inside one delivery critical section.
-      // Otherwise a queued Telegram turn could land after activation but before a failed save restores it.
-      return pane && switchKey
-        ? await withPaneDelivery(switchKey, select, () => ({ error: 'the current chat is busy — choose the account again when it is idle' }))
-        : await select()
-    } finally {
-      if (switchKey) harnessSwitchingSessions.delete(switchKey)
-    }
+    if (!role) return { error: 'bad role or account' }
+    // The whole body of this action is `selectRoleAccount` — the same core Telegram's `rp:set` calls,
+    // so the live switch cannot exist on one surface and not the other (DESIGN §4).
+    return await selectRoleAccount(role, id, userId)
   }
   if (kind === 'model') {
     const id = String(action.id ?? '')
@@ -22987,6 +23277,11 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
     settings: {
       accounts: { value: accountsRowSummary(), editable: false, label: 'tap to manage' },
       github: { value: ghSummary(), editable: false },
+      // 🗣 output style. The list is applySetting's own allowlist, so the app cannot offer a style
+      // the daemon would refuse; `default` (nothing configured) is deliberately NOT an option —
+      // clearing back to it is a prefs.json edit, because a picker with both `default` and `Default`
+      // in it is two words for what a reader will take as one thing.
+      outputStyle: { value: outputStyleRowValue(), editable: true, options: [...OUTPUT_STYLES], label: 'new sessions; a running one on its next /clear or restart' },
       batchAllow: { value: a.batchAllow !== false, editable: true, label: '2+ prompts offer "Allow all this turn"' },
       // 🎙️ transcription: the backend is a real pick here now, and the local Whisper model rides
       // with it. Both write .env (not access.json) — see applySetting.

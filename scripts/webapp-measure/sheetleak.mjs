@@ -20,7 +20,7 @@ const ok = (c, label) => { console.log(`${c ? "OK  " : "FAIL"}  ${label}`); if (
 
 // Every element this build added to the document, by id. A sheet WRAPPER is the backdrop: visible,
 // it covers the screen; unstyled, it is a plain block that pushes content down.
-const ADDED = ["mdef", "voicesheet", "ttssheet", "ghsheet", "mdefbody", "voicebody", "ttsbody", "ghbody", "accaddclaude"];
+const ADDED = ["voicesheet", "ttssheet", "ghsheet", "voicebody", "ttsbody", "ghbody", "accaddclaude"];
 
 const SESSIONS = [{ sid: "s1", name: "cc-bridge", cwd: "~/projects/cc-bridge", alive: true, working: true, state: "working", task: "t", model: "Opus 5", effort: "high", ctxPct: 40, branch: "main", subagents: 0 }];
 
@@ -82,7 +82,7 @@ const painted = (p) => p.evaluate(ids => ids.map(id => {
   ok(leaking.length === 0, `nothing from the settings build paints on Sessions (leaking: ${JSON.stringify(leaking.map(x => `${x.id} ${x.w}x${x.h} ${x.display}`))})`);
   // The same question asked the other way: does any settings ROW exist outside #tab-settings?
   // #accounts is on the list because the ✳️ Codex dials are settings rows living in that sheet now.
-  const stray = await p.$$eval(".setrow", ns => ns.filter(n => !n.closest("#tab-settings") && !n.closest("#mdef") && !n.closest("#voicesheet") && !n.closest("#ttssheet") && !n.closest("#accounts")).length);
+  const stray = await p.$$eval(".setrow", ns => ns.filter(n => !n.closest("#tab-settings") && !n.closest("#voicesheet") && !n.closest("#ttssheet") && !n.closest("#accounts")).length);
   ok(stray === 0, `no settings row is parented outside the settings screen or its sheets (got ${stray})`);
   // And the practical symptom: the sessions list must start at the top of the scroller, not be
   // pushed down by an unstyled block above it.
@@ -104,27 +104,14 @@ const painted = (p) => p.evaluate(ids => ids.map(id => {
   const p = await open("settings");
   const seen = await painted(p);
   ok(seen.every(x => x.present), `every settings element is still in the document (${JSON.stringify(seen.filter(x => !x.present).map(x => x.id))})`);
-  const wrappers = seen.filter(x => ["mdef", "voicesheet", "ttssheet", "ghsheet"].includes(x.id));
+  const wrappers = seen.filter(x => ["voicesheet", "ttssheet", "ghsheet"].includes(x.id));
   ok(wrappers.every(x => !x.painted), "a CLOSED sheet paints nothing even on its own screen");
   ok((await p.$$("#tab-settings .setrow")).length > 0, "the settings screen still renders its rows");
 
-  // The grouped Defaults sheet: one BUTTON per served group, its rows hidden until that button is
-  // tapped. Measured as PAINT, not markup — a group rendered with display:"" from the start would
-  // still be in the DOM and would still pass a presence check while showing six flat rows, which is
-  // the shape this replaced. The control is the tap: after it, the group's rows must paint.
-  const shown = () => p.$$eval("#mdefbody .setrow", ns => ns.filter(n => n.getBoundingClientRect().height > 0).length);
-  await p.evaluate(() => openSheet("mdef"));
-  await p.waitForTimeout(300);
-  const btns = await p.$$eval("#mdefbody .setrow.action", ns => ns.map(n => n.textContent));
-  ok(btns.length === 2, `the Defaults sheet renders one button per group (got ${btns.length}: ${JSON.stringify(btns)})`);
-  ok(await shown() === 2, `a collapsed group paints no rows — only its own buttons (visible rows: ${await shown()})`);
-  await p.$$eval("#mdefbody .setrow.action", ns => ns[0].click());
-  await p.waitForTimeout(200);
-  ok(await shown() === 5, `tapping a group paints its three rows (2 buttons + 3 = 5, got ${await shown()})`);
   // Opening one still works — a fix that hid the sheets for good would pass everything above.
-  await p.evaluate(() => openSheet("mdef"));
+  await p.evaluate(() => openSheet("voicesheet"));
   await p.waitForTimeout(300);
-  const open1 = (await painted(p)).find(x => x.id === "mdef");
+  const open1 = (await painted(p)).find(x => x.id === "voicesheet");
   ok(!!open1 && open1.painted, `an OPENED sheet paints (${JSON.stringify(open1)})`);
   await p.close();
 }

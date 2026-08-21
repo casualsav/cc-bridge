@@ -16,7 +16,7 @@ import { ACCESS_FILE, PREFS_FILE, STATE_DIR } from './common.ts'
 import { logDecision } from './delivery-log.ts'
 import { _accessFileCache } from './state.ts'
 import { getGroupChatId } from './topics.ts'
-import type { Access } from './types.ts'
+import type { Access, OutputStyle } from './types.ts'
 
 // Static lockdown: the security half is baked + immutable (tamper-proof allowlist).
 export const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
@@ -37,8 +37,29 @@ const PREF_KEYS = [
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'failoverActiveCount', 'chatFailoverChain', 'codeFailoverChain', 'chatFailoverActiveCount', 'codeFailoverActiveCount', 'chatProviderAccount', 'codeProviderAccount', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
   'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnMode', 'chatModel', 'chatEffort', 'chatMode', 'spawnAuto', 'spawnAgentModels', 'spawnHoldMinutes', 'launchFoundingAsk', 'modelCardChat', 'fableForAgents', 'creditConsent',
-  'chatHarness', 'codeHarness', 'silentTurns', 'scratchGc',
+  'chatHarness', 'codeHarness', 'silentTurns', 'scratchGc', 'outputStyle',
 ] as const satisfies readonly (keyof Access)[]
+
+// ---- 🗣 output style -----------------------------------------------------------------------
+//
+// Claude Code has no flag and no env var for `outputStyle`: the launch-time lever is
+// `--settings <json>`, which layers additional settings over the account's own settings.json. So
+// the pref becomes argv, and it lives here rather than in daemon.ts because daemon.ts boots the bot
+// on import and this has to be testable.
+//
+// UNSET EMITS NOTHING — an install that never touches the row launches byte-identically. An
+// explicitly named style DOES emit, 'Default' included: --settings outranks the account's
+// settings.json, and "default means no flag" is the assumption that launched a mini-app spawn whose
+// sheet said "Ask" into the account's own bypassPermissions (see the spawnMode case in applySetting).
+export const OUTPUT_STYLES = ['Default', 'Proactive', 'Concise', 'Explanatory', 'Learning'] as const satisfies readonly OutputStyle[]
+
+// The argv is a PAIR, never one pre-joined string: every caller hands it to claudeHarnessLaunch,
+// which shell-quotes each element — a JSON blob spliced into a launch string unquoted is a brace
+// expansion and a pair of stray quotes.
+export function outputStyleArgs(style: string | undefined | null): string[] {
+  if (!style || !(OUTPUT_STYLES as readonly string[]).includes(style)) return []
+  return ['--settings', JSON.stringify({ outputStyle: style })]
+}
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.
 function readJsonAccess(path: string): Partial<Access> {

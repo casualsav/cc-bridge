@@ -90,6 +90,20 @@ feed half of `transcript.ts`.
 - `prefs.json` (beside `access.json`) — `/settings` preferences (`spawnModel`, `spawnEffort`,
   `autoUpdate`); `access.json` is security-only and `loadAccess()` merges both. A null in
   `access.json` proves nothing about spawn defaults — sessions keep reading the wrong file.
+- **A role's provider is ONE setting — the account id — and the harness is DERIVED from it by one
+  writer, `applyRoleAccount` (`role-account.ts`)** (v0.5.211, 2026-08-21). `chatProviderAccount`
+  (account) and `chatHarness` (transport) were written by different surfaces in different
+  vocabularies: Telegram's picker listed harnesses with no Claude account on it and `delete`d the
+  account pref the mini app had set, so a role bound to `chat` read "Anthropic (native)" on one screen
+  and fell back to `main` at spawn. The Telegram role screen and the app's account row now run the
+  same live-switch core (`selectRoleAccount`, exactly two callers), the `🧑‍💻 Defaults` root row is
+  retired into the 👤 Accounts panel (`spd:panel` stays as a stub — old messages carry it), and a
+  role's model chips come from its ACCOUNT (aliases for Claude, the discovered catalog for a gateway,
+  ✏️ only for a proxy built-in). Readiness is re-read AT THE TAP (`planRoleSelection`), never off a
+  keyboard that may be hours old. Proof: `role-defaults.test.ts` (source-bound; four call-site tests
+  must fail against a pre-0.5.211 `daemon.ts`), `role-account.test.ts`, and the approved design in
+  `$(tg shared)/bridgeroles/DESIGN.md`. Never fired live: the `rp:gm` chip and Telegram's live chat
+  switch — an agent cannot originate a callback query.
 - `topics.json` keeps session rows under its nested `topics` key, and top-level values can be
   legitimately `null` — iterate `topics`, never the file root.
 - `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the worker convention — installed as

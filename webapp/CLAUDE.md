@@ -916,6 +916,17 @@ give it.
   surface's OWN screen — the elements must still exist, a closed sheet must paint nothing, an opened
   one must still paint — because a fix that hid them for good would pass a leak check and ship a dead
   screen.
+- **A role's launch dials live under its tab in the ACCOUNTS sheet, and the model row is drawn only
+  for a Claude account** (v0.5.211, 2026-08-21, owner's ruling that accounts and "what each role runs
+  on" are one screen). The separate Defaults sheet (`#mdef`) is gone with the `🧑‍💻 Defaults` root row;
+  `reloadAccounts()` is the sheet's one repaint and takes BOTH reads (`/api/provider-accounts` +
+  `/api/settings`), because a dial drawn from a stale settings read is the wrong answer to the
+  sheet's question. The trap: `chatModel`/`spawnModel` options are the Anthropic aliases, which a
+  gateway or proxy account cannot serve — so for those the row is read-only and points at the control
+  that writes (the provider row's own select for a gateway; "set by the provider" for a built-in).
+  `roleOnly` rows (the proxy built-ins) are role TARGETS, never failover hops: the failover section
+  iterates `accounts.filter(a => !a.roleOnly)` or the count, ± bounds and cut-off divider all lie.
+  Guard: `settings-sheets.mjs` §9–§10 (16 checks that fail against the 0.5.210 page).
 
 ## Narration and the final dot
 

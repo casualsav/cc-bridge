@@ -178,7 +178,7 @@ test('CALL SITE: the app repaints instead of raising a success bar', () => {
   expect(body).toContain("action: 'logout-claude-plan'")
   expect(body).toContain('confirm(p.text)')            // the daemon's text, never the app's own
   expect(body).toContain("action: 'logout-claude'")
-  expect(body).toContain('renderAccounts()')
+  expect(body).toContain('reloadAccounts()')   // the sheet's one repaint since v0.5.211 (both reads)
   // SUCCESS CONFIRMATIONS ARE OFF (the owner, 2026-07-30) — the repaint is the outcome.
   expect(body).not.toMatch(/showOk\(|toast\(/)
 })

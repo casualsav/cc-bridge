@@ -1,7 +1,7 @@
 // Role harness defaults (role-provider.ts): resolution, picker options, summaries, model edits.
 import { test, expect } from 'bun:test'
 import {
-  resolveRoleHarness, roleProviderOptions, roleHarnessSummary, harnessModelUpdate, rolePanelLine, spawnLaunchHarness, ROLE_BUILTIN_PROVIDERS,
+  resolveRoleHarness, roleHarnessSummary, harnessModelUpdate, spawnLaunchHarness,
 } from './role-provider.ts'
 
 const gateways = {
@@ -21,15 +21,6 @@ test('resolveRoleHarness: absent/invalid → native; valid profiles pass through
     .toEqual({ provider: 'anthropic' })
 })
 
-test('roleProviderOptions: native first, then every gateway, then the built-ins', () => {
-  const opts = roleProviderOptions(gateways)
-  expect(opts[0]).toEqual({ key: 'native', label: 'Anthropic (native)' })
-  expect(opts.map(o => o.key)).toEqual(['native', 'gw:deepseek', 'gw:local-codex', ...ROLE_BUILTIN_PROVIDERS])
-  expect(opts.find(o => o.key === 'gw:deepseek')?.label).toBe('deepseek · deepseek-v4-pro')
-  // Built-ins carry their default model in the label.
-  expect(opts.find(o => o.key === 'codex')?.label).toMatch(/^codex · /)
-})
-
 test('roleHarnessSummary: native, gateway, built-in', () => {
   expect(roleHarnessSummary({ provider: 'anthropic' }, gateways)).toBe('Anthropic (native)')
   expect(roleHarnessSummary({ provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }, gateways))
@@ -44,23 +35,12 @@ test('roleHarnessSummary: native, gateway, built-in', () => {
 test('role surfaces strip the [1m] harness suffix from gateway models', () => {
   expect(roleHarnessSummary({ provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' }, gateways))
     .toBe('🌐 deepseek · deepseek-v4-flash')
-  expect(roleProviderOptions({ ...gateways, deepseek: { ...gateways.deepseek, model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' } })
-    .find(o => o.key === 'gw:deepseek')?.label).toBe('deepseek · deepseek-v4-flash')
 })
 
-test('rolePanelLine: the chat line names the LIVE lane, coding names the default', () => {
-  const role = { provider: 'gateway' as const, gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }
-  const live = { provider: 'gateway' as const, gateway: 'local-codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }
-  expect(rolePanelLine('coding', null, role, gateways)).toBe('🧑‍💻 Coding sessions run on — 🌐 deepseek · deepseek-v4-pro')
-  // No lane yet: the default is the truth, labelled as future-applying.
-  expect(rolePanelLine('lane', null, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro (applies when the lane starts)')
-  // Live lane differs from the default → both shown, live first.
-  expect(rolePanelLine('lane', live, role, gateways)).toBe('💬 Chat runs on — 🌐 local-codex · gpt-5.6-sol · new lanes: 🌐 deepseek · deepseek-v4-pro')
-  // Live lane matches the default → one clean line.
-  // NB: the [1m] harness suffix is stripped from gateway labels — the value above reads
-  // "gpt-5.6-sol", not "gpt-5.6-sol[1m]", because the suffix is a window selector, not identity.
-  expect(rolePanelLine('lane', role, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro')
-})
+// `rolePanelLine` is RETIRED with the two Accounts-panel headlines it rendered (v0.5.211): the panel
+// now carries a Defaults BLOCK at its foot, whose lines name the model/effort/mode as well as the
+// account, so there is nothing left for a one-line formatter to format. Its live-vs-default term
+// survives as the panel's `· live lane: …` suffix. Chip shapes are covered in role-defaults.test.ts.
 
 test('roleModelUpdate: valid model updates, invalid/native refuse', () => {
   const cur = { provider: 'gateway' as const, gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }

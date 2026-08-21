@@ -1,10 +1,11 @@
 import type { FailoverHop } from './common.ts'
 import type { GatewayDefinition, GatewayProvider } from './harness-gateway.ts'
-import type { GatewayHarnessProfile } from './harness-gateway.ts'
+import { parseHarnessSpec, type HarnessProfile } from './harness-provider.ts'
+import { ROLE_BUILTIN_PROVIDERS } from './role-provider.ts'
 import { chainGroups, hopKey } from './failover-chain.ts'
 export { activeFailoverChain } from './failover-chain.ts'
 
-export type ProviderId = 'claude' | 'openai' | 'gemini' | 'deepseek' | 'custom'
+export type ProviderId = 'claude' | 'openai' | 'gemini' | 'deepseek' | 'custom' | 'proxy'
 export type ProviderAuth = 'native' | 'oauth' | 'api-key' | 'none'
 
 export type ProviderCatalogEntry = {
@@ -58,6 +59,11 @@ export type ProviderAccountView = {
   // The config dir(s) this row stands for. Always exactly one since rows went per-account
   // (v0.5.201) — kept as a list because the shape is part of the view every consumer reads.
   members: string[]
+  // A row a ROLE can point at that is NOT a failover hop — the proxy built-ins. They are transport
+  // for a session the bridge launches, never a destination the chain can fail over TO, so every
+  // consumer that ranks, moves or counts the chain must skip them and only the role dials may read
+  // them. Absent on chain rows rather than `false`, so an older consumer sees exactly what it did.
+  roleOnly?: true
 }
 
 export type ProviderAccountsView = {
@@ -76,6 +82,12 @@ type ProjectionInput = {
   claudeAccounts: Array<{ name: string; ready: boolean }>
   gateways: Record<string, GatewayDefinition>
   gatewayReady: Record<string, boolean>
+  /**
+   * Live `claude-code-proxy <p> auth status` per built-in. OMITTED means "this consumer does not
+   * offer role transports" and no proxy row is projected at all — the failover surfaces
+   * (`tg readout providers`, the chain editor) are unchanged by their existence.
+   */
+  proxyReady?: Record<string, boolean>
   chain: FailoverHop[]
   activeCount?: number | null
   chatDefault?: string | null
@@ -104,7 +116,7 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
   // what keeps two separate logins apart once the name no longer implies the subscription.
   const groupKey = (name: string): string => `claude:${name}`
   const chainIndexOf = new Map(input.chain.map((hop, i) => [hop, i] as const))
-  const accounts = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
+  const chainRows = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
     const hop = group.hops[0]!
     const chainIndex = chainIndexOf.get(hop) ?? 0
     if (hop.kind === 'claude') {
@@ -138,7 +150,8 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
       models: [...new Set((input.models?.[name] ?? [def.model]).map(x => x.replace(/\[1m\]$/, '')))],
       members: [name],
     }]
-  }).map((account, order) => ({ ...account, order }))
+  })
+  const accounts = [...chainRows, ...proxyRows(input.proxyReady)].map((account, order) => ({ ...account, order }))
   const activeCount = accounts.filter(account => account.active).length
   const fallback = accounts[0]?.id ?? 'claude:main'
   // A role default still points at a CONFIG DIR (`claude:chat`); the row it belongs to is now the
@@ -150,7 +163,31 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
   return { accounts, activeCount, defaults: { chat: toRow(input.chatDefault), code: toRow(input.codeDefault) }, catalog: PROVIDER_CATALOG, auto: input.auto === true }
 }
 
-export type ProviderRoute = { account?: string; harness?: GatewayHarnessProfile }
+// What a built-in proxy provider IS, in the words the owner would use for it — the picker showed
+// four bare vendor names, three of which were dead ends on this box, and named neither the thing he
+// already pays for (`codex` = his ChatGPT subscription) nor what the others would cost him.
+const PROXY_LABEL: Record<string, string> = {
+  codex: 'OpenAI subscription', kimi: 'Moonshot Kimi', grok: 'xAI Grok', cursor: 'Cursor',
+}
+
+// The proxy built-ins as rows. `model: null` on purpose: it suppresses the mini app's per-row model
+// dropdown, whose `action:'model'` writes a GATEWAY definition and has nothing to write for these —
+// their model is the role harness's, edited from the picker's ✏️.
+function proxyRows(ready: Record<string, boolean> | undefined): ProviderAccountView[] {
+  if (!ready) return []
+  return ROLE_BUILTIN_PROVIDERS.map((name): ProviderAccountView => {
+    const profile = parseHarnessSpec(name)
+    const model = profile && profile.provider !== 'anthropic' ? profile.model.replace(/\[1m\]$/, '') : ''
+    return {
+      id: `proxy:${name}`, provider: 'proxy', providerLabel: PROXY_LABEL[name] ?? name,
+      label: model ? `${name} · ${model}` : name,
+      auth: 'oauth', authLabel: 'CLI login', ready: ready[name] === true,
+      active: false, order: 0, model: null, models: [], members: [name], roleOnly: true,
+    }
+  })
+}
+
+export type ProviderRoute = { account?: string; harness?: Exclude<HarnessProfile, { provider: 'anthropic' }> }
 export function routeForAccountId(id: string, gateways: Record<string, GatewayDefinition>): ProviderRoute | null {
   if (id.startsWith('claude:')) {
     const account = id.slice('claude:'.length)
@@ -160,6 +197,13 @@ export function routeForAccountId(id: string, gateways: Record<string, GatewayDe
     const gateway = id.slice('gateway:'.length)
     const def = gateways[gateway]
     return def ? { harness: { provider: 'gateway', gateway, model: def.model, smallModel: def.smallModel } } : null
+  }
+  // A proxy built-in is a role TRANSPORT with no account of its own: the session runs in whichever
+  // Claude config dir the role falls back to and is served through claude-code-proxy. Parsed rather
+  // than trusted, so an id naming a provider this build does not have is `null`, not a broken spawn.
+  if (id.startsWith('proxy:')) {
+    const profile = parseHarnessSpec(id.slice('proxy:'.length))
+    return profile && profile.provider !== 'anthropic' && profile.provider !== 'gateway' ? { harness: profile } : null
   }
   return null
 }

@@ -22,6 +22,13 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 //     code the daemon reports rather than a spinner that never resolves.
 //  6. THE ✳️ CODEX DIALS LIVE IN THE ACCOUNTS SHEET, where /settings keeps them — and write from
 //     there, with the same keys.
+//  7. A ROLE'S OWN DIALS LIVE UNDER ITS TAB IN THAT SAME SHEET (2026-08-21; the 🧑‍💻 Defaults sheet
+//     is gone). Which dials show is the SELECTED ROLE's, and the model dial is the one that can be
+//     absent: a role defaulting to a GATEWAY account has exactly one model control — the provider
+//     row's own select — so this block must show a read-only line naming that account's model and
+//     no Anthropic alias list. The control for it is the same fixture with the role's default moved
+//     back to a `claude:` account, which must bring the select back; without that control "no
+//     select" passes on a block that renders nothing at all.
 //
 // CONTROL: the same page with `write:false`, which must fail every write claim and pass every render
 // one. Without it "the toggles didn't post" would pass on a page whose sheets never opened.
@@ -39,7 +46,6 @@ const ok = (cond, label) => { console.log(`${cond ? "OK  " : "FAIL"}  ${label}`)
 // real install gets them.
 const ROWS = [
   { id: "accounts", name: "👤 Accounts", keys: ["accounts"], panel: "accounts" },
-  { id: "spawnDefaults", name: "🧑‍💻 Model defaults", keys: ["spawnModel", "spawnEffort", "chatModel", "chatEffort", "spawnAuto", "fableForAgents"], value: "💬 fable · medium · 🧑‍💻 opus · high" },
   { id: "github", name: "🐙 GitHub", keys: ["github"], panel: "github" },
   { id: "batchAllow", name: "⚡ Batch allow", keys: ["batchAllow"] },
   { id: "transcribe", name: "🎙️ Voice transcription", keys: ["transcribeBackend", "transcribeModel"], value: "off" },
@@ -54,8 +60,8 @@ const ROWS = [
 ];
 
 // The payload shape the daemon serves, trimmed to what this file measures. `codexModel`/`codexEffort`
-// are served but named by no ROW — they belong to the Accounts panel now, and their absence from the
-// screen is itself a claim below.
+// and the eight role dials (chat*/spawn*/fableForAgents) are served but named by no ROW — they belong
+// to the Accounts panel now, and their absence from the screen is itself a claim below.
 const settingsFixture = (write, rows = ROWS) => ({
   write,
   rows,
@@ -65,6 +71,8 @@ const settingsFixture = (write, rows = ROWS) => ({
     spawnEffort: { value: "high", editable: true, options: ["low", "medium", "high", "xhigh", "max"], label: "coding sessions" },
     chatModel: { value: "fable", editable: true, options: ["fable", "opus", "sonnet", "haiku"], label: "the chat agent" },
     chatEffort: { value: "medium", editable: true, options: ["low", "medium", "high", "xhigh", "max"], label: "the chat agent" },
+    chatMode: { value: "🛡 Ask", raw: "default", editable: true, options: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"], label: "the chat agent" },
+    spawnMode: { value: "🚨 Bypass", raw: "bypassPermissions", editable: true, options: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"], label: "coding sessions" },
     spawnAuto: { value: false, editable: true, label: "agent spawns pick their own" },
     fableForAgents: { value: "default", editable: true, options: ["default", "allow"] },
     github: { value: "casualsav", editable: false },
@@ -113,7 +121,11 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   const rows = await screenRows(p);
   ok(JSON.stringify(rows) === JSON.stringify(ROWS.map(r => r.name)),
     `the screen is exactly the served rows, in the served order (got ${JSON.stringify(rows)})`);
-  ok(!rows.includes("Coding session model"), "a grouped key does NOT also render on the screen");
+  // A key the daemon serves under no ROW renders nowhere on the screen. Since 2026-08-21 that is
+  // every role dial: they are the accounts sheet's, and the screen inventing a row for them is the
+  // same failure as inventing one for the Codex dials.
+  ok(!rows.includes("Coding session model") && !rows.includes("Chat agent model"),
+    "a key served under no row does NOT render on the screen");
   // The rows /settings has never had. They cannot appear now without the client inventing them —
   // which is the failure this whole change exists to make impossible.
   const strays = rows.filter(r => /MCP|🛠|🤖|⏫|Codex/.test(r));
@@ -128,7 +140,7 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 {
   // The falsifier: the SAME payload in a deliberately wrong order. A client holding its own order
   // renders the list above and fails here; a client rendering what it is served follows.
-  const scrambled = [ROWS[3], ROWS[0], ROWS[8], ROWS[1], ROWS[6]];
+  const scrambled = [ROWS[2], ROWS[0], ROWS[7], ROWS[3], ROWS[5]];
   const p = await open(true, GH, scrambled);
   const rows = await screenRows(p);
   ok(JSON.stringify(rows) === JSON.stringify(scrambled.map(r => r.name)),
@@ -139,9 +151,6 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // ---- 2: grouping is presentational ------------------------------------------------------------
 {
   const p = await open(true);
-  const mdef = await p.$$eval("#mdefbody .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
-  ok(JSON.stringify(mdef) === JSON.stringify(["Coding session model", "Coding session effort", "Chat agent model", "Chat agent effort", "Auto — agent spawns pick", "Fable for agents"]),
-    `the Model defaults sheet holds all six dials in panel order (got ${JSON.stringify(mdef)})`);
   // VOICE IS TWO ROWS AND TWO SHEETS, because /settings' root has two rows. A merged sheet was this
   // app's own deviation, and it is what a served structure cannot express.
   const voice = await p.$$eval("#voicebody .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
@@ -150,9 +159,9 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   const tts = await p.$$eval("#ttsbody .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
   ok(JSON.stringify(tts) === JSON.stringify(["Voice replies", "Speak replies", "Voice engine", "Piper voice"]),
     `the voice-replies sheet holds its four controls (got ${JSON.stringify(tts)})`);
-  // Grouping must not lose a control TYPE either: the six model-defaults rows are 5 selects + 1 toggle.
-  const kinds = await p.$$eval("#mdefbody .setrow", rs => rs.map(r => r.querySelector("select") ? "select" : r.querySelector("button") ? "toggle" : "ro"));
-  ok(kinds.filter(k => k === "select").length === 5 && kinds.filter(k => k === "toggle").length === 1,
+  // Grouping must not lose a control TYPE either: the four voice-replies rows are 3 selects + 1 toggle.
+  const kinds = await p.$$eval("#ttsbody .setrow", rs => rs.map(r => r.querySelector("select") ? "select" : r.querySelector("button") ? "toggle" : "ro"));
+  ok(kinds.filter(k => k === "select").length === 3 && kinds.filter(k => k === "toggle").length === 1,
     `sheet controls keep their types (got ${JSON.stringify(kinds)})`);
   await p.close();
 }
@@ -160,27 +169,32 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // ---- 3: a control inside a sheet still writes, with the right key and value --------------------
 {
   const p = await open(true);
-  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});            // open Model defaults
+  await p.click("#tab-settings .setrow:nth-child(4)", { timeout: 2000 }).catch(() => {});            // open 🎙️ Voice transcription
   await p.waitForTimeout(250);
   // Guarded so the CONTROL run (a page with no sheets) reports failures instead of throwing on the
   // first missing selector and hiding every check after it.
-  ok(await p.$eval("#mdef", n => n.classList.contains("show")).catch(() => false), "tapping the group row opens its sheet");
-  await p.selectOption("#mdefbody .setrow:nth-child(3) select", "haiku", { timeout: 2000 }).catch(() => {});   // chatModel
+  ok(await p.$eval("#voicesheet", n => n.classList.contains("show")).catch(() => false), "tapping the group row opens its sheet");
+  await p.selectOption("#voicebody .setrow:nth-child(1) select", "local", { timeout: 2000 }).catch(() => {});   // transcribeBackend
   await p.waitForTimeout(150);
   const posts = await p.evaluate(() => window.__posts);
   const m = posts.find(x => x.path.includes("/api/settings/set"));
-  ok(!!m && m.body.key === "chatModel" && m.body.value === "haiku",
-    `the chat-model select posts chatModel=haiku (got ${JSON.stringify(m && m.body)})`);
-  // And the toggle inside the same sheet, which takes a different branch of the builder.
-  await p.click("#mdefbody .setrow:nth-child(5) button", { timeout: 2000 }).catch(() => {});         // spawnAuto, currently false
-  await p.waitForTimeout(150);
-  const t = (await p.evaluate(() => window.__posts)).filter(x => x.body && x.body.key === "spawnAuto")[0];
-  ok(!!t && t.body.value === true, `the auto toggle posts spawnAuto=true (got ${JSON.stringify(t && t.body)})`);
-  // A flat row on the screen itself. The sheet above is a full-screen backdrop, so it has to go
-  // first — a click that lands on the backdrop posts nothing and reads exactly like a dead control.
-  await p.evaluate(() => closeSheet("mdef"));
+  ok(!!m && m.body.key === "transcribeBackend" && m.body.value === "local",
+    `the transcription select posts transcribeBackend=local (got ${JSON.stringify(m && m.body)})`);
+  // And a toggle inside a sheet, which takes a different branch of the builder. A sheet is a
+  // full-screen backdrop, so the one standing has to go first — a click that lands on the backdrop
+  // posts nothing and reads exactly like a dead control.
+  await p.evaluate(() => closeSheet("voicesheet"));
   await p.waitForTimeout(250);
-  await p.click("#tab-settings .setrow:nth-child(4) button", { timeout: 2000 }).catch(() => {});     // batchAllow, currently true
+  await p.click("#tab-settings .setrow:nth-child(5)", { timeout: 2000 }).catch(() => {});            // open 🔊 Voice replies
+  await p.waitForTimeout(250);
+  await p.click("#ttsbody .setrow:nth-child(1) button", { timeout: 2000 }).catch(() => {});          // voice, currently false
+  await p.waitForTimeout(150);
+  const t = (await p.evaluate(() => window.__posts)).filter(x => x.body && x.body.key === "voice")[0];
+  ok(!!t && t.body.value === true, `the voice toggle posts voice=true (got ${JSON.stringify(t && t.body)})`);
+  // A flat row on the screen itself.
+  await p.evaluate(() => closeSheet("ttssheet"));
+  await p.waitForTimeout(250);
+  await p.click("#tab-settings .setrow:nth-child(3) button", { timeout: 2000 }).catch(() => {});     // batchAllow, currently true
   await p.waitForTimeout(150);
   const ba = (await p.evaluate(() => window.__posts)).filter(x => x.body && x.body.key === "batchAllow")[0];
   ok(!!ba && ba.body.value === false, `the batch-allow toggle posts batchAllow=false (got ${JSON.stringify(ba && ba.body)})`);
@@ -190,9 +204,9 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // ---- 4: read-only stays read-only through the sheets -------------------------------------------
 {
   const p = await open(false);
-  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});
+  await p.click("#tab-settings .setrow:nth-child(4)", { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(250);
-  const operable = await p.$$eval("#mdefbody .setrow", rs => rs.filter(r => {
+  const operable = await p.$$eval("#voicebody .setrow", rs => rs.filter(r => {
     const s = r.querySelector("select"), btn = r.querySelector("button");
     return (s && !s.disabled) || (btn && !btn.disabled);
   }).length);
@@ -205,7 +219,7 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // ---- 5: GitHub's device-code flow shows its code ------------------------------------------------
 {
   const p = await open(true, { ...GH, login: { active: true, code: "WXYZ-1234", url: "https://github.com/login/device" } });
-  await p.click("#tab-settings .setrow:nth-child(3)", { timeout: 2000 }).catch(() => {});            // GitHub row
+  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});            // GitHub row
   await p.waitForTimeout(300);
   const body = await p.$eval("#ghbody", n => n.textContent).catch(() => "");
   ok(await p.$eval("#ghsheet", n => n.classList.contains("show")).catch(() => false), "the GitHub row opens its sheet");
@@ -216,7 +230,7 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 {
   // The actions, on a settled login.
   const p = await open(true);
-  await p.click("#tab-settings .setrow:nth-child(3)", { timeout: 2000 }).catch(() => {});
+  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(300);
   await p.click('#ghbody [data-gh="alt"] [data-gh-switch]', { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(150);
@@ -351,6 +365,158 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   await p.waitForTimeout(150);
   const addp = await p.evaluate(() => window.__posts.filter(x => x.body.action === "add-claude"));
   ok(addp.length === 1 && addp[0].body.name === "work2", `register posts the trimmed, lowercased name (got ${JSON.stringify(addp.map(x => x.body))})`);
+  await p.close();
+}
+
+// ---- 9: the ROLE's own dials, under the role tab in the accounts sheet --------------------------
+// One sheet answers "which account" and "what does it run on" (the owner, 2026-08-21). The dials are
+// the selected role's, and the model dial is conditional on WHAT that role defaults to: a gateway
+// account's model is the provider row's own select, so this block shows it read-only rather than a
+// second control offering Anthropic aliases the account cannot serve.
+{
+  const p = await open(true);
+  const accountsFor = codeDefault => ({
+    accounts: [
+      { id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus", "sonnet"], model: "opus" },
+      { id: "gateway:deepseek", label: "DeepSeek", providerLabel: "DeepSeek", authLabel: "API key", ready: true, models: ["deepseek-chat", "deepseek-reasoner"], model: "deepseek-chat" },
+    ],
+    activeCount: 2, defaults: { chat: "claude:main", code: codeDefault }, catalog: [], auto: false,
+  });
+  // Re-stub, then re-open: the sheet reads BOTH endpoints on every repaint, so a fixture change is
+  // only in effect once it has been read again.
+  const load = async (codeDefault, write = true) => {
+    await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
+      [accountsFor(codeDefault), settingsFixture(write)]);
+    await p.evaluate(() => openAccounts()).catch(() => {});
+    await p.waitForTimeout(300);
+  };
+  const labels = () => p.$$eval("#acctdefaults .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
+  // Per row: its control, or — for a read-only row — the value it displays. A row's KIND is the
+  // claim here, so "no select" and "the gateway's model is named" are answered by one read.
+  const kinds = () => p.$$eval("#acctdefaults .setrow", rs => rs.map(r =>
+    r.querySelector("select") ? "select" : r.querySelector("button") ? "toggle" : (r.querySelector(".ro")?.textContent.trim() || "ro")));
+
+  // (b) THE CODING TAB, defaulting to a gateway: five dials, and the model one is read-only.
+  await load("gateway:deepseek");
+  const code = await labels(), codeKinds = await kinds();
+  ok(JSON.stringify(code) === JSON.stringify(["Coding session model", "Coding session effort", "Coding session mode", "Auto — agent spawns pick", "Fable for agents"]),
+    `the coding tab shows the coding role's five dials, in order (got ${JSON.stringify(code)})`);
+  ok(JSON.stringify(codeKinds) === JSON.stringify(["deepseek-chat", "select", "select", "toggle", "select"]),
+    `a gateway default: the model row NAMES that account's model and carries no select (got ${JSON.stringify(codeKinds)})`);
+  const head = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
+  ok(head.includes("Coding agent defaults") && head.includes("DeepSeek"),
+    `the block's header names the role and the provider it runs on (got ${JSON.stringify(head)})`);
+  // Same keys, same POST as any other settings control — only the container differs.
+  const eff = (await p.$$("#acctdefaults .setrow select"))[0];
+  if (eff) await eff.selectOption("low").catch(() => {});
+  await p.waitForTimeout(150);
+  const se = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "spawnEffort");
+  ok(!!se && se.body.value === "low", `a dial in the block posts spawnEffort=low (got ${JSON.stringify(se && se.body)})`);
+
+  // (c) THE CONTROL for the check above: move the coding default back to a claude: account and the
+  // select must come back. Without it, "no select" passes on a block that renders nothing at all.
+  await load("claude:main");
+  ok((await kinds())[0] === "select", `a claude: default brings the model SELECT back (got ${JSON.stringify(await kinds())})`);
+
+  // (a) THE CHAT TAB: its own three dials, model included — its default is a claude: account.
+  await p.click('[data-acc-role="chat"]', { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(300);
+  const chat = await labels();
+  ok(JSON.stringify(chat) === JSON.stringify(["Chat agent model", "Chat agent effort", "Chat agent mode"]),
+    `the chat tab shows the chat role's three dials, in order (got ${JSON.stringify(chat)})`);
+  ok((await kinds())[0] === "select", "the chat model row carries a select");
+  const chead = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
+  ok(chead.includes("Chat agent defaults") && chead.includes("main"), `the header follows the tab (got ${JSON.stringify(chead)})`);
+  await p.close();
+}
+{
+  // Read-only reaches the new container too — the write gate is the /api/settings read the sheet
+  // now takes itself, so it has to be re-proved here rather than inherited from the screen.
+  const p = await open(false);
+  await p.evaluate(s => { window.api = async q => q.includes("/api/provider-accounts") ? {
+    accounts: [{ id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" }],
+    activeCount: 1, defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false,
+  } : q.includes("/api/settings") ? s : {}; }, settingsFixture(false));
+  await p.evaluate(() => openAccounts()).catch(() => {});
+  await p.waitForTimeout(300);
+  const operable = await p.$$eval("#acctdefaults .setrow", rs => rs.filter(r => {
+    const s = r.querySelector("select"), btn = r.querySelector("button");
+    return (s && !s.disabled) || (btn && !btn.disabled);
+  }).length);
+  ok(operable === 0, `write off: no dial in the role block is operable (got ${operable})`);
+  ok((await p.evaluate(() => window.__posts)).length === 0, "write off: nothing was posted");
+  await p.close();
+}
+
+// ---- 10: the built-in providers are ROLE TARGETS, not failover hops ----------------------------
+// A `roleOnly` row can never be selected by the failover chain, so every number and every control
+// that describes that chain must be blind to it: the participate count, the ± bounds, the rank
+// arrows and the cut-off divider. The falsifier is the divider pair — count them against the FULL
+// list and "Inactive · none" disappears while a cut-off line appears in the middle of the failover
+// rows, which is a page that looks plausible and is wrong.
+{
+  const p = await open(true);
+  const PROXIES = [
+    { id: "proxy:codex", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: true, label: "OpenAI subscription" },
+    { id: "proxy:grok", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: false, label: "xAI subscription" },
+  ];
+  const withProxies = codeDefault => ({
+    accounts: [
+      { id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" },
+      { id: "gateway:deepseek", label: "DeepSeek", providerLabel: "DeepSeek", authLabel: "API key", ready: true, models: ["deepseek-chat"], model: "deepseek-chat" },
+      ...PROXIES,
+    ],
+    activeCount: 2, defaults: { chat: "claude:main", code: codeDefault }, catalog: [], auto: false,
+  });
+  const load = async codeDefault => {
+    await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
+      [withProxies(codeDefault), settingsFixture(true)]);
+    await p.evaluate(() => openAccounts()).catch(() => {});
+    await p.waitForTimeout(300);
+  };
+
+  await load("claude:main");
+  const failover = await p.$$eval("#accbody .accttop .copy", ns => {
+    const n = ns.find(x => /failover/.test(x.firstElementChild.textContent));
+    return n ? n.lastElementChild.textContent.trim() : "";
+  }).catch(() => "");
+  ok(failover === "2 of 2 accounts participate", `the participate count excludes the role-only rows (got ${JSON.stringify(failover)})`);
+  const plus = await p.$$eval("#accbody [data-acc-count]", bs => bs.map(b => `${b.textContent}:${b.disabled}`)).catch(() => []);
+  ok(JSON.stringify(plus) === JSON.stringify(["−:false", "+:true"]), `the ± bounds are the failover list's (got ${JSON.stringify(plus)})`);
+  const dividers = await p.$$eval("#accbody .acctdivider", ns => ns.map(n => n.textContent.trim()));
+  ok(dividers.length === 1 && dividers[0] === "Inactive · none",
+    `every account participates, so the cut-off divider does NOT appear (got ${JSON.stringify(dividers)})`);
+
+  // The section of their own, and its rows: role buttons when ready, and nothing that ranks,
+  // re-models or removes them.
+  const headers = await p.$$eval("#accbody .accttop .copy", ns => ns.map(n => n.textContent.trim()));
+  ok(headers.some(h => h.startsWith("Built-in providers") && h.includes("Role targets only — not part of failover")),
+    `the built-in section is headed and says what it is (got ${JSON.stringify(headers)})`);
+  const row = async (id, sel) => (await p.$$(`[data-account="${id}"] ${sel}`)).length;
+  ok(await row("proxy:codex", "[data-acc-default]") === 2, "a READY built-in offers both role buttons");
+  ok(await row("proxy:grok", "[data-acc-default]") === 0, "a signed-out built-in offers no role button");
+  const junk = (await row("proxy:codex", "[data-acc-move]")) + (await row("proxy:codex", "[data-acc-model]"))
+    + (await row("proxy:codex", "[data-acc-key]")) + (await row("proxy:codex", "[data-acc-remove]"));
+  ok(junk === 0, `a built-in row carries no rank, model, key or forget control (got ${junk})`);
+  // Scoped to `.identity` — the row's "Default for:" caption wears .acctmeta too, like every other
+  // row's does.
+  const metas = await p.$$eval('[data-account^="proxy:"] .identity .acctmeta', ns => ns.map(n => n.textContent.trim()));
+  ok(JSON.stringify(metas) === JSON.stringify(["Signed in", "Needs sign-in"]), `each built-in states its own sign-in state (got ${JSON.stringify(metas)})`);
+  // And the role buttons are live — the same handler every other row's are bound by.
+  await p.click('[data-account="proxy:codex"] [data-acc-default="code"]', { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(150);
+  const d = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.action === "default");
+  ok(!!d && d.body.id === "proxy:codex" && d.body.role === "code", `tapping Coding posts default/proxy:codex (got ${JSON.stringify(d && d.body)})`);
+
+  // CONTROL: a built-in AS the role's default. accountLabel searches every served row, so the block
+  // must name it — "Not set" here would mean the role tile and this header disagree about what the
+  // role runs on, which is the one thing this sheet exists to say.
+  await load("proxy:codex");
+  const head = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
+  ok(head.includes("Runs on OpenAI subscription") && !head.includes("Not set"),
+    `a built-in default is NAMED in the block's header (got ${JSON.stringify(head)})`);
+  const sub = await p.$eval("#acctdefaults .setrow .sub", n => n.textContent.trim()).catch(() => "");
+  ok(sub === "set by the provider", `a built-in has no model control anywhere, and the row says so (got ${JSON.stringify(sub)})`);
   await p.close();
 }
 

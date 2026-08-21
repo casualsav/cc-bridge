@@ -6,8 +6,10 @@
 // The role is a DEFAULT for NEW sessions only: a spawn that carries its own harness (an explicit
 // /harness override, a topic's recorded harness, a resume's recorded harness) keeps it — the role
 // is the last fallback, never an override. Existing sessions are never moved.
-import { normalizeHarnessProfile, parseHarnessSpec, type HarnessProfile } from './harness-provider.ts'
+import { normalizeHarnessProfile, type HarnessProfile } from './harness-provider.ts'
 import type { GatewayDefinition } from './harness-gateway.ts'
+import { MODEL_ALIASES } from './model-catalog.ts'
+import { FABLE } from './spawn-model-policy.ts'
 
 export type SessionRole = 'chat' | 'code'
 
@@ -34,21 +36,6 @@ export function spawnLaunchHarness(
   return explicitAlias ? undefined : roleHarness
 }
 
-// The picker's provider options for a role: Native, every configured gateway (with its current
-// model), and the built-ins (with their default models). Gateways are the "any provider" escape
-// hatch — a provider not listed here becomes one by adding it as a gateway (Accounts → ➕ Provider).
-export type RoleProviderOption = { key: string; label: string }
-
-export function roleProviderOptions(gateways: Record<string, GatewayDefinition>): RoleProviderOption[] {
-  const out: RoleProviderOption[] = [{ key: 'native', label: 'Anthropic (native)' }]
-  for (const [name, def] of Object.entries(gateways)) out.push({ key: `gw:${name}`, label: `${name} · ${def.model.replace(/\[1m\]$/, '')}` })
-  for (const p of ROLE_BUILTIN_PROVIDERS) {
-    const profile = parseHarnessSpec(p)
-    out.push({ key: p, label: `${p}${profile && profile.provider !== 'anthropic' ? ` · ${profile.model.replace(/\[1m\]$/, '')}` : ''}` })
-  }
-  return out
-}
-
 // The one-line "runs on" summary for a role row and the picker header.
 export function roleHarnessSummary(profile: HarnessProfile, gateways: Record<string, GatewayDefinition>): string {
   if (profile.provider === 'anthropic') return 'Anthropic (native)'
@@ -59,24 +46,47 @@ export function roleHarnessSummary(profile: HarnessProfile, gateways: Record<str
   return `${profile.provider} · ${profile.model.replace(/\[1m\]$/, '')}`
 }
 
-// The Accounts-panel line for a role. The CHAT LANE's line must name what the lane is ACTUALLY
-// running (its per-session harness), not just the role default — a panel that says "chat runs on
-// deepseek" while the orchestrator is served by OpenAI misleads any user, not just this one. When
-// they differ, both are shown: the live value, then what a NEW lane would start on. CODING has no
-// single live session, so its line is the role default, plainly labelled.
-export function rolePanelLine(
-  kind: 'lane' | 'coding',
-  live: HarnessProfile | null,
-  role: HarnessProfile,
-  gateways: Record<string, GatewayDefinition>,
-): string {
-  if (kind === 'coding') return `🧑‍💻 Coding sessions run on — ${roleHarnessSummary(role, gateways)}`
-  const roleSum = roleHarnessSummary(role, gateways)
-  if (!live) return `💬 Chat runs on — ${roleSum} (applies when the lane starts)`
-  const liveSum = roleHarnessSummary(live, gateways)
-  return liveSum === roleSum
-    ? `💬 Chat runs on — ${liveSum}`
-    : `💬 Chat runs on — ${liveSum} · new lanes: ${roleSum}`
+// The MODEL chips on a role's drill-in, as data. Which chips exist at all is a property of what the
+// role's ACCOUNT is, and the three cases are genuinely different questions: a Claude account's model
+// is one of our own aliases (a bridge preference, `spd:m:`), a gateway's is whatever that provider's
+// own catalog offers (`rp:gm:` by INDEX — the list is discovered live and a name would have to be
+// re-validated anyway), and a proxy built-in publishes no catalog at all, so ✏️ typing one is the
+// only lever there is. A `null` catalog is an unreachable provider, NOT an empty one: it must not
+// render as "this provider has no models", so it falls back to ✏️ exactly like a proxy.
+//
+// Callback data only — no InlineKeyboard here — so the row list can be asserted without a keyboard
+// (`role-defaults.test.ts`).
+export type RoleModelChipSource =
+  | { kind: 'claude'; current: string; fableOff: boolean; role: SessionRole }
+  | { kind: 'gateway'; current: string; discovered: string[] | null }
+  | { kind: 'proxy' }
+
+// A gateway catalog can run to hundreds of ids and a keyboard cannot; 8 is the cap because it is two
+// rows of four at the width the effort chips already use, and the ✏️ chip beside them is what makes
+// truncation safe — a model off the end of the list is still reachable by typing its id.
+export const ROLE_MODEL_CHIP_CAP = 8
+
+const bareModel = (m: string): string => m.replace(/\[1m\]$/, '')
+
+export function roleModelChips(src: RoleModelChipSource, role: SessionRole): Array<{ label: string; data: string }> {
+  if (src.kind === 'claude') {
+    // A model the owner has switched off for coding agents is not OFFERED as their default either.
+    // The gate is the CODING role only — the chat lane is his own surface, never an agent's — which
+    // is the same condition `modelRolePickerKeyboard` applied before the dials moved in here.
+    return MODEL_ALIASES
+      .filter(m => !(m === FABLE && src.fableOff && src.role === 'code'))
+      .map(m => ({ label: `${src.current === m ? '✅ ' : ''}${m}`, data: `spd:m:${role}:${m}` }))
+  }
+  const chips: Array<{ label: string; data: string }> = []
+  if (src.kind === 'gateway' && src.discovered?.length) {
+    const current = bareModel(src.current)
+    chips.push(...src.discovered.slice(0, ROLE_MODEL_CHIP_CAP).map((m, i) => ({
+      label: `${bareModel(m) === current ? '✅ ' : ''}${bareModel(m)}`,
+      data: `rp:gm:${role}:${i}`,
+    })))
+  }
+  chips.push({ label: '✏️', data: `rp:model:${role}` })
+  return chips
 }
 
 // Apply a user-typed model id to a harness (the ✏️ role button, or /model on a session already

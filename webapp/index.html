@@ -2156,14 +2156,6 @@
      VOICE IS TWO SHEETS, not one, since v0.4.336: /settings' root carries 🎙️ Voice transcription and
      🔊 Voice replies as two separate rows, so a merged sheet was this app's own deviation from the
      panel it mirrors. The daemon serves both rows (settingsRows()); these are where they open. -->
-<div id="mdef" class="sheetwrap">
-  <div class="sheet">
-    <div class="shead">Defaults</div>
-    <div class="card" id="mdefbody"></div>
-    <div class="sprow"><button id="mdefclose" class="cancel">Close</button></div>
-  </div>
-</div>
-
 <div id="voicesheet" class="sheetwrap">
   <div class="sheet">
     <div class="shead">Voice transcription</div>
@@ -2646,7 +2638,6 @@ const SETTING_NAMES = {
 // settings rows (the Codex dials) obey it — that sheet is reachable only from the settings screen.
 let SETTINGS_WRITE = false;
 const SETTING_SHEETS = {
-  spawnDefaults: { sheet: "mdef", body: "mdefbody" },
   transcribe: { sheet: "voicesheet", body: "voicebody" },
   tts: { sheet: "ttssheet", body: "ttsbody" },
 };
@@ -2761,8 +2752,6 @@ async function renderSettings() {
   }
   el.appendChild(wrap);
 }
-$("mdefclose").onclick = () => closeSheet("mdef");
-$("mdef").onclick = e => { if (e.target.id === "mdef") closeSheet("mdef"); };
 $("voiceclose").onclick = () => closeSheet("voicesheet");
 $("voicesheet").onclick = e => { if (e.target.id === "voicesheet") closeSheet("voicesheet"); };
 $("ttsclose").onclick = () => closeSheet("ttssheet");
@@ -2811,9 +2800,17 @@ $("ghbody").addEventListener("click", async e => {
   if (e.target.dataset.ghSwitch) { if (await writeOp("/api/github/action", { action: "switch", user })) renderGithub(); }
   else if (e.target.dataset.ghOut) { if (confirm("Log out " + user + "?") && await writeOp("/api/github/action", { action: "logout", user })) renderGithub(); }
 });
+// ONE repaint for this sheet, and it takes both reads: which accounts exist, and what the selected
+// role runs on. A dial drawn from a stale /api/settings is the wrong answer to the question the
+// sheet now exists to answer.
+async function reloadAccounts() {
+  const [accs, sets] = await Promise.all([api("/api/provider-accounts?role=" + ACCOUNT_ROLE), api("/api/settings")]);
+  PROVIDER_ACCOUNTS = accs; ACCOUNT_SETTINGS = sets.settings || {}; SETTINGS_WRITE = !!sets.write;
+  renderAccounts();
+}
 async function openAccounts() {
   try {
-    PROVIDER_ACCOUNTS = await api("/api/provider-accounts?role=" + ACCOUNT_ROLE); renderAccounts();
+    await reloadAccounts();
     $("accprovider").innerHTML = (PROVIDER_ACCOUNTS.catalog || []).filter(p => p.id !== 'claude').map(p => '<option value="' + esc(p.id) + '">' + esc(p.label) + ' · API key</option>').join('');
     providerFormChanged(); openSheet("accounts");
   } catch {}
@@ -2822,7 +2819,13 @@ function accountById(id) { return (PROVIDER_ACCOUNTS?.accounts || []).find(a => 
 function accountLabel(id) { const a = accountById(id); return a ? a.label : "Not set"; }
 function renderAccounts() {
   const v = PROVIDER_ACCOUNTS; if (!v) return;
-  const body = $("accbody"), accounts = v.accounts || [];
+  const body = $("accbody"), all = v.accounts || [];
+  // TWO LISTS, and the cut is the failover chain's own: a `roleOnly` row (the built-in providers) is
+  // a ROLE TARGET and never a hop, so it is out of the count, out of the ranks and out of the
+  // cut-off divider. Folding them back into `accounts` puts rows the chain can never select inside
+  // "N of M accounts participate" — the number the ± buttons move — and hands them ↑/↓ that rank
+  // nothing.
+  const accounts = all.filter(a => !a.roleOnly), builtins = all.filter(a => a.roleOnly);
   let html = '<div class="acctroles"><div class="acctrole ' + (ACCOUNT_ROLE === 'chat' ? 'selected' : '') + '" data-acc-role="chat"><div class="k">Chat agent</div><div class="v">' + esc(accountLabel(v.defaults.chat)) + '</div></div><div class="acctrole ' + (ACCOUNT_ROLE === 'code' ? 'selected' : '') + '" data-acc-role="code"><div class="k">Coding agent</div><div class="v">' + esc(accountLabel(v.defaults.code)) + '</div></div></div>';
   html += '<div class="accttop"><div class="copy"><div>Automatic orchestration</div><div class="acctmeta">May choose a better active provider/model; explicit launches still win.</div></div><button class="toggle ' + (v.auto ? '' : 'off') + '" data-acc-auto="1">' + (v.auto ? 'On' : 'Off') + '</button></div>';
   html += '<div class="accttop"><div class="copy"><div>' + (ACCOUNT_ROLE === 'chat' ? 'Chat' : 'Coding') + ' failover</div><div class="acctmeta">' + v.activeCount + ' of ' + accounts.length + ' accounts participate</div></div><button class="toggle off" data-acc-count="' + Math.max(0, v.activeCount - 1) + '" ' + (v.activeCount <= 0 ? 'disabled' : '') + '>−</button><button class="toggle off" data-acc-count="' + Math.min(accounts.length, v.activeCount + 1) + '" ' + (v.activeCount >= accounts.length ? 'disabled' : '') + '>+</button></div>';
@@ -2869,18 +2872,71 @@ function renderAccounts() {
       + '</div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
+  // The built-in providers, in their own section because they answer a different question: which
+  // account a ROLE runs on, never which one the chain falls through to. So no ranks, no model
+  // select (they carry none) and no Key/Forget — nothing here is registered or removable. The one
+  // control is the role pair, and it obeys the same signed-out rule every other row does.
+  if (builtins.length) {
+    html += '<div class="accttop"><div class="copy"><div>Built-in providers</div><div class="acctmeta">Role targets only — not part of failover</div></div></div>';
+    for (const a of builtins) {
+      html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + (a.ready ? 'Signed in' : 'Needs sign-in') + '</div></div></div>'
+        + (a.ready
+            ? '<div class="acctactions"><span class="acctmeta" style="align-self:center;margin-right:2px">Default for:</span>'
+              + '<button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button>'
+              + '<button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button></div>'
+            : '')
+        + '</div>';
+    }
+  }
   body.innerHTML = html;
+  const again = () => reloadAccounts();
+  // THE ROLE'S OWN DIALS SIT UNDER ITS TAB, because "which account" and "what does it run on" are
+  // one question (the owner, 2026-08-21) — the settings screen's 🧑‍💻 Defaults row is gone and this
+  // is where its keys live now. Same keys, same builder, same POST as every other settings control;
+  // only the container and the repaint differ, exactly like the Codex dials below.
+  const role = ACCOUNT_ROLE, defAcc = v.defaults[role];
+  const dialKeys = role === 'chat'
+    ? ['chatModel', 'chatEffort', 'chatMode']
+    : ['spawnModel', 'spawnEffort', 'spawnMode', 'spawnAuto', 'fableForAgents'];
+  const defs = document.createElement('div'); defs.id = 'acctdefaults';
+  for (const key of dialKeys) {
+    const s = (ACCOUNT_SETTINGS || {})[key]; if (!s) continue;
+    // A GATEWAY account's model control is the provider row's own select, and it is the only one:
+    // this key's options are the Anthropic aliases, which that account cannot serve, so offering
+    // them here said the role runs on a model it has no way to reach. Read-only, pointing at the
+    // control that does write.
+    if ((key === 'chatModel' || key === 'spawnModel') && !String(defAcc || '').startsWith('claude:')) {
+      const a = accountById(defAcc);
+      const r = document.createElement('div'); r.className = 'setrow';
+      // A built-in provider has no model control ANYWHERE — it picks its own — so the sub must not
+      // point at a select that row does not carry.
+      const sub = a && a.roleOnly ? 'set by the provider' : 'set on the provider row below';
+      r.innerHTML = '<div class="lbl"><div>' + esc(SETTING_NAMES[key] || key) + '</div><div class="sub">' + sub + '</div></div>'
+        + '<div class="ro">' + esc(a && a.model ? a.model : '—') + '</div>';
+      defs.appendChild(r);
+      continue;
+    }
+    defs.appendChild(settingRow(key, SETTING_NAMES[key] || key, s, SETTINGS_WRITE && s.editable, again));
+  }
+  // Nothing served ⇒ nothing drawn, header included: a title over an empty block is a promise the
+  // payload did not make.
+  if (defs.childElementCount) {
+    const head = document.createElement('div'); head.className = 'accttop';
+    head.innerHTML = '<div class="copy"><div>' + (role === 'chat' ? 'Chat agent' : 'Coding agent') + ' defaults</div>'
+      + '<div class="acctmeta">Runs on ' + esc(accountLabel(defAcc)) + '</div></div>';
+    defs.insertBefore(head, defs.firstChild);
+    body.querySelector('.acctroles').insertAdjacentElement('afterend', defs);
+  }
   // The ✳️ Codex launch dials, last, because that is where the Telegram Accounts panel puts them —
   // and they are HERE rather than on the settings screen for the same reason: /settings' root has no
   // Codex row, so the app's root cannot either (the owner's 1:1 ruling). Same settings keys, same
   // builder, same authority; only the repaint differs, because this sheet is what has to redraw.
   // Served only when Codex is set up, the gate accountsPanelKeyboard uses.
   if (v.codex) {
-    const again = async () => { PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts(); };
     body.appendChild(settingRow('codexModel', SETTING_NAMES.codexModel, { value: v.codex.model, editable: true, kind: 'text', placeholder: "Model id, or 'default'", label: 'used on failover to Codex' }, SETTINGS_WRITE, again));
     body.appendChild(settingRow('codexEffort', SETTING_NAMES.codexEffort, { value: v.codex.effort, editable: true, options: v.codex.efforts, label: 'used on failover to Codex' }, SETTINGS_WRITE, again));
   }
-  body.querySelectorAll('[data-acc-role]').forEach(b => b.onclick = async () => { ACCOUNT_ROLE = b.dataset.accRole; PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts(); });
+  body.querySelectorAll('[data-acc-role]').forEach(b => b.onclick = async () => { ACCOUNT_ROLE = b.dataset.accRole; await reloadAccounts(); });
   body.querySelectorAll('[data-acc-move]').forEach(b => b.onclick = () => accountAction({ action:'move', id:b.closest('[data-account]').dataset.account, dir:b.dataset.accMove }));
   body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
   body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
@@ -2895,9 +2951,7 @@ function renderAccounts() {
     const dirs = p.plan.doomed.map(d => d.name + ' — ' + d.configDir).join('\n');
     const keptNote = p.plan.kept.length ? '\n\nKept (in use): ' + p.plan.kept.join(', ') : '';
     if (!confirm('Remove ' + p.plan.label + '?\n\nUnregisters these config dirs (the files on disk stay):\n\n' + dirs + keptNote)) return;
-    if (await writeOp('/api/provider-accounts/action', { action: 'remove-claude', name })) {
-      PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
-    }
+    if (await writeOp('/api/provider-accounts/action', { action: 'remove-claude', name })) await reloadAccounts();
   });
   // Two-step, like the Claude removal above and for the same reason: the daemon computes what the
   // log-out ends — whose login, the MCP tokens in the same file, the live sessions on it — and the
@@ -2910,7 +2964,7 @@ function renderAccounts() {
     // No success bar: SUCCESS CONFIRMATIONS ARE OFF here (the owner, 2026-07-30) and the repaint IS
     // the outcome — the row's dot goes grey, its meta line reads "Signed out", and Sign in becomes
     // the way back in.
-    PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
+    await reloadAccounts();
   });
   // 🔑 Sign in — one step, where Log out is two: nothing is destroyed, and a confirm between him and
   // a login screen is friction on the recovery path. It opens NO spawn sheet and offers no picker;
@@ -2942,7 +2996,7 @@ function renderAccounts() {
 async function accountAction(body) {
   const d = await writeOp('/api/provider-accounts/action', { ...body, role: body.role || ACCOUNT_ROLE }); if (!d) return;
   if (body.action === 'default' && body.role === 'chat') showOk(d.activated ? 'Chat provider is active' : 'Chat default saved · no active chat');
-  PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
+  await reloadAccounts();
 }
 function providerFormChanged() {
   const p = (PROVIDER_ACCOUNTS?.catalog || []).find(x => x.id === $("accprovider").value);
@@ -2991,6 +3045,11 @@ let SESSIONS = [];
 // constant exists so the client never spells the prefix twice (daemon.ts's AGENT_SID_PREFIX).
 const AGENT_SID = "agent:";
 let PROVIDER_ACCOUNTS = null;
+// The `settings` half of the accounts sheet: the selected role's own launch dials live under its
+// tab there, so the sheet reads /api/settings as well as /api/provider-accounts and repaints from
+// both (reloadAccounts). Null until the sheet has been opened once — the dials render nothing
+// rather than guessing, the same rule renderSettings keeps for a key the daemon did not send.
+let ACCOUNT_SETTINGS = null;
 let ACCOUNT_ROLE = 'code';
 // One row per window, in the card foot's own grammar: an emoji-led label, the percentage, the bar, then
 // the countdown. The 5h window is the one that bites hourly and leads; weekly sits under it.
@@ -5296,8 +5355,8 @@ $("accaddclaude").onclick = async () => {
   if (!name) return;
   const d = await writeOp("/api/provider-accounts/action", { action: "add-claude", name: name.trim().toLowerCase() });
   if (!d) return;   // writeOp surfaced the daemon's own refusal (bad name, already exists)
-  PROVIDER_ACCOUNTS = await api("/api/provider-accounts?role=" + ACCOUNT_ROLE); renderAccounts();
-  showDone(d.name + " registered — Launch it to sign in");
+  await reloadAccounts();
+  showDone(d.name + " registered — tap Sign in on its row");
 };
 $("acccancel").onclick = () => { $("accform").classList.remove("show"); $("accadd").style.display = ""; };
 $("accprovider").onchange = providerFormChanged;
