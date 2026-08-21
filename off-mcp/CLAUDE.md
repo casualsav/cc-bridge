@@ -117,6 +117,15 @@ question must run as `env -u TMUX -u TMUX_PANE claude -p …`, or it re-stamps t
 transcript. During any live test the humans' surfaces are production: canaries go to the daemon
 log or a scratch topic, never phrased as text a probe might repeat outward.
 
+## Scratch space
+
+Your scratchpad dir is usually a small tmpfs shared with every other session on the box — working
+files only. Anything large or lasting goes to a disk-backed dir instead: `$(tg shared)` for
+deliverables, `~/scratch` for the rest. That means datasets, `pip install --target`, model weights,
+media, build outputs — anything you'd think twice about attaching. Point test runners at a dir you
+delete (`TMPDIR=…`). A scratchpad is reaped once nothing live claims it and it has been idle 3 days,
+so don't park anything there you'll want next week.
+
 ## Handoff
 
 `HANDOFF.md` at the root of the repo you're working in — one file, unfinished work only. Write it

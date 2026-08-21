@@ -134,6 +134,27 @@ blindness that re-spawned itself. `anchorCwd` (`common.ts`) is the cure; `cwdFau
 the ENOENT name the cwd. Proof: `bun scripts/deleted-cwd-spawn.ts`; launch-site enumeration:
 `supervision-cwd.test.ts`.
 
+**A SCRATCH DIR IS REAPED ONLY ON POSITIVE EVIDENCE THAT NOTHING LIVE CLAIMS IT — age is never the
+question** (v0.5.208, 2026-08-21). The CLI writes every session a scratchpad under
+`<tmpdir>/claude-<uid>/<slug>/<uuid>/` and never removes it; on this box that filled a 2 GB tmpfs to
+81% (475 dirs, 1.11 GB, of which live sessions claimed 12 and 9.7 MB) and sessions started failing
+mid-task. Two measured facts make the obvious reaper wrong, and both read as trivia until they delete
+something: the **uuid is the CONVERSATION id** (59 of 61 uuids under this repo's slug have a matching
+`projects/<slug>/<uuid>.jsonl`), so a `/clear` strands a *live* session's own dir instantly — unclaimed
+is not dead, which is what the 72h grace covers; and a **scratch dir can be another session's cwd**
+(pid 1595585 sat three levels below one, and 36 `topics.json` rows name a cwd under this root), which
+under Bun makes deletion the 2026-07-30 outage rather than tidying. `planScratchGc` (`scratch-gc.ts`)
+therefore keeps on any of: a live sessionId in ANY config dir, a live cwd or open fd at-or-below the
+candidate, an open topic row's cwd, a symlink, an unmeasurable age — and removes NOTHING at all if any
+instrument failed to read, which is why `/proc`-less macOS is a logged no-op. Containment is
+one-directional on purpose: a process sitting in the ROOT (five were) claims nothing below it. Proof:
+`scratch-gc.test.ts` (source-bound; its six call-site tests must fail against a pre-0.5.208
+`daemon.ts`) and `bun scripts/scratch-gc-probe.ts`, whose `--legacy` control is the argument for the
+daemon owning this at all — run live 2026-08-21 it names a dir an age-only reaper would have destroyed
+under a session that was using it. The pressure ladder (`tmp-pressure.ts`) stamps its watermark ON
+DELIVERY for v0.5.175's reason, and the ≥95% gate refuses only `tg spawn`, after reaping and
+re-reading — never a lane, never a message.
+
 **Two daemons present as the bridge getting WORSE, never as broken** — double sends, reconnect
 churn, every session reporting success. Both hold LISTEN sockets bound to the same path (`ss`
 shows both; `daemon.pid` can name a third process). The one instrument that answers is

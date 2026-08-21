@@ -48,6 +48,8 @@ import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, de
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, detectAuthCodeScreen, onAuthScreen, extractAuthUrl, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
 import { planResumeOptions, planResumeCardText, planResumeOutcome, planResumeCardMint, resumePickerSig, paneGlance, type ResumeOption } from './resume-picker-card.ts'
 import { planRefreshSeam, refreshSummaryHeld } from './refresh-seam.ts'
+import { gatherGcEvidence, planScratchGc, applyScratchGc, scratchRoot, fmtBytes as fmtGcBytes, fmtDur as fmtGcDur, type GcPlan, type ScratchEntry } from './scratch-gc.ts'
+import { readTmpPressure, planTmpPressure, planSpawnGate, PRESSURE_STEPS, SPAWN_REFUSE_PCT, type PressureReading, type PressureState } from './tmp-pressure.ts'
 import { runRestartExit } from './refresh-exit.ts'
 import { isTerminalEndReason } from './hook-session-end.ts'
 import { recordEndRequest, recordEndObserved, getSessionEnd, recentSessionEnds, endAttributionText, reopenNeedsConfirm, initSessionEndLedger, type SessionEnd } from './session-end.ts'
@@ -8754,6 +8756,13 @@ async function handleCall(
           rows.push('', `recently ended (${RECENT_END_WINDOW_MS / 3_600_000}h):`)
           for (const e of ended) rows.push(`⚪ ${e.name} · ${endAttributionText(e)}`)
         }
+        // The scratch filesystem, but only once it is worth a line. A roster is the surface an
+        // orchestrator reads before handing work out, which makes it the right place to learn that the
+        // box is about to fail the next session mid-task.
+        const press = scratchPressureNow()
+        if (press && press.usedPct >= PRESSURE_STEPS[0]) {
+          rows.push('', `🧹 scratch space ${press.usedPct.toFixed(0)}% full · ${fmtGcBytes(press.freeBytes)} free${press.tmpfs ? ' (tmpfs)' : ''}`)
+        }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
         break
       }
@@ -9095,6 +9104,20 @@ async function handleCall(
         // @owner is the human's own address. A session wearing it would take every message meant for
         // him — resolveEndpoint answers names before anything else — so it is refused at the mint.
         if (isOwnerAddress(topicName)) { write({ t: 'result', id, ok: false, text: `'${topicName}' is reserved — @owner addresses the human, not a session` }); return }
+        // THE ≥95% GATE, and the only thing on this box that it ever refuses. Reap FIRST and re-read:
+        // a refusal that a sweep would have fixed is a false one, and the sweep is idempotent. What it
+        // buys is @midi2score on 2026-08-21 — a session that dies mid-task on a full scratch filesystem
+        // is a worse and far more confusing outcome than a spawn that says the number and what is
+        // holding it. Deliberately NOT applied to the chat/DM lanes the bridge needs to function, nor
+        // to the owner's own launches: this is the runaway case, which is agents spawning agents.
+        {
+          const before = scratchPressureNow()
+          if (before && before.usedPct >= SPAWN_REFUSE_PCT) {
+            await sweepScratchGc()
+            const gate = planSpawnGate(scratchPressureNow(), scratchHeldBytes, fmtGcBytes)
+            if (!gate.allow) { write({ t: 'result', id, ok: false, text: `refusing to spawn @${topicName}: ${gate.why}` }); return }
+          }
+        }
         let providerAccount = String(args.account ?? '').trim()
         let providerRoute = providerAccount ? routeForAccountId(providerAccount, loadHarnessGateways()) : null
         if (providerAccount && !providerRoute) {
@@ -22435,6 +22458,100 @@ async function sweepDeadPaneState(): Promise<void> {
   for (const k of seen) if (k.startsWith('%') && !live.has(k)) forgetPane(k)
 }
 setInterval(() => void sweepDeadPaneState(), 5 * 60_000).unref()
+
+// ── Scratch GC: the CLI's per-session /tmp scratchpads, reaped once nothing live claims them ──────
+//
+// The daemon owns this rather than a systemd timer or the install docs because the daemon is the only
+// process on the box holding the fleet's own evidence — open topic rows, headless lane cwds — and
+// without it an age-only reaper deletes a live session's cwd, which under Bun means that session can
+// never spawn anything again (2026-07-30). All the judgement is in `planScratchGc`; this is the wiring.
+const SCRATCH_GC_LOCK = join(STATE_DIR, 'scratch-gc.lock')
+const TMP_PRESSURE_FILE = join(STATE_DIR, 'tmp-pressure.json')
+const SCRATCH_GC_LOCK_MAX_AGE_MS = 10 * 60_000
+// What the last sweep could NOT reclaim, for the ≥95% refusal's message. Zero until the first sweep,
+// which is the honest starting value: it means "nothing known to be reapable", and that is what the
+// refusal then says.
+let scratchHeldBytes = 0
+
+// Three channel daemons and a second instance can all be live. The lock is advisory and the sweep is
+// idempotent anyway (unlinking a path that is already gone is a no-op) — it exists so two sweeps do
+// not walk the same tree at the same time, and a stale one is ignored out loud, never honoured.
+function takeScratchGcLock(): boolean {
+  try {
+    const age = Date.now() - statSync(SCRATCH_GC_LOCK).mtimeMs
+    if (age < SCRATCH_GC_LOCK_MAX_AGE_MS) return false
+    process.stderr.write(`daemon: scratch-gc lock is ${Math.round(age / 60_000)}m old — ignoring it\n`)
+  } catch {}
+  try { writeFileSync(SCRATCH_GC_LOCK, String(process.pid)); return true } catch { return false }
+}
+
+async function sweepScratchGc(): Promise<void> {
+  if (loadAccess().scratchGc === false) return
+  if (!takeScratchGcLock()) return
+  try {
+    const got = await gatherGcEvidence({
+      configDirs: listAccounts().map(a => a.configDir),
+      channelsRoot: join(homedir(), '.claude', 'channels'),
+    })
+    if (got.root === null) return
+    const plan = planScratchGc(got.evidence)
+    // "Held" is everything a reap could not free right now — the pressure card and the spawn refusal
+    // both quote it, and quoting the removable total instead would promise space that is already gone.
+    scratchHeldBytes = got.evidence.entries.reduce((s, e) => s + e.bytes, 0) - plan.remove.reduce((s, r) => s + r.bytes, 0)
+    if (plan.refused) {
+      process.stderr.write(`daemon: scratch-gc removed nothing — ${plan.refused}\n`)
+    } else if (plan.remove.length) {
+      const res = applyScratchGc(plan, got.root, p => rmSync(p, { recursive: true, force: true }))
+      process.stderr.write(`daemon: scratch-gc removed ${res.removed.length} entries under ${got.root}, freed ${fmtGcBytes(res.freedBytes)}`
+        + ` (kept ${plan.keep.length}: ${gcKeepTally(plan)})\n`)
+      for (const f of res.failed) process.stderr.write(`daemon: scratch-gc could not remove ${f.path} — ${f.err}\n`)
+    }
+    await warnTmpPressure(got.root, got.evidence.entries)
+  } finally { try { rmSync(SCRATCH_GC_LOCK, { force: true }) } catch {} }
+}
+const gcKeepTally = (plan: GcPlan): string => {
+  const by = new Map<string, number>()
+  for (const k of plan.keep) { const w = k.why.replace(/ \(.*\)$/, ''); by.set(w, (by.get(w) ?? 0) + 1) }
+  return [...by].sort((a, b) => b[1] - a[1]).map(([w, n]) => `${n} ${w}`).join(', ')
+}
+
+// The pressure ladder. Level-triggered, and the watermark is stamped ON DELIVERY — see tmp-pressure.ts
+// for the loss that rule exists for. The re-arm below the hysteresis floor is stamped immediately: it
+// is an observation ("there is room again"), not a notice waiting to be sent.
+async function warnTmpPressure(root: string, entries: ScratchEntry[]): Promise<void> {
+  const r = readTmpPressure(root)
+  const prev = readJsonFile<PressureState>(TMP_PRESSURE_FILE, { deliveredRung: null })
+  const plan = planTmpPressure(r, prev)
+  if (plan.warn === null) {
+    if (plan.state.deliveredRung !== prev.deliveredRung) writeJsonFile(TMP_PRESSURE_FILE, plan.state)
+    return
+  }
+  process.stderr.write(`daemon: /tmp pressure ${r!.usedPct.toFixed(1)}% crossed the ${plan.warn}% rung on ${root}\n`)
+  // A percentage with no action in it is noise, so the card names what is actually big. Top three by
+  // size, which on this box is the difference between "80% full" and "one session left 113 MB behind".
+  const top = [...entries].sort((a, b) => b.bytes - a.bytes).slice(0, 3)
+    .filter(e => e.bytes > 1_000_000)
+    .map(e => `<code>${escapeHtml(e.path.slice(root.length + 1))}</code> ${fmtGcBytes(e.bytes)} (idle ${fmtGcDur(Date.now() - (e.newestMs ?? Date.now()))})`)
+  const text = `🧹 <b>Scratch space is ${r!.usedPct.toFixed(0)}% full</b> — ${fmtGcBytes(r!.freeBytes)} free of ${fmtGcBytes(r!.totalBytes)} on <code>${escapeHtml(root)}</code>${r!.tmpfs ? ' (tmpfs — it is RAM)' : ''}.`
+    + (top.length ? `\n\nBiggest right now:\n• ${top.join('\n• ')}` : '')
+    + `\n\n${fmtGcBytes(scratchHeldBytes)} is held by live sessions or still inside the grace period. Large artefacts belong on disk — <code>$(tg shared)</code> or <code>~/scratch</code> — not here.`
+  for (const chat of ownerCardChats()) await channel.sendText(chat, text).catch(() => {})
+  // Stamped whether or not anyone was there to tell: a level-triggered ladder with nobody to deliver
+  // to would otherwise re-derive and re-log this rung on every sweep, forever.
+  writeJsonFile(TMP_PRESSURE_FILE, plan.state)
+}
+
+/** One statfs on the scratch root — cheap enough for the roster to ask on every read. */
+function scratchPressureNow(): PressureReading | null {
+  const root = scratchRoot()
+  return root ? readTmpPressure(root) : null
+}
+
+// Hourly. The tree is tens of thousands of files and the graces are measured in days, so anything
+// faster is cost without a decision behind it; `enumerateScratch` yields between slugs so a sweep
+// never blocks the poll loop.
+setTimeout(() => void sweepScratchGc(), 3 * 60_000).unref()
+setInterval(() => void sweepScratchGc(), 3_600_000).unref()
 
 // Budget tracking.
 setInterval(() => void sweepBudget(), BUDGET_SWEEP_MS).unref()

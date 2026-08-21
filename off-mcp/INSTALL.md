@@ -758,6 +758,27 @@ register, web search, no file/shell tools) while every project topic stays a ful
 session — a dedicated restricted account, auto-provisioned per user on first DM once a
 group is bound. Follow **[`CHAT-DM.md`](CHAT-DM.md)**.
 
+## 10. Scratch-space housekeeping (on by default — tell the user it exists)
+Claude Code gives every session a scratchpad under `<tmpdir>/claude-<uid>/<cwd-slug>/<uuid>/` and
+never removes it. On a box where `/tmp` is a small tmpfs that fills up, and sessions then fail
+mid-task. The daemon sweeps it hourly:
+
+- **What goes:** a session dir idle **3 days** that nothing live claims; anything else under
+  `claude-<uid>` (stray files, a `pip install --target` dump) idle **7 days**.
+- **What never goes:** anything outside `<tmpdir>/claude-<uid>`; a dir any live process has as its
+  cwd or holds a file open in; a dir whose uuid is a live session in *any* Claude config dir; the
+  cwd of any open bridge session; symlinks. If **any** of those checks fails to read — no `/proc`,
+  an unparseable record — the sweep removes **nothing** and logs why.
+- **On macOS** there is no `/proc`, so the sweep is a logged no-op; macOS has its own `/tmp` cleaner.
+- **Pressure:** at 80% full the owner gets one card naming the biggest consumers, and `tg roster`
+  carries a line. At 95% the bridge reaps, re-reads, and then refuses `tg spawn` with the number —
+  a session that dies mid-task is worse than one that never starts. Lanes and your own launches are
+  never refused.
+- **Off switch:** `"scratchGc": false` in `prefs.json` (beside `access.json`) stops all of it.
+- **Convention:** the worker `CLAUDE.md` this install writes tells every session to put datasets,
+  pip installs, media and other large artefacts on disk — `$(tg shared)` or `~/scratch` — not in the
+  scratchpad. Dry-run what the sweep would do at any time: `bun scripts/scratch-gc-probe.ts`.
+
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.
 - **Permission prompts** relayed with tap-to-approve buttons.
