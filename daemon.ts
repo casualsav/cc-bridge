@@ -249,7 +249,7 @@ import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { createOwnerReplyRoutes, ownerReplyMarker, type OwnerReplyRoute } from './owner-reply.ts'
 import {
   createDecisions, planDecisionAnchor, envelopeLines, cardText, tapData, parseTap, decisionBlock,
-  DECISION_TTL_MS, type Decision,
+  parseOptions, closedSuffix, DECISION_TTL_MS, type Decision,
 } from './decisions.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, reopenForceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
@@ -9006,14 +9006,14 @@ async function handleCall(
           if (d.closedAt != null) { write({ t: 'result', id, ok: false, text: `🗳 #${d.id} is already closed${d.choice ? ` — ${d.choice}` : ''}` }); return }
           const choice = String(args.choice ?? '').replace(/\s+/g, ' ').trim()
           decisions.close(d.id, { ...(choice ? { choice } : {}), by: 'lane', now: Date.now() })
-          await editDecisionCard(d, choice ? ` — ${choice}` : ' — closed')
+          await editDecisionCard(d, choice ? closedSuffix(d, choice) : ' — closed')
           text = `🗳 #${d.id} closed${choice ? ` — ${choice}` : ''}`
           break
         }
         const title = String(args.title ?? '').replace(/\s+/g, ' ').trim()
-        if (!title) { write({ t: 'result', id, ok: false, text: 'usage: tg decide "<title>" [--options "Approve|Hold"] | tg decide --close <id> [choice] | tg decide --list' }); return }
-        const options = String(args.options ?? '').split('|').map(o => o.trim()).filter(Boolean)
-        const d = decisions.open({ laneSid: fromSid, chat, title, ...(options.length ? { options } : {}), now: Date.now() })
+        if (!title) { write({ t: 'result', id, ok: false, text: 'usage: tg decide "<title>" [--options "Approve=Approved|Deny=Denied"] | tg decide --close <id> [choice] | tg decide --list' }); return }
+        const { options, done } = parseOptions(String(args.options ?? ''))
+        const d = decisions.open({ laneSid: fromSid, chat, title, ...(options.length ? { options, done } : {}), now: Date.now() })
         const msgId = await sendDecisionCard(d)
         // The row stays either way — it is what a `--close` and the expiry sweep act on — but a
         // proposal with no card is not in front of anybody, and saying "opened" would claim it is.
@@ -16896,8 +16896,10 @@ bot.on('callback_query:data', async ctx => {
   // same rule the resume-picker card carries (v0.5.178), and for the same reason: this spends
   // something of his (a decision, in his name) that nothing unattended may spend for him.
   if (data.startsWith('dec:')) {
-    if (!(await cbAuth(ctx))) return
+    const t0 = Date.now()
     const tap = parseTap(data)
+    process.stderr.write(`daemon: decision #${tap?.id ?? '?'} tap received\n`)
+    if (!(await cbAuth(ctx))) return
     const d = tap ? decisions.byId(tap.id) : null
     if (!d || d.closedAt != null) {
       await ctx.answerCallbackQuery({ text: d ? 'That one is already closed.' : 'That proposal is gone.' }).catch(() => {})
@@ -16906,11 +16908,15 @@ bot.on('callback_query:data', async ctx => {
     }
     const choice = d.options[tap!.optionIndex]
     if (!choice) { await ctx.answerCallbackQuery({ text: 'That option is no longer on this proposal.' }).catch(() => {}); return }
-    decisions.close(d.id, { choice, by: 'tap', now: Date.now() })
-    await editDecisionCard(d, ` — ✅ ${choice}`)
-    // Answered BEFORE the delivery: a paste onto a busy pane can outlast Telegram's callback window,
-    // and a spinner stuck on his thumb reads as a tap that did nothing.
+    // Answered FIRST — the spinner on his thumb — before anything else on this path: the card edit
+    // and the delivery (a pane paste + verify, seconds) both come after, never between receipt and
+    // the callback answer.
     await ctx.answerCallbackQuery({ text: choice }).catch(() => {})
+    const tAnswered = Date.now()
+    decisions.close(d.id, { choice, by: 'tap', now: Date.now() })
+    await editDecisionCard(d, closedSuffix(d, choice))
+    const tEdited = Date.now()
+    process.stderr.write(`daemon: decision #${d.id} tap — answered +${tAnswered - t0}ms, card edited +${tEdited - t0}ms\n`)
     await deliverDecision(d, choice)
     return
   }

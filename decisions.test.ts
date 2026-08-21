@@ -2,7 +2,7 @@
 import { test, expect } from 'bun:test'
 import {
   createDecisions, planDecisionAnchor, envelopeLines, cardText, tapData, parseTap, decisionBlock,
-  isShortReply, DECISION_TTL_MS,
+  isShortReply, parseOptions, closedSuffix, DECISION_TTL_MS,
   type Decision,
 } from './decisions.ts'
 
@@ -170,4 +170,67 @@ test('envelopeLines exact strings', () => {
     .toEqual({ attr: '', line: 'open-decisions: #12 "header redesign" (3m ago) · #13 "role picker" (3m ago)' })
 
   expect(envelopeLines({ kind: 'none' }, now)).toEqual({ attr: '', line: '' })
+})
+
+// ---- parseOptions / closedSuffix (past tense on a closed card) --------------------------------
+
+test('parseOptions: bare labels get their known past form for free', () => {
+  expect(parseOptions('Approve|Hold')).toEqual({
+    options: ['Approve', 'Hold'],
+    done: { Approve: 'Approved', Hold: 'Held' },
+  })
+})
+
+test('parseOptions: label=past overrides the default, whitespace trimmed on both sides', () => {
+  expect(parseOptions(' Approve = Approved | Deny = Denied ')).toEqual({
+    options: ['Approve', 'Deny'],
+    done: { Approve: 'Approved', Deny: 'Denied' },
+  })
+})
+
+test('parseOptions: an unknown label with no = falls back to the label itself', () => {
+  expect(parseOptions('Escalate|Snooze')).toEqual({
+    options: ['Escalate', 'Snooze'],
+    done: { Escalate: 'Escalate', Snooze: 'Snooze' },
+  })
+})
+
+test('parseOptions: caps at 4 options, 24-char labels, same as normalizeOptions', () => {
+  const { options } = parseOptions(['a', 'b', 'c', 'd', 'e'].join('|'))
+  expect(options).toEqual(['a', 'b', 'c', 'd'])
+  const long = parseOptions('x'.repeat(40))
+  expect(long.options[0]!.length).toBe(24)
+})
+
+test('parseOptions: empty spec yields no options and no done map', () => {
+  expect(parseOptions('')).toEqual({ options: [], done: {} })
+})
+
+test('open() fills done from defaults when the caller supplies none', () => {
+  const { d } = store()
+  const row = d.open({ laneSid: 'chat', chat: '.', title: 't', options: ['Ship', 'Reject'], now: 0 })
+  expect(row.done).toEqual({ Ship: 'Shipped', Reject: 'Rejected' })
+})
+
+test('open() prefers a caller-supplied done map over the default', () => {
+  const { d } = store()
+  const row = d.open({ laneSid: 'chat', chat: '.', title: 't', options: ['Approve'], done: { Approve: 'Signed off' }, now: 0 })
+  expect(row.done).toEqual({ Approve: 'Signed off' })
+})
+
+test('closedSuffix: ✅ + past tense for an approval-shaped choice', () => {
+  const d = open({ id: 1, options: ['Approve', 'Hold'], done: { Approve: 'Approved', Hold: 'Held' } })
+  expect(closedSuffix(d, 'Approve')).toBe(' — ✅ Approved')
+})
+
+test('closedSuffix: ⏸ + past tense for a Hold-class choice', () => {
+  const d = open({ id: 1, options: ['Approve', 'Hold'], done: { Approve: 'Approved', Hold: 'Held' } })
+  expect(closedSuffix(d, 'Hold')).toBe(' — ⏸ Held')
+  const wait = open({ id: 2, options: ['Ship', 'Wait'], done: { Ship: 'Shipped', Wait: 'Wait' } })
+  expect(closedSuffix(wait, 'Wait')).toBe(' — ⏸ Wait')
+})
+
+test('closedSuffix: a choice with no matching done entry falls back to itself', () => {
+  const d = open({ id: 1, options: ['Approve'] })
+  expect(closedSuffix(d, 'Freehand text')).toBe(' — ✅ Freehand text')
 })
