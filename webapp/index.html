@@ -1116,6 +1116,20 @@
      levels, and a shared renderer whose output only styles for one of its callers is the drift this
      rule exists to prevent. */
   .msg.agent .mh, .msg.command .mh { font-size: 1.09em; }
+  /* A quoted run. An inline span with a left bar, not a <blockquote>: the container is pre-wrap, so
+     the source newline already carries the break and a block box's margin would double-space against
+     it — the same reason `.mh` above is a <b> and not an <h2>. Unscoped on purpose: every renderer
+     that runs md() may emit one, and a quote that styled itself in one row and not another would be
+     the drift `.mh`'s comment warns about. */
+  /* The bar is the whole treatment, and it takes `currentColor` — the same discipline `.mh` follows
+     with weight and size. A quote painted in `--hint` was measured against the OUTGOING bubble, whose
+     fill is the accent: dark grey on blue, and the quoted half of a report was the hardest line in it
+     to read (screenshot, 2026-08-21). A row's own foreground is the only colour that is correct in
+     every bubble this can land in. */
+  .msg .mq { border-left: 2px solid currentColor; padding-left: var(--sp-2); }
+  /* Links come from an agent's own prose. The colour is the page's, and the underline is what says
+     it is tappable in a wall of text that is otherwise all one weight. */
+  .msg a { color: var(--link); }
   /* An agent report is long, so it meets the fold — and the fold fades to whatever is BEHIND the
      text, which here is the card's own fill and not the page. Left at the --bg default it paints a
      band of page colour across the card, the same defect the assistant bubble left behind when its
@@ -3291,13 +3305,49 @@ function md(s) {
     // parser's adoption agency then RECONSTRUCTS it inside every following bubble. The owner's feed
     // flipped to monospace at a subagent's table card and stayed there (2026-08-15). Proof:
     // webapp-md-nesting.test.ts, and scripts/webapp-measure/mdnest.mjs through a real parser.
+    // A rule LINE is decided before the emphasis rules run, or `***` and `___` are eaten as
+    // emphasis and never reach it. Rendered as the same glyph run Telegram's mdToTelegramHtml emits,
+    // which costs no CSS and keeps one message looking like itself on both surfaces.
+    h = h.split("\n").map(l => /^\s*([-*_])\1\1+\s*$/.test(l) ? "──────────" : l).join("\n");
     h = h.replace(/`([^`\n<]+)`/g, "<code>$1</code>");
     h = h.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+    // The `_` forms take a non-word boundary on both sides, exactly as markdown.ts does, so
+    // snake_case_identifiers and __dunder__ names in prose are left alone.
+    h = h.replace(/(^|[^\w])__([^_\n<]+)__(?=[^\w]|$)/g, "$1<b>$2</b>");
+    h = h.replace(/~~([^~\n<]+)~~/g, "<s>$1</s>");
     // `>` joins the openers so a cell that STARTS in italic still italicises — after mdTables the
     // only `>` in the string is one of our own tags' (a typed one is already `&gt;`).
     h = h.replace(/(^|[\s(>])\*([^*\n]+)\*(?=[\s).,!?:<]|$)/g, "$1<i>$2</i>");
-    return h;
+    h = h.replace(/(^|[^\w])_([^_\n<]+)_(?=[^\w]|$)/g, "$1<i>$2</i>");
+    // A LINK is the one rule here that emits an attribute, so it is the one rule that can inject.
+    // Two guards, and both are load-bearing: the scheme is an http(s) allowlist (a `javascript:`
+    // href in an agent's report would otherwise be a live script in this page), and `"` is
+    // percent-escaped because esc() covers `&<>` and NOT quotes, so a URL carrying one would
+    // close the attribute. Anything that fails the scheme test is left as the literal text it was.
+    h = h.replace(/\[([^\]\n<]+)\]\(([^)\s<]+)\)/g, (m, t, u) => /^https?:\/\//i.test(u)
+      ? '<a href="' + u.replace(/"/g, "%22") + '" target="_blank" rel="noopener noreferrer">' + t + "</a>"
+      : m);
+    return mdQuotes(h);
   }).join("");
+}
+// Blockquote, LAST: the inline rules above must have already run inside the quoted text, and they
+// all exclude `<`, so anything emitted here would stop them. A contiguous run of `>` lines becomes
+// ONE span — a span and not a <blockquote>, because the container is white-space: pre-wrap and a
+// block box's margin would double-space against the newline that is already there. Same reasoning
+// the headings' `.mh` states, and the same reason there is no <ul>.
+function mdQuotes(h) {
+  if (!h.includes("&gt;")) return h;
+  const out = [];
+  let buf = null;
+  const flush = () => { if (buf) { out.push('<span class="mq">' + buf.join("\n") + "</span>"); buf = null; } };
+  for (const line of h.split("\n")) {
+    const m = /^\s*&gt;\s?(.*)$/.exec(line);
+    if (m) { (buf ??= []).push(m[1]); continue; }
+    flush();
+    out.push(line);
+  }
+  flush();
+  return out.join("\n");
 }
 // Block markdown — headings and bullets — for the AGENT CARD BODY and a local command's OUTPUT, and
 // nothing else. Both are structured documents (that is what a delegated task returns, and what

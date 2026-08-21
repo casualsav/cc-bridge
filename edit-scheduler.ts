@@ -73,7 +73,25 @@ type EditIntent = {
   lastText?: string     // last html actually sent — suppresses "message is not modified"
 }
 const intents = new Map<string, EditIntent>()
-const deletes = new Map<string, { chat: string; mid: number; enqueuedAt: number }>()
+// A delete is RETRIED until it succeeds or fails terminally, and its outcome is handed back. It used
+// to be fire-and-forget — the row was dropped before the await and the call ended in `.catch(() => {})`
+// — so one failure of that one API call orphaned the message permanently, with no retry and no line
+// anywhere saying so. That is the half of the frozen-/terminal-card report that makes it STAY
+// (2026-08-21).
+export type DeleteOutcome =
+  | { ok: true; already: boolean }                  // gone from the chat — we removed it, or it was already gone
+  | { ok: false; giveUp: boolean; error: string }   // giveUp = we have stopped trying
+type PendingDelete = {
+  chat: string; mid: number; enqueuedAt: number
+  tries: number; inFlight: boolean
+  onOutcome?: (o: DeleteOutcome) => void
+}
+const deletes = new Map<string, PendingDelete>()
+const DELETE_MAX_TRIES = 5
+// Telegram has said the message is not there to delete. Both readings are SUCCESS for the only thing
+// a caller cares about — the card is not in the chat — and retrying either would loop forever.
+const deleteIsMoot = (msg: string): boolean =>
+  /message to delete not found|message can'?t be deleted|MESSAGE_ID_INVALID|message identifier is not specified/i.test(msg)
 const editKey = (chat: string, mid: number) => `${chat}:${mid}`
 // A finalized card (its source stopped scheduling — e.g. the mirror cleared msgIds on loop-finish)
 // leaves an idle intent (dirty=false, never re-scheduled) in the map forever. Reap intents that have
@@ -83,9 +101,16 @@ const editKey = (chat: string, mid: number) => `${chat}:${mid}`
 const IDLE_EVICT_MS = 60_000
 
 // ---- source-facing API (replaces direct editMessageText / deleteMessage for recurring cards) ----
+// `seed` is the html the message was CREATED with, and it is only honoured when the slot is new.
+// Without it `lastText` starts undefined, so the first tick of a card whose content has not changed
+// re-sends text identical to what was sent — Telegram answers `400 … message is not modified`, the
+// catch below drops the frame, and because `lastText` is only set after a SUCCESSFUL edit, every
+// later tick repeats the same doomed call for the life of the card. Harmless to the reader, but it
+// makes "nothing changed" and "the edit is failing" the same thing on the screen and in the log.
 export function scheduleEdit(opts: {
   chat: string; mid: number; thread?: number | null; source: Source
   render: () => string | Promise<string>; rich?: boolean; buttons?: Button[][]
+  seed?: string
   onSent?: () => void | Promise<void>; onError?: (e: unknown) => void | Promise<void>
 }): void {
   const key = editKey(opts.chat, opts.mid)
@@ -99,14 +124,19 @@ export function scheduleEdit(opts: {
     intents.set(key, {
       chat: opts.chat, thread: opts.thread, mid: opts.mid, source: opts.source,
       render: opts.render, rich: opts.rich, buttons: opts.buttons, onSent: opts.onSent, onError: opts.onError,
-      dirty: true, inFlight: false, enqueuedAt: Date.now(),
+      dirty: true, inFlight: false, enqueuedAt: Date.now(), lastText: opts.seed,
     })
   }
 }
-export function scheduleDelete(chat: string, mid: number): void {
+export function scheduleDelete(chat: string, mid: number, onOutcome?: (o: DeleteOutcome) => void): void {
   const key = editKey(chat, mid)
   intents.delete(key)   // a pending edit to a doomed message is pointless
-  deletes.set(key, { chat, mid, enqueuedAt: Date.now() })
+  const prev = deletes.get(key)
+  // Re-scheduling an already-queued delete keeps its attempt count and its place in the queue —
+  // resetting either would let a caller that re-arms on a timer retry forever.
+  deletes.set(key, prev
+    ? { ...prev, onOutcome: onOutcome ?? prev.onOutcome }
+    : { chat, mid, enqueuedAt: Date.now(), tries: 0, inFlight: false, onOutcome })
 }
 export function cancelEdit(chat: string, mid: number): void {
   intents.delete(editKey(chat, mid))
@@ -179,6 +209,46 @@ async function flushIntent(it: EditIntent): Promise<void> {
   }
 }
 
+// One delete attempt. The row stays in `deletes` until the message is gone or we give up, so a
+// transient failure is retried on the next tick instead of orphaning the message; every outcome,
+// including the ones we keep retrying, is reported to the caller that scheduled it.
+async function flushDelete(d: PendingDelete): Promise<void> {
+  d.inFlight = true
+  try {
+    await asLowPriority(() => channel!.deleteMessage({ chatId: d.chat, messageId: String(d.mid) }))
+    deletes.delete(editKey(d.chat, d.mid))
+    d.onOutcome?.({ ok: true, already: false })
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    d.tries += 1
+    if (deleteIsMoot(error)) {
+      deletes.delete(editKey(d.chat, d.mid))
+      d.onOutcome?.({ ok: true, already: true })
+    } else {
+      const giveUp = d.tries >= DELETE_MAX_TRIES
+      if (giveUp) deletes.delete(editKey(d.chat, d.mid))
+      d.onOutcome?.({ ok: false, giveUp, error })
+    }
+  } finally {
+    d.inFlight = false
+  }
+}
+
+// SHUTDOWN. A pending delete is a message already in a chat with nobody left to remove it, so the
+// drain spends its last moments on those rather than leaving the persisted record to cover them —
+// the record still does, on the next startup, but a card that vanishes now beats one that vanishes
+// in a minute. Bounded, because a shutdown that hangs is worse than a late delete.
+export async function flushPendingDeletes(timeoutMs = 3_000): Promise<number> {
+  if (!channel) return 0
+  const pending = [...deletes.values()].filter(d => !d.inFlight)
+  if (!pending.length) return 0
+  await Promise.race([
+    Promise.allSettled(pending.map(d => flushDelete(d))),
+    new Promise(r => setTimeout(r, timeoutMs)),
+  ])
+  return pending.length
+}
+
 function tick(): void {
   if (!channel) return
   type Work = { tier: number; enqueuedAt: number; run: () => Promise<void> }
@@ -191,11 +261,8 @@ function tick(): void {
     work.push({ tier: tierOf(it), enqueuedAt: it.enqueuedAt, run: () => flushIntent(it) })
   }
   for (const d of deletes.values()) {
-    if (isChatFlooded(d.chat)) continue
-    work.push({ tier: P_VISIBLE, enqueuedAt: d.enqueuedAt, run: async () => {
-      deletes.delete(editKey(d.chat, d.mid))
-      await asLowPriority(() => channel!.deleteMessage({ chatId: d.chat, messageId: String(d.mid) })).catch(() => {})
-    } })
+    if (d.inFlight || isChatFlooded(d.chat)) continue
+    work.push({ tier: P_VISIBLE, enqueuedAt: d.enqueuedAt, run: () => flushDelete(d) })
   }
   if (!work.length) return
   work.sort((a, b) => a.tier - b.tier || a.enqueuedAt - b.enqueuedAt)
