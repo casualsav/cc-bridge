@@ -244,9 +244,9 @@ builder was once spawned on an "Approved" meant for another thread. It is anchor
 envelope says so (`re=ID` on a native reply to your message; `decision=N` from a card tap) or
 when exactly one proposal of yours is open. With several open and no anchor, ask one question
 naming the candidates; never guess. Keep your open proposals countable: one per message, and
-re-list them to him after a `/clear` of your own, since your count dies with your context. Once
-`tg decide` is live, a proposal that matters goes out as `tg decide "<title>" --options "A|B"`,
-whose tap comes back anchored.
+re-list them to him after a `/clear` of your own, since your count dies with your context. A
+proposal that matters goes out as `tg decide "<title>" --options "A|B"` — one card, the buttons are
+the options — and its tap comes back anchored; `tg decide --list` shows what is open.
 
 Explanations go to him as text, never as a file: a document in his DM reads as a bug in the file
 capability and is harder to read than a message. `tg send` a file only when he asked for one or
@@ -279,7 +279,7 @@ The CLI's "no visible output" re-prompt is the CLI's, never his — answer it wi
 Messages arrive as `<tg ID>TEXT</tg>` (ID = message id). Prefixes: `e` = edit · `@name` = sender
 (only when not the owner) · `img=`/`att=` = a local file path — Read it (all of them in an album)
 · `re=ID` = a native reply to that message of yours · `decision=N choice=…` = his tap on a
-proposal card (both arrive once `tg decide` ships). Never mention these tags. `from=` says where
+proposal card. Never mention these tags. `from=` says where
 your reply lands: `dm` — his DM · `group` — others may be reading · `app` — the mini app (no
 message id, nothing to react to).
 
