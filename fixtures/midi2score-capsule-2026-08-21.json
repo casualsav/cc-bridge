@@ -1,0 +1,74 @@
+{
+  "path": "/home/ubuntu/projects/midi2score",
+  "brief": {
+    "aka": "m2s (product name, m2s.suchag.com)",
+    "what": "Converts a MIDI performance/DAW export into a readable MuseScore score (orchestral, client: composer Cecilia); has a live web front end for her workflow.",
+    "stack": "Python >=3.10, uv/pip editable install (music21, partitura, mido, numpy); web front end is stdlib-only Python (web.py) + vanilla JS/CSS, no build step",
+    "verify": "python -m midi2score.eval --dataset asap --n 20 --baseline musescore (also: python tools/compare_cue.py --midi CUE.mid…",
+    "surfaces": [
+      "midi2score/ — core pipeline: pipeline.py, orchestral.py, staves.py, notevalues.py, decisions.py",
+      "midi2score/web.py + midi2score/web/ — live web app (server + app.css/app.js/ios.css)",
+      "tools/ — CLI harnesses: compare_cue.py, grade_stems.py, notation_census.py, key_accuracy.py, make_h…",
+      "tools/web/ — Playwright-based front-end checks (need a sandbox instance, not shipped store)",
+      "docs/ — design.md, house-style.md, tie-policy.md, baseline-results.md (measurement records)",
+      "deploy/ — systemd unit, Caddy/nginx config, install docs for m2s-web on the box"
+    ],
+    "deploy": "Runs live on m2s.suchag.com from this checkout via systemd user unit m2s-web (127.0.0.1:8324, Caddy TLS); web.py needs 'systemctl --user restart m2s-web' after edits, but app.css/…",
+    "conventions": [
+      "Read README.md then docs/design.md before touching pipeline code; HANDOFF.md holds open work, CLAUDE.md holds only settled invariants",
+      "Client data (data/cecilia/*.mscz) is gitignored and never committed; must be dated from zip member timestamps, not trusted at face value",
+      "Stave/name comparisons must go through staves.canonical (alias normalizer) or per-stave figures silently collapse and become meaningless"
+    ],
+    "hazards": [
+      "This is a shared 4-core box — BACKFILL.md throttling rules apply to any bulk/indexing job",
+      "Live production web app with real user accounts/credentials (~/.local/share/midi2score/accounts.json) and a scrubbed git history (pre-scrub…",
+      "mscore3 requires QT_QPA_PLATFORM=offscreen or it core-dumps (looks like a corrupt-file error); it's MuseScore 3 only, cannot open her MuseS…"
+    ],
+    "docs": [
+      "README.md",
+      "docs/design.md",
+      "HANDOFF.md"
+    ],
+    "components": [
+      "midi2score/pipeline.py — core ingest/grid/notevalue pipeline entrypoint (pipeline.run)",
+      "midi2score/orchestral.py — multi-instrument build: desk splitting, double-track collapsing, orchestral.build",
+      "midi2score/staves.py — instrument/stave lexicon, canonicalization, range/synth exclusion rules",
+      "midi2score/decisions.py — review-queue question generation from pipeline signals (no learning)",
+      "midi2score/web.py + web/store.py/auth.py — multi-account web app: projects, house-style template, sessions"
+    ],
+    "flows": [
+      "MIDI file → midi2score.pipeline (grid+notevalues) → orchestral.build (stave assignment/merge) → MusicXML/MuseScore output",
+      "Uploaded cue via web.py → confirmation surface (desk sizes, stave review) → engrave build → downloadable score in ~/.local/share/midi2score/",
+      "Finished .mscz (client's edited score) + original MIDI → tools/compare_cue.py → per-stave/attack/tie comparison report"
+    ],
+    "truth": [
+      "Runtime project/account data — ~/.local/share/midi2score/ (or $MIDI2SCORE_DATA), never the repo",
+      "Client source MIDIs/scores — data/cecilia/*.mscz, gitignored, canonical files named in CLAUDE.md",
+      "Deploy/runtime config — deploy/m2s-web.service, deploy/README.md",
+      "House style/template — LAFCI Hybrid Score Dorico template, documented in docs/house-style.md"
+    ],
+    "vocabulary": [
+      "cue — a single piece/section of client score work (e.g. 1M1, 1M3), not a UI element",
+      "desk — a stand-pair of players sharing one stave (e.g. Violin 1 desk), distinct from 'track'",
+      "stave/staves — a notated instrument line in the output score, assigned via staves.LEXICON merge log…",
+      "MV2H (in this repo) — a locally chunked/capped approximation of the published metric, not comparabl…"
+    ],
+    "assumptions": [
+      "Do not assume there is a pytest suite — verification here is via eval.py/compare_cue.py measurement harnesses, not unit tests in tests/",
+      "Do not assume a raw ours-vs-her-score diff is a quality regression — much of the gap is her own post-export hand editing (see CLAUDE.md)",
+      "Do not assume web.py changes are live — it requires a systemd restart, unlike the CSS/JS assets",
+      "Do not assume MuseScore's imported .mscz or her final score is neutral ground truth for every note class — verify against CLAUDE.md's per-c…"
+    ],
+    "unknown": [
+      "Whether there is any CI/automated test runner beyond manual invocation of eval.py/compare_cue.py",
+      "Exact scope/ownership of scratch/ and vendor/ directories beyond being third-party clones and worki…",
+      "Current status of the 'confirmation surface' work described as in-progress in HANDOFF.md"
+    ]
+  },
+  "generatedAt": 1787298613912,
+  "gitHead": "b28904dd72072fa0cab018907034ccb125801e80",
+  "violations": 9,
+  "schemaVersion": 3,
+  "source": "model",
+  "costUsd": 0.2773
+}

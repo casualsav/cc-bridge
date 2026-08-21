@@ -3,7 +3,6 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deterministicRepoBrief, renderBrief, RENDER_CEILING, validateBrief } from './repo-brief.ts'
-import { createRepoContextGate } from './repo-context-gate.ts'
 
 test('a model-free fallback produces usable bounded context from repository facts', () => {
   const root = mkdtempSync(join(tmpdir(), 'repo-fallback-'))
@@ -40,11 +39,5 @@ test('the richer orchestration map remains deterministically bounded', () => {
   expect(renderBrief(brief, { path: '/repo' }).length).toBeLessThanOrEqual(RENDER_CEILING)
 })
 
-test('only the chat lane is stopped once to read a repo capsule before dispatch', () => {
-  const gate = createRepoContextGate()
-  expect(gate.claimPresentation('chat-sid', '/repo', true)).toBe(true)
-  expect(gate.claimPresentation('chat-sid', '/repo', true)).toBe(false)
-  expect(gate.claimPresentation('worker-sid', '/repo', false)).toBe(false)
-  gate.markSeen('other-chat', '/repo')
-  expect(gate.claimPresentation('other-chat', '/repo', true)).toBe(false)
-})
+// The gate's own behaviour moved to `repo-context-gate.test.ts` when its memory became a file keyed by
+// conversation; the chat-lane test that stood here is now the daemon's (`chatIdForDmChatSession`).

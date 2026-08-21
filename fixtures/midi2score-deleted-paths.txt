@@ -1,0 +1,64 @@
+87fe3cc 2026-08-13 docs: fold handoff/ into HANDOFF.md, delete the directory
+
+D	handoff/cecilia-review.md
+D	handoff/dead-layers.md
+D	handoff/her-midi-is-quantized.md
+D	handoff/mv2h-not-paper-comparable.md
+D	handoff/notation-guidelines.md
+D	handoff/per-section-key.md
+D	handoff/project-lists.md
+D	handoff/scratch-only-numbers.md
+D	handoff/state-scope-sweep.md
+D	handoff/stem-in-costume.md
+D	handoff/title-band.md
+8144198 2026-08-13 docs: standing truths move from handoff/facts.md into CLAUDE.md
+
+D	handoff/facts.md
+a7d33dd 2026-08-10 feat: the new desktop stops being a preview
+
+D	handoff/desktop-ia.md
+e3be6be 2026-08-10 feat: the desktop gets the navigation it never had
+
+D	handoff/desktop-skin.md
+1821db3 2026-08-09 feat: the notation controls are a command, not an archaeology exercise
+
+D	handoff/census-tool.md
+976ed7a 2026-08-09 feat: her short names, her page furniture, and her template as a file
+
+D	handoff/house-style.md
+fd6691b 2026-08-09 feat: a note that measured nothing is an eighth, not a 32nd
+
+D	handoff/duration-floor.md
+5a3fc0c 2026-08-09 feat: spell a duration the way she writes it
+
+D	handoff/tie-spelling.md
+c8618f2 2026-08-09 docs: the deploy item is done, so it goes; what stays true moves to facts
+
+D	handoff/frontend-deploy.md
+ba432a5 2026-08-09 docs: fold in her answers — no reachable ceiling, an 85% assumption, a question queue
+
+D	handoff/ground-truth-file.md
+eaf0a77 2026-08-09 docs: a key signature is a declaration — close the item by reframing
+
+D	handoff/key-estimate-fragile.md
+f2c65ed 2026-08-09 feat: count four costs instead of one delta, and write down what the tool is for
+
+D	handoff/metric-reshaping.md
+73f3520 2026-08-09 feat: divisi — one section track becomes one stave per player
+
+D	handoff/divisi.md
+c86fc96 2026-08-06 docs: handoff reflects the resting state
+
+D	handoff/brass-merge.md
+419ffb6 2026-08-06 feat: read MuseScore 4 ground truth, score 1M3 end to end
+
+D	handoff/her-files-arrive.md
+836e9cd 2026-08-06 docs: unit 6 results and handoff re-prioritisation
+
+D	handoff/meter-from-map.md
+2196bb0 2026-08-06 measure: voice separation makes MV2H worse; not shipped
+
+D	handoff/voices-and-staves.md
+4d19049 2026-08-06 docs: unit 4 — first cleared gate
+
+D	handoff/key-signature-first.md

@@ -39,7 +39,11 @@ test('bus family: every pre-createPending guard in the ask/ack/btw handler logs 
   const start = src.indexOf("case 'ask': case 'ack': case 'btw':")
   expect(start).toBeGreaterThan(0)
   const body = src.slice(start, src.indexOf('createPending(', start))
-  expect(count(body, /logDecision\(\{/g)).toBeGreaterThanOrEqual(12)
+  expect(count(body, /logDecision\(\{/g)).toBeGreaterThanOrEqual(11)
+  // The 12th guard's line moved INTO the helper when the preflight became a gate: only it knows
+  // which of capsule-unseen / deleted-path / unknown-endpoint refused, and the call site now just
+  // relays the text. Counted here so the branch cannot go quiet by leaving this file's arithmetic.
+  expect(bodyOf(/\nasync function repoDispatchPreflight\(/)).toContain('logDecision({')
 })
 
 test('ctl family: slash pre-fail refusals, keys refusals, webapp composer refusals', () => {
@@ -91,7 +95,14 @@ test('relay family (daemon.ts): the banner drop at all four sites, the sibling-s
 
 test('bus family (2b extras): hermes dispatch failure after createPending, spawn-path repoDispatchPreflight', () => {
   expect(count(src, /predicate: `dispatchHermesAsk failed: \$\{start\.error\}`/g)).toBe(2)   // ask handler + ownerHermesAskCore
-  expect(count(src, /predicate: `repoDispatchPreflight \(\$\{repoRoot\}\)`/g)).toBe(1)        // spawn path (the ask path already logged)
+  // Both dispatch paths now log from inside repoDispatchPreflight, which names WHICH reading refused
+  // and carries the repo root as the hint — one line per refusal, and the predicate is greppable per
+  // detector (`repoDispatchPreflight:deleted-path`).
+  const p = bodyOf(/\nasync function repoDispatchPreflight\(/)
+  expect(p).toContain('.map(p => `repoDispatchPreflight:${p}`)')
+  expect(p).toContain("decision: 'REFUSED', predicate, hint: real")
+  expect(count(src, /await repoDispatchPreflight\(/g)).toBe(2)                                // ask path + spawn path
+  expect(count(src, /logDecision\([^)]*repoDispatchPreflight/g)).toBe(0)                      // never at a call site: the helper owns it
 })
 
 test('the four modules: access gate 7 of 9, pane-io lock give-up, owner-reply 5, transcript lost cursor', () => {
