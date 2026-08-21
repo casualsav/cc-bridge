@@ -73,7 +73,7 @@ export function prunePromptCards(): void {
 // whatever that flow needs to finish. (Was seven parallel per-feature maps.)
 export type ReplyTarget =
   | ({ kind: 'freetext' } & Omit<FreeTextPrompt, 'question'>)   // type into a TUI free-text field
-  | { kind: 'authurl' }                                          // login code for a relayed sign-in link (not consumed on use — retries allowed)
+  | { kind: 'authurl'; paneId?: string }                         // login code for a relayed sign-in link (not consumed on use — retries allowed). paneId is the pane that ASKED: since v0.5.197 this card can be escalated to a chat that has nothing to do with it, so inferring the pane from the reply's chat would type a live auth code into a stranger's session. Optional because a rehydrated pre-0.5.197 key has none.
   | { kind: 'topiccreate'; threadId: number; name: string }      // folder for a user-created forum topic's session
   | { kind: 'schedule'; fireAt: number; paneId: string | null; sessionLabel: string; thread?: number }   // message body; time already fixed
   | { kind: 'schedcompose'; paneId: string | null; sessionLabel: string; thread?: number }               // "time message" in one line

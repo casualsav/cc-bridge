@@ -149,7 +149,7 @@ import {
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, setSessionRestarting, isSessionRestarting,
   releasePaneSession, reopenSessionTopic,
-  retriggerTopicTyping, paneClaudeLive,
+  retriggerTopicTyping, paneClaudeLive, type OutboundTarget,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
@@ -739,7 +739,14 @@ function relayLoginChoice(options: PromptOption[], paneId?: string | null): void
     ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
   if (!paneId) { notifyChats(body, { buttons }); return }
   void (async () => {
-    for (const t of await outboundTargetsFor(paneId)) {
+    // Same rule as the sign-in card below it, and the same incident: an empty target list here was a
+    // silent no-op, so a surfaceless pane's "🔐 Claude needs to log in" menu was dropped too. Both
+    // halves of the owner's 2026-08-21 login-relay failure were this one routing rule.
+    const own = await outboundTargetsFor(paneId).catch(() => [])
+    const escalated = own.length ? own : (await fleetSurfaceFor(paneId).catch(() => []))
+    const targets = escalated.length ? escalated : ownerCardChats().map((chat): OutboundTarget => ({ chat }))
+    process.stderr.write(`daemon: login-menu card for pane ${paneId} → ${targets.length ? targets.map(t => t.chat).join(', ') + (own.length ? '' : ' (ESCALATED — the pane has no surface of its own)') : 'NO TARGETS AT ALL'}\n`)
+    for (const t of targets) {
       await channel.sendText(String(t.chat), body,
         { buttons, ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
     }
@@ -7585,9 +7592,23 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
   const mismatch = realCfg && acct && realCfg !== acct.configDir
     ? ` ⚠️ STAMP DISAGREES: process is really on ${realCfg} (the stamped account is a guess — this pane carries no @cc_account marker)`
     : ''
+  // A SIGN-IN CARD IS NEVER DROPPED FOR WANT OF A SURFACE (2026-08-21). This used to `return` on an
+  // empty target list, and on the night the owner was locked out that fired FOUR TIMES for his own
+  // last pane — `auth-url card for pane %0 … → NO TARGETS (not sent)` — because %0 was an adopted
+  // orphan and resolveOutbound's orphan rung calls an unattributable pane surfaceless. The rung is
+  // right in general and its comment says where it came from: "a credential prompt is exactly the
+  // payload that must not arrive unattributable" (2026-08-03). The conclusion was inverted. The
+  // answer to an unattributable credential prompt is ATTRIBUTION — which this card now carries, in
+  // the provenance line below — not suppression, because suppressing it removes the only text lane
+  // into a login (`tg keys` cannot type a ~50-character code) at exactly the moment nothing else
+  // works. His chat lane had died 41 seconds before the first of those four.
+  const escalated = targets.length === 0 ? (await fleetSurfaceFor(paneId).catch(() => []) ) : []
+  // ownerCardChats is lanes-first with the access allowlist behind it, so it survives the chat lane
+  // dying — which is exactly what had happened here.
+  const finalTargets = targets.length ? targets : (escalated.length ? escalated : ownerCardChats().map((chat): OutboundTarget => ({ chat })))
   process.stderr.write(`daemon: auth-url card for pane ${paneId ?? '-'} (session ${who ?? '-'}, account ${acct?.name ?? '?'}, config ${realCfg ?? acct?.configDir ?? '?'})${mismatch} → ${
-    targets.length ? targets.map(t => `${t.chat}${t.thread ? `#${t.thread}` : ''}`).join(', ') : 'NO TARGETS (not sent)'}\n`)
-  if (targets.length === 0) return
+    finalTargets.length ? finalTargets.map(t => `${t.chat}${t.thread ? `#${t.thread}` : ''}`).join(', ') + (targets.length ? '' : ' (ESCALATED — the pane has no surface of its own)') : 'NO TARGETS AT ALL — this box has no reachable chat'}\n`)
+  if (finalTargets.length === 0) return
 
   const safe = escapeHtml(url)
   // Rich carrier: the URL rides as a tappable link instead of a <pre> block the user has to copy.
@@ -7616,7 +7637,7 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
     `Open it in your browser to get your code, then:\n\n` +
     `💬 <b>Reply to this message with your authentication code.</b>`
 
-  for (const { chat, thread } of targets) {
+  for (const { chat, thread } of finalTargets) {
     try {
       // An unsafe url never reaches Telegram, so the legacy card is the only send — that check has to
       // sit OUTSIDE the try, or it looks like a failed send and the refusal split below can't tell the
@@ -7642,7 +7663,10 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
         forceReply: { placeholder: 'Authentication code' },
         ...(thread ? { threadId: String(thread) } : {}),
       })
-      replyTargets.set(refKey(sent), { kind: 'authurl' })
+      // The PANE, not just the kind: an escalated card lands in a chat that may host no session at
+      // all, and targetPaneOf would then resolve the reply to whatever pane that chat happens to own.
+      // Typing a live auth code into a stranger's session is the failure that would create.
+      replyTargets.set(refKey(sent), { kind: 'authurl', ...(paneId ? { paneId } : {}) })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
     }
@@ -15964,6 +15988,52 @@ async function revertStrandedKeysPreviews(): Promise<void> {
   for (const k of keys) await revertKeysPreview(k).catch(() => {})
 }
 
+// ---- /signin — the break-glass, and the only recovery lever that needs no working agent ----------
+//
+// On 2026-08-21 the owner was locked out of every Claude session on this box and every fallback
+// failed. The routing fix above is why the sign-in card now reaches him; this exists because that fix
+// is a ROUTING RULE, and a routing rule can be broken again by the next routing change — while the
+// thing it protects is his ability to get back in at all. So: a human-typed command that walks EVERY
+// live pane, reads the sign-in URL off whatever is on screen, and re-cards it. No classification, no
+// roster, no session registration, no surface resolution — the three things that each independently
+// swallowed the card that night.
+//
+// `tg keys` cannot substitute for this and never could: an auth code is ~50 characters of free text
+// and that vocabulary is enter/esc/arrows/digits (keys-card.ts). The 🔑 card's force-reply is the
+// only text lane into a login, so the failure to protect against is that card not existing.
+//
+// Human surface only — dmCommandGate. It reads panes and sends a message; it types nothing, presses
+// nothing, and cannot end anything.
+bot.command('signin', async (ctx: Context) => {
+  if (!dmCommandGate(ctx)) return
+  const panes = new Set<string>(offMcpPanes)
+  if (focus.activePaneId) panes.add(focus.activePaneId)
+  for (const { s } of orderedSessions()) if (s.paneId) panes.add(s.paneId)
+  // Every pane tmux has, not just the ones the bridge has adopted: the pane that stranded him was an
+  // orphan, and "which panes does the bridge know about" is precisely the question that failed.
+  const all = await findOffMcpPanes().catch(() => null)
+  for (const p of all ?? []) panes.add(p)
+  try {
+    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', '#{pane_id}'], { timeout: 3000 })
+    for (const p of stdout.split('\n').map(x => x.trim()).filter(Boolean)) panes.add(p)
+  } catch { /* fall back to the bridge's own view */ }
+
+  const found: string[] = []
+  for (const pane of panes) {
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap) continue
+    const url = extractAuthUrl(cap)
+    if (!url) continue
+    found.push(pane)
+    await relayAuthUrlToTelegram(url, pane).catch(e => process.stderr.write(`daemon: /signin relay for ${pane} failed: ${e}\n`))
+  }
+  process.stderr.write(`daemon: /signin scanned ${panes.size} pane(s), relayed ${found.length}: ${found.join(', ') || '-'}\n`)
+  await ctx.reply(found.length
+    ? `🔑 Found a sign-in link on <b>${found.length}</b> pane${found.length === 1 ? '' : 's'} (${found.map(p => `<code>${escapeHtml(p)}</code>`).join(', ')}) — the card${found.length === 1 ? ' is' : 's are'} above. Reply to it with the code.`
+    : `🔍 Scanned <b>${panes.size}</b> pane${panes.size === 1 ? '' : 's'} — none is showing a sign-in link right now. If a session is asking for one, open it and run <code>/login</code>, then send /signin again.`,
+    { parse_mode: 'HTML' }).catch(() => {})
+})
+
 bot.command('keys', sendKeysCard)
 bot.command('unstick', sendKeysCard)   // the job, not the mechanism — a typed alias, kept out of the menu
 async function sendKeysCard(ctx: Context): Promise<void> {
@@ -20958,9 +21028,19 @@ bot.on('message:text', async ctx => {
         // Relayed sign-in link → inject the code into the pane's login input field, not the
         // agent's inbound queue.
         case 'authurl': {
-          const { paneId } = await targetPaneOf(ctx)
+          // The pane the CARD came from, never the one this chat happens to own. Since v0.5.197 the
+          // card can be escalated to the owner's DM from a pane with no surface, so targetPaneOf
+          // would resolve the reply somewhere else entirely — and this reply is a live auth code.
+          // A pre-0.5.197 card (or a rehydrated key) carries no pane and keeps the old resolution.
+          const paneId = target.paneId ?? (await targetPaneOf(ctx)).paneId
           if (!paneId) {
             await ctx.reply('No active Claude Code session with tmux.')
+            return
+          }
+          if (!(await paneAlive(paneId).catch(() => false))) {
+            // Refuse rather than fall back to another pane: a code typed into the wrong session is
+            // worse than a code that has to be re-requested.
+            await ctx.reply('⚠️ The session that asked for this sign-in is gone — run <code>/signin</code> to re-request one from a live pane.', { parse_mode: 'HTML' })
             return
           }
           const email = await withPaneInjection(paneId, async () => {
@@ -24217,6 +24297,7 @@ void (async () => {
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
               { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
               { command: 'keys', description: 'Buttons that send Enter / Esc / arrows to a stuck session’s pane' },
+              { command: 'signin', description: 'Find a sign-in link on any live pane and card it here (login break-glass)' },
               { command: 'pin', description: 'Bring the status card down to the bottom (on · off · refresh)' },
               { command: 'sessions', description: 'Live sessions dashboard — model, context, state' },
               { command: 'settings', description: 'Channel settings — accounts, models, voice, stream, pin, GitHub' },
