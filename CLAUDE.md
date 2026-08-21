@@ -338,20 +338,6 @@ applied where it was missing. Proof: `terminal-lifecycle.test.ts` (source-bound;
 must fail against a pre-0.5.189 `daemon.ts`) and `bun scripts/terminal-card-probe.ts <dir>`, whose four
 scheduler claims must all FAIL against the deployed build.
 
-**A PANE PARKED ON A MODAL CANNOT BE CLOSED BY `/exit`, and the sign-in pane is that case by
-definition** (v0.5.202, 2026-08-21). `exitSessionPane` types `/exit`, which only lands at a normal
-prompt; `closeSessionPane` is the one that escalates (Escape → retry → `tmux kill-pane`). An account
-row's `Sign in` spawns a headless pane whose whole job is to sit on the login screen, so it never
-reaches a prompt — the first live canary run cleared the record and the topic row while the pane kept
-running, and the typed `/exit` went into the CLI's own "Paste code here" field and came back as
-`OAuth error: Invalid code`. Every unit test passed against that build: the defect lives entirely in
-which of two close functions is called. `sweepSigninPanes` uses `closeSessionPane` and
-`account-signin.test.ts` asserts `exitSessionPane` appears nowhere in it. Rows are per-account (not
-per subscription) since v0.5.201, which is what lets `Sign in` / `Log out` name one config dir —
-`accountRowLabel` must lead with the ACCOUNT NAME or `main` and `chat`, one subscription across two
-dirs, render as two identical rows. Proof: `account-signin.test.ts` (5 call-site tests fail against
-0.5.200) and `$(tg shared)/bridgeaccts/`.
-
 **Retiring a slash command means a stub handler, never a deleted one** — an unregistered command
 falls through to the unknown-command relay, which types it into the live TUI where the palette
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
@@ -689,19 +675,32 @@ and both builds' verdicts for one live delivery. Also measured there, and it ret
 suspicion: the `@tg_transcript` stamp does NOT lag a `/clear` on CLI 2.1.238 — stamp and record flip
 within the same second (`$(tg shared)/bridgeclear-2026-08-21/`).
 
-**The SENDER's chevron card is drawn when the message is SENT — a confirmation EDITS it, never draws
-one.** It lived in `onAskConfirmed` until v0.5.168, so a queued ask was invisible on the sender's
-surface for as long as the target stayed busy: three asks to a busy @weatherpad sat 8–22 minutes with
-nothing on the owner's screen, while the ledger row and the mini-app feed (`recordOutbound`) had had
-them since enqueue (his report, 2026-08-19). The enqueue path stakes `senderCarded` BEFORE the first
-delivery attempt so a racing sweep cannot draw a second card, marks the header `· ⏳ queued` iff the
-ask did not land on that attempt, and records the message ids; `planSenderCardOnConfirm` then returns
-`edit` / `none` / `send` — `send` is the row an older build minted with no card at all, and dropping
-it would re-create the loss. Moving the card back beside the target-side one (which stays at
-confirmation, because "@chat messaged @you" must be true when shown) is the re-regression. Proof:
-`bus-sender-card.test.ts` (source-bound to both call sites; `CC_BRIDGE_SRC_DIR=<dir of HEAD's
-daemon.ts>` must fail exactly its three call-site tests) and `bun scripts/bus-card-edit-probe.ts`
-(a real Telegram round trip, canary token, with a no-op re-edit as the control).
+**A CHEVRON CARD IS DRAWN WHEN THE MESSAGE IS SENT — ON BOTH SURFACES — AND A CONFIRMATION EDITS IT,
+NEVER DRAWS ONE.** Both lived in `onAskConfirmed`, which runs on transcript proof, and each moved out
+of it for its own half of one loss. **Sender side, v0.5.168:** a queued ask was invisible on the
+sender's surface for as long as the target stayed busy — three asks to a busy @weatherpad sat 8–22
+minutes with nothing on the owner's screen, while the ledger row and the mini-app feed
+(`recordOutbound`) had had them since enqueue (2026-08-19). **Target side, v0.5.201:** proof sits
+behind TWO waits — a 15s poll AND the CLI's own queue, because `tryDeliverAsk` hands an ask to a
+working pane on purpose — so a block pasted into a busy @chat entered its conversation only when the
+running turn ENDED, the same instant that turn's final reply was relayed; the relay won, and his DM
+read "@chat's report, then @worker notified @chat", which is work still arriving (his report,
+2026-08-21: 7 of 26 asks to @chat reversed that day, 1 of 38 the day before, with confirm latency flat
+all week at a 9s median — nothing got slower, @chat was simply busy at paste far more often). The
+enqueue path stakes `senderCarded` / `targetCarded` BEFORE the first delivery attempt so a racing
+sweep cannot draw a second card, and records the message ids; `planSenderCardOnConfirm` /
+`planTargetCardOnConfirm` then return `edit` / `none` / `send` — **`send` is the row minted with no
+card at all** (an older build, or a system path outside the enqueue handler: ctx nudges, post relays),
+and dropping that arm deletes the mirror outright for every one of them. The two headers differ in one
+deliberate way: the sender's is marked `· ⏳ queued` **iff** the ask did not land on that attempt,
+while the target's is **always** marked, because at send nothing has proved the target has anything
+and there is no plain header that would be true. A held, retried or never-delivered row simply keeps
+the marker — the honest half of drawing early, and still more than the nothing it used to show. Proof:
+`bus-sender-card.test.ts` and `bus-target-card.test.ts` (both source-bound; `CC_BRIDGE_SRC_DIR=<dir of
+HEAD's daemon.ts>` must fail exactly their three call-site tests each), the latter carrying a seam test
+whose CONTROL reproduces the pre-0.5.201 placement and must yield the reversed `[reply, card]`; plus
+`bun scripts/bus-card-edit-probe.ts` (a real Telegram round trip, canary token, with a no-op re-edit as
+the control).
 
 **ONE BUS BODY IS ONE MESSAGE, AND THE CAP FOLLOWS THE CARRIER — never N-of-M** (v0.5.199, owner's
 ruling 2026-08-21: *"I never wanted messages to be split into one of two, two of two… If that's the only

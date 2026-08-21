@@ -236,6 +236,16 @@ export type BusPending = {
   // NEITHER was minted by an older build and keeps the confirm-time card, which is its only one.
   senderCarded?: true
   senderCards?: SenderCard[]
+  // v0.5.201 — the same pair for the TARGET's chevron card, and for a sharper version of the same
+  // loss. That card lived in onAskConfirmed, which runs on transcript proof behind a 15s poll, while
+  // tryDeliverAsk hands an ask to a WORKING pane on purpose: a CLI-queued message enters the target's
+  // conversation only when the running turn ends, which is the same instant that turn's final reply is
+  // relayed. The reply won, so the owner's DM read "@chat's report, then @worker notified @chat" and
+  // the card looked like work still arriving (7 of 26 asks to @chat on 2026-08-21, 1 of 38 the day
+  // before). Unlike the sender's, this card is ALWAYS drawn queued: at send there is nothing that
+  // could make it plain, and "sent, not yet proved" is the only true thing to say.
+  targetCarded?: true
+  targetCards?: SenderCard[]
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -359,6 +369,10 @@ function rebuildPending(e: unknown): BusPending | null {
       ...(p.senderCarded === true ? { senderCarded: true as const } : {}),
       ...(Array.isArray(p.senderCards)
         ? { senderCards: p.senderCards.filter((c): c is SenderCard => !!c && typeof c === 'object' && typeof (c as SenderCard).chat === 'string' && typeof (c as SenderCard).msgId === 'number') }
+        : {}),
+      ...(p.targetCarded === true ? { targetCarded: true as const } : {}),
+      ...(Array.isArray(p.targetCards)
+        ? { targetCards: p.targetCards.filter((c): c is SenderCard => !!c && typeof c === 'object' && typeof (c as SenderCard).chat === 'string' && typeof (c as SenderCard).msgId === 'number') }
         : {}),
       ...(p.founding === true ? { founding: true as const } : {}),
       // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
@@ -641,6 +655,38 @@ export function planSenderCardOnConfirm(p: Pick<BusPending, 'founding' | 'sender
   if (p.founding) return 'none'   // the spawn closure already sent this row's two cards
   if (!p.senderCarded) return 'send'
   return p.senderCards?.length ? 'edit' : 'none'
+}
+
+/**
+ * Record that the enqueue path owns this row's TARGET-side chevron card — the sibling of
+ * markSenderCarded, called the same two times and for the same reason: the claim first, before the
+ * delivery attempt, so a confirmation racing it can only ever EDIT; then the ids, so it has something
+ * to edit. See the field comments on BusPending for the ordering loss this closes.
+ */
+export function markTargetCarded(id: number, cards?: SenderCard[]): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return   // an ack is REMOVED on confirmation, so its own card can still be in flight here
+  p.targetCarded = true
+  if (cards?.length) p.targetCards = cards; else delete p.targetCards
+  save()
+}
+
+/**
+ * What a confirmed delivery owes the TARGET's chevron card.
+ *
+ * `edit` — the queued marker comes off the card the enqueue path drew. `none` — this row draws no
+ * target card at all (a `quiet` daemon notice, or a `founding` row whose two cards the spawn closure
+ * already sent), or the enqueue send produced no card to edit: it staked the claim, so drawing one
+ * here would be the second card the claim exists to prevent, and the row's own words are already in
+ * the target's context either way. `send` — the row predates `targetCarded` (an older build, or a
+ * system path that mints rows outside the enqueue handler), so the confirm-time card is still its
+ * ONLY one; dropping that arm would delete the mirror outright for every one of them.
+ */
+export function planTargetCardOnConfirm(p: Pick<BusPending, 'quiet' | 'founding' | 'targetCarded' | 'targetCards'>): 'edit' | 'send' | 'none' {
+  if (p.quiet || p.founding) return 'none'
+  if (!p.targetCarded) return 'send'
+  return p.targetCards?.length ? 'edit' : 'none'
 }
 
 /**

@@ -189,7 +189,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, stillQueued, markRunnable, markStuckPaged, heartbeatPagedFor, markHeartbeatPaged, lastLedgerEventAt, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
-  markSenderCarded, planSenderCardOnConfirm, type SenderCard,
+  markSenderCarded, planSenderCardOnConfirm, markTargetCarded, planTargetCardOnConfirm, type SenderCard,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, reapReasonText, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
   isOwnerAddress,
@@ -4565,6 +4565,16 @@ async function editAskSentCards(p: BusPending): Promise<void> {
       .catch(e => process.stderr.write(`daemon: ask ${p.id} sender card edit failed (chat ${c.chat} msg ${c.msgId}) — it keeps its queued marker: ${e}\n`))
   }
 }
+// The same removal on the TARGET's card. Split from editAskSentCards rather than parameterised: the
+// two headers take different arguments (the target's names the sender too), and folding them into one
+// helper is how a look-rule settled for one card silently stops covering the other.
+async function editAskGotCards(p: BusPending): Promise<void> {
+  const html = busCardRichHtml(busGotHeader(p.noReply ? 'ack' : 'ask', p.fromName, p.toName), mdToTelegramHtml(busCardShown(p.text)))
+  for (const c of p.targetCards ?? []) {
+    await editRichMessage(TOKEN!, c.chat, c.msgId, { html })
+      .catch(e => process.stderr.write(`daemon: ask ${p.id} target card edit failed (chat ${c.chat} msg ${c.msgId}) — it keeps its queued marker: ${e}\n`))
+  }
+}
 
 // A plain one-line bus-plumbing notice on a session's OWN surface (its chat DM / topic) — never
 // General. The text-only sibling of notifyBusRich, for short status lines with no body to collapse.
@@ -4802,13 +4812,21 @@ function onAskConfirmed(cur: BusPending, now: number): void {
     if (step === 'edit') void editAskSentCards(cur)
     else if (step === 'send') void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
   }
-  // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
-  // visible from inside the session too. A `quiet` row is the one exception: a daemon notice whose
-  // fact a card on that same chat already carries (the held spawn's approval card).
-  // A FOUNDING row's two cards were already sent by the spawn closure ("Spawned @X" on the spawner's
-  // surface, and the task mirrored into the new topic), which is why it deliberately sends no
-  // asker-side card of its own. Re-sending them here would card one spawn twice.
-  if (!cur.quiet && !cur.founding) void notifyBusRich(cur.toSid, busGotHeader(cur.noReply ? 'ack' : 'ask', cur.fromName, cur.toName), cur.text)
+  // The card on the TARGET's own surface (its topic / chat DM) is no longer BORN here either
+  // (v0.5.201) — the enqueue path drew it the moment the message was sent, marked queued, and what a
+  // proof owes it is the removal of that marker. It had to move for a sharper reason than the
+  // sender's did: this card is the one the OWNER reads, its target is usually the chat lane, and a
+  // proof arrives behind a 15s poll AND behind the CLI queue — so an ack pasted into a working @chat
+  // was carded only once the running turn ended, which is the same instant that turn's final reply
+  // was relayed. The reply won and his DM read "report, then @worker notified @chat", which is work
+  // still arriving (his report, 2026-08-21). `send` is the row minted with no card at all — a system
+  // path outside the enqueue handler, or an older build — and for those this is still the only card
+  // they will ever get, which is exactly the loss the change is about. `quiet` and `founding` draw
+  // nothing, at both sites: a daemon notice whose fact a card on that same chat already carries, and
+  // a spawn whose two cards the spawn closure already sent.
+  const gotStep = planTargetCardOnConfirm(cur)
+  if (gotStep === 'edit') void editAskGotCards(cur)
+  else if (gotStep === 'send') void notifyBusRich(cur.toSid, busGotHeader(cur.noReply ? 'ack' : 'ask', cur.fromName, cur.toName), cur.text)
   // An ack has done its entire job the moment it ARRIVES: nothing is coming back, so the row that
   // would otherwise sit here until a reaper or a TTL noticed it is dropped now.
   if (cur.noReply) removePending(cur.id)
@@ -8409,6 +8427,23 @@ async function handleCall(
           // child" is up sends it to the wrong log the one time it needs one.
           text = `asked @${toName} (ask ${p.id}) — its \`${cfg.driver ?? 'hermes'}\` child is up; the answer arrives when it finishes`
         } else {
+          // THE TARGET'S CARD IS DRAWN HERE, AT SEND — before the delivery attempt, not on transcript
+          // proof (v0.5.201, the owner: "what if the 15 second part or whatever is the back end, but
+          // as soon as the message is sent, I see it here on Telegram"). Proof is a 15s poll sitting
+          // behind the CLI's own queue, so for the surface he actually reads — the chat lane's DM —
+          // the card could not arrive until the target's running turn ended, by which time that turn's
+          // reply was already on his screen and the card read as work still coming.
+          //
+          // ALWAYS marked queued, unlike the sender's, which waits for `outcome` so it can be drawn
+          // plain when the ask lands first time. There is no such thing here: at send, nothing has
+          // proved the target has anything, so "queued" is the only true header — and a HELD or
+          // retried row simply keeps it until a proof arrives. The claim is staked BEFORE the attempt
+          // for the reason markSenderCarded's is: a confirmation racing this line must find a card to
+          // edit, never draw a second one under it. Not awaited — the socket caller is waiting on
+          // `text`, and the ids matter only to a confirmation that is seconds away at the very best.
+          markTargetCarded(p.id)
+          void notifyBusRich(res.id, busGotHeader(noReply ? 'ack' : 'ask', fromName, toName, true), askText)
+            .then(cards => markTargetCarded(p.id, cards)).catch(() => {})
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
           // @ccbridge. sweepBus still retries anything not delivered here.

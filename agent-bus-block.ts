@@ -109,9 +109,11 @@ export function busSentHeader(verb: BusVerb, to: string, queued = false): string
 // The TARGET's surface, where the sender has to be named too. An aside is absent on purpose: its
 // card keeps the "sent an aside 💬" wording it has always had — it was never the ambiguous one, and
 // 💬 is vocabulary both the owner and the agents already read.
+// It takes the same queued marker as the sender's, and from v0.5.201 it is drawn at SEND and edited
+// plain on proof — the marker is the whole reason it can be drawn that early and still be true.
 const GOT_VERB: Record<'ask' | 'ack', string> = { ask: 'messaged', ack: 'notified' }
-export function busGotHeader(verb: 'ask' | 'ack', from: string, to: string): string {
-  return `<b>@${escapeHtml(from)}</b> ${GOT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
+export function busGotHeader(verb: 'ask' | 'ack', from: string, to: string, queued = false): string {
+  return `<b>@${escapeHtml(from)}</b> ${GOT_VERB[verb]} <b>@${escapeHtml(to)}</b>${queued ? QUEUED_MARK : ''}`
 }
 
 // ---- agent-bus digest (agent-bus P2) ----

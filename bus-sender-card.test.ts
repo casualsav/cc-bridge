@@ -96,9 +96,11 @@ test('onAskConfirmed routes through the planner instead of sending unconditional
   const fn = bodyOf('function onAskConfirmed(', 4200)
   expect(fn).toContain('planSenderCardOnConfirm(cur)')
   expect(fn).toContain('editAskSentCards(cur)')
-  // The CONTROL: the two things the ruling scoped out are still exactly where they were. A change
-  // that moved the target-side card or the owner-direct reaction would pass every test above.
-  expect(fn, "the target's own card still waits for proof").toContain('busGotHeader(')
+  // The CONTROL: the things this ruling scoped out are still where they were. The target-side card
+  // left this list in v0.5.201 — it moved to send for a sharper version of the same loss, and its
+  // own call sites are pinned by bus-target-card.test.ts; what survives here is that a confirmation
+  // still reaches it at all, through the legacy `send` arm.
+  expect(fn, 'the target card is still reachable from a confirmation').toContain('busGotHeader(')
   expect(fn, 'his direct ask still confirms with a reaction, not a card').toContain('REACTIONS.delivered')
 })
 
