@@ -15779,15 +15779,19 @@ function accountsPanelKeyboard(): InlineKeyboard {
       // whole (owner, 2026-08-21, "I don't need a 🚀 button for each account"), not relocated.
       // New sessions come from `tg spawn` / the app's `+`, which is where they always belonged.
       //
-      // WORDS, not bare glyphs. 🚪 and 🗑 side by side were two unlabelled doors distinguished only
-      // by which emoji you happened to know, while acting on different things — and retiring 🚀 is
-      // what freed the width to say so. If a row ever overflows, the words win and the glyphs go.
+      // GLYPHS, not words, for the two destructive acts (owner, 2026-08-21: "Remove the words for
+      // log out and forget, and just leave the Emojis so that the buttons aren't so big") — reversing
+      // the width trade this row shipped with the day before, which had guessed the other way. What
+      // makes it safe is that neither glyph acts on the tap: 🚪 and 🗑 are both two-step, and their
+      // CONFIRM screens are where the words live and must stay ("🚪 Log out", "🗑 Remove", each over
+      // text naming the account and what it costs). The gateway row beside this one has been bare
+      // ✏️/🔑/🗑 all along, so this is the panel's own idiom, not a new one.
       const acct = accountByName(h.account!)
       if (acct && accountLoggedIn(acct)) {
         // Ends this account's LOGIN on this box — a different act from 🗑, which only unregisters
         // it. `main` gets this: it is excluded from 🗑 because unregistering it would break account
         // resolution, and that reasoning does not carry to signing it out.
-        kb.text('🚪 Log out', `acct:out:${h.account}`)
+        kb.text('🚪', `acct:out:${h.account}`)
       } else if (acct) {
         // The ONLY action a signed-out row offers, and the reason the launcher could be retired at
         // all: a headless pane whose whole job is to reach the login screen. Not a launcher — no
@@ -15796,7 +15800,7 @@ function accountsPanelKeyboard(): InlineKeyboard {
       }
       // 🗑 unregisters this row's config dir (one per row since v0.5.201) — and `main` is never
       // removable, because account resolution is built on it.
-      if (h.account !== 'main') kb.text('🗑 Forget', `acct:rmg:${h.account}`)
+      if (h.account !== 'main') kb.text('🗑', `acct:rmg:${h.account}`)
     } else if (h.kind === 'gateway') {
       kb.text('✏️', `gw:model:${h.name}`).text('🔑', `gw:key:${h.name}`).text('🗑', `gw:rm:${h.name}`)
     }

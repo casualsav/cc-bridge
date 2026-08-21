@@ -148,11 +148,14 @@ test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
   expect(rowJs).not.toContain("a.id !== 'claude:main' ? '<button data-acc-logout")
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))   // the function's own body, never a magic length
-  expect(kb).toContain("kb.text('🚪 Log out', `acct:out:${h.account}`)")
+  // GLYPH-ONLY on the row since v0.5.204 (owner: "just leave the Emojis so that the buttons aren't
+  // so big"). The words moved to where they act — the two-step CONFIRM screens, asserted in the
+  // call-site test below, which is the assertion that actually protects the reader.
+  expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
   expect(kb).toContain('accountLoggedIn(acct)')
   // …while 🗑 keeps its main guard, so the two acts stay distinguishable. Rows are per-account since
   // v0.5.201, so the guard is a name test rather than a walk over the group's hops.
-  expect(kb).toContain("if (h.account !== 'main') kb.text('🗑 Forget'")
+  expect(kb).toContain("if (h.account !== 'main') kb.text('🗑', `acct:rmg:")
 })
 
 test('CALL SITE: the Telegram row action is the same two steps and the same words', () => {

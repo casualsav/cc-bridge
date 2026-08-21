@@ -108,8 +108,10 @@ test('CALL SITE: `Sign in` appears on SIGNED-OUT rows only, on both surfaces', (
   expect(rowJs).toContain('a.ready')
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))
+  // Sign in keeps its words; 🚪 lost them in v0.5.204 (owner: the row's buttons were too big). What
+  // this test is actually about is below — that a row can never offer both.
   expect(kb).toContain("kb.text('🔑 Sign in', `acct:signin:${h.account}`)")
-  expect(kb).toContain("kb.text('🚪 Log out', `acct:out:${h.account}`)")
+  expect(kb).toContain("kb.text('🚪', `acct:out:${h.account}`)")
   // else-if, so the two are mutually exclusive by construction rather than by two agreeing guards.
   expect(kb).toMatch(/accountLoggedIn\(acct\)\)\s*\{[\s\S]*?\}\s*else if \(acct\)/)
 })
