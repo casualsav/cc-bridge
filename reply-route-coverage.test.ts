@@ -59,7 +59,7 @@ test('the post handler passes the AUTHOR, not nothing — the row needs a subjec
 
 test('both surfaces that reach for a human carry the SAME header — 📨 @name, no other word', () => {
   const post = bodyOf('async function sendPost(', 1400)
-  const answer = bodyOf('async function sendOwnerAnswerCard(', 2400)
+  const answer = bodyOf('async function sendOwnerAnswerCard(', 2900)   // the split wrapper + the part builder (bus-split.ts)
   expect(post).toContain('📨 <b>@${escapeHtml(fromName)}</b>')
   expect(answer).toContain('📨 <b>@${escapeHtml(fromName)}</b>')   // the classic branch, identical to the post's
   expect(answer).toContain('📨 **@${fromName}**')                  // …and the rich branch, so it can't depend on the renderer

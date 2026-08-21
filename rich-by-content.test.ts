@@ -45,14 +45,20 @@ test('prose that merely contains pipes or dashes is NOT a table', () => {
 const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
 
 test('the owner-answer card consults the content before choosing classic HTML', () => {
-  const fn = daemon.slice(daemon.indexOf('async function sendOwnerAnswerCard('),
-                          daemon.indexOf('\n}', daemon.indexOf('async function sendOwnerAnswerCard(')))
+  // …the PART builder: the outer function is the split loop (bus-split.ts), and the carrier choice
+  // is made per part, which is where the content lives.
+  const fn = daemon.slice(daemon.indexOf('async function sendOwnerAnswerCardPart('),
+                          daemon.indexOf('\n}', daemon.indexOf('async function sendOwnerAnswerCardPart(')))
   expect(fn).toContain('hasMarkdownTable(shown)')
   expect(fn).toContain('sendRichMessage(')
-  // The card's three standing promises survive the new path: expanded (no disableNotification),
-  // notifying, and routable — replying to it continues the thread with the session that answered.
+  // The card's three standing promises survive the new path: expanded, NOTIFYING, and routable —
+  // replying to it continues the thread with the session that answered. Notifying is now per BODY
+  // rather than per message (v0.5.188, when a long answer stopped being cut and started arriving in
+  // numbered parts): part 1 buzzes, the continuations do not. Three buzzes for one answer is exactly
+  // how 📨 would stop meaning "read this" — the reason this assertion exists at all.
   expect(fn).toContain('rememberMsgRoute(chat, m?.message_id, subjectSid)')
-  expect(fn).not.toContain('disableNotification')
+  expect(fn).toContain('{ disableNotification: part > 1 }')
+  expect(fn).not.toMatch(/disableNotification: true/)
   // …and the classic path is still there underneath it. Its ROLE changed on 2026-08-10: it used to
   // take every answer without a table (which reached him as raw markdown, the defect), and now takes
   // only code-bearing ones — where classic's <pre> beats rich's. Both branches render.

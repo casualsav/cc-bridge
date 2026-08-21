@@ -593,6 +593,24 @@ confirmation, because "@chat messaged @you" must be true when shown) is the re-r
 daemon.ts>` must fail exactly its three call-site tests) and `bun scripts/bus-card-edit-probe.ts`
 (a real Telegram round trip, canary token, with a no-op re-edit as the control).
 
+**AN OWNER-FACING BUS BODY IS SPLIT INTO NUMBERED PARTS, NEVER CUT — and there are FIVE builders, two
+of them hand-rolled** (v0.5.187–188, 2026-08-21). Telegram caps a message at 4096 characters and every
+mirror ended in `body.slice(0, CAP) + '…'` (3500/3800), so a long brief reached his screen missing its
+ending while the session it addressed had it in full — reported on a ~4.5 KB kickoff brief, whose mirror
+is not `sendBusCard` at all but the spawn founding-message chevron built beside it. `splitBusBody`
+(`bus-split.ts`) is the one splitter: parts REASSEMBLE byte for byte (a seam that eats a newline is the
+same defect as a cut, smaller), the source text is split rather than the rendered HTML because rendering
+never lengthens visible text, and past `BUS_MAX_PARTS` it says how much is not shown instead of trailing
+an ellipsis. Three things are load-bearing: the send and the queued-marker EDIT go through ONE
+`busCardParts`, or confirming a queued ask rewrites a 3-part card's first message with different words;
+the notification is per BODY, not per message (part 1 buzzes, continuations are silent — three buzzes is
+how 📨 stops meaning "read this", which amends the notifying promise in `rich-by-content.test.ts`); and
+the enumeration is the coverage, since a split applied only where the symptom was reported would leave
+the spawn mirror cutting. The mini-app feed is NOT in this class (`outbound-feed.ts` caps at 64 KB).
+Proof: `bus-split.test.ts` (source-bound half must fail against HEAD) and
+`bun scripts/bus-split-probe.ts` — a real canary round trip that reads back the text TELEGRAM STORED
+for each part and diffs the reassembly against the original.
+
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
 instead: `checkConcludedTurnObligations` nudges THE SESSION once per ask, after a grace; nothing
