@@ -129,14 +129,9 @@ type PluginCfg = {
 // not: `bun build` ERASES type-only imports. `agent-transcript.ts`'s `import type { AgentKind } from
 // './agent.ts'` therefore shipped with agent.ts absent from both plugin dirs, building and running
 // clean while `tsc --noEmit` failed. The test walks what the committed dirs really import.
-const CORE = [
-  'channel.ts', 'common.ts', 'channel-ctl.ts', 'pane-io.ts', 'proc.ts', 'prompt.ts',
-  'transcript.ts', 'codex-transcript.ts', 'agent-transcript.ts', 'agent.ts',
-]
-const SLACK_ROOT_FILES = [...CORE,
-  'slack-adapter.ts', 'slack-render.ts', 'slack-daemon.ts', 'slack-paths.ts', 'slk-ctl.ts', 'ensure-slack-daemon.ts']
-const DISCORD_ROOT_FILES = [...CORE,
-  'discord-adapter.ts', 'discord-render.ts', 'discord-daemon.ts', 'discord-paths.ts', 'dsc-ctl.ts', 'ensure-discord-daemon.ts']
+// CORE lives in plugin-core.ts (not here) so a test can import the list without importing this
+// script — deploy.ts has no `import.meta.main` guard and runs the real deploy pipeline on load.
+import { CORE, SLACK_ROOT_FILES, DISCORD_ROOT_FILES } from './plugin-core.ts'
 
 // Hand-authored manifest files that live in a plugin dir (everything else there is deploy-generated).
 const MANIFEST_FILES = ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'INSTALL.md', 'README.md']

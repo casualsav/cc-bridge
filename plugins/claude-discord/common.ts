@@ -1,19 +1,288 @@
-import { chmodSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Buffer } from 'node:buffer'
 
 export const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 
+// ---- which build am I, and am I newer? ----
+
+// This build's plugin version, read from the `.claude-plugin/plugin.json` that ships beside every
+// cached build. null when there is none — a dev checkout run straight from the repo, which is
+// exactly the case that must never be treated as "newest".
+export function buildVersion(dir = import.meta.dir): string | null {
+  try {
+    const v = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')).version
+    return typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v) ? v : null
+  } catch { return null }
+}
+
+function cmpBuild(a: string, b: string): number {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) if (pa[i]! !== pb[i]!) return pa[i]! - pb[i]!
+  return 0
+}
+
+export type StaleVerdict = 'replace' | 'stand-down' | 'same-build'
+
+// A shim has found a daemon running DIFFERENT code. Who gives way?
+//
+// This used to be "different ⇒ replace it", with no direction in it at all: on 2026-07-28 a probe
+// launched from a stale 0.4.99 cache killed the live 0.4.198 daemon and the reconnect storm spammed
+// the owner's DM. The fingerprint cannot answer the question — it is a hash — so the ORDERABLE
+// build version does, and only a strictly newer shim may replace anything.
+//
+// The two asymmetries are the whole design, and both are deliberate:
+//   · a daemon that reports NO build predates this field, so it really is older → replace. That is
+//     the original upgrade path and the only reason this mechanism exists.
+//   · a shim that cannot name its OWN build (a repo checkout) stands down. "I don't know what I am"
+//     must never license killing something that is working.
+// Equal builds with different fingerprints mean a hand-copied file, not an upgrade: say so, change
+// nothing. Killing there is how a same-version cache refresh turns into a downgrade fight.
+export function staleDaemonVerdict(mine: string | null, theirs: string | null | undefined): StaleVerdict {
+  if (theirs == null) return mine == null ? 'stand-down' : 'replace'
+  if (mine == null) return 'stand-down'
+  const c = cmpBuild(mine, theirs)
+  return c > 0 ? 'replace' : c < 0 ? 'stand-down' : 'same-build'
+}
+
 // Tiny JSON-file persistence for the daemon's small state stores (topics, scheduled messages,
 // session names, pins, usage-notif state): silent read with a fallback, silent best-effort 0600
-// write. NOT for access/prefs — those need mtime caching + atomic temp-rename writes (access.ts).
+// write. NOT for access/prefs — those need mtime caching (access.ts keeps its own reader).
 export function readJsonFile<T>(path: string, fallback: T): T {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch { return fallback }
 }
+
+// The same read, but it says WHICH failure happened — because the two mean opposite things and
+// collapsing them destroyed data on 2026-07-30. 'absent' is a legitimately empty store (a first run):
+// carry on and persist normally. 'corrupt' is a file that EXISTS and holds bytes we could not parse
+// (a truncated whole-file write): those bytes are the only remaining record of the store, so a caller
+// that treats them as "empty" and then saves has silently deleted it. Callers holding durable state
+// must branch on this rather than using the fallback above.
+export type JsonRead<T> = { kind: 'ok'; value: T } | { kind: 'absent' } | { kind: 'corrupt'; err: unknown }
+export function readJsonFileStrict<T>(path: string): JsonRead<T> {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return { kind: 'corrupt', err }   // exists but unreadable (perms, I/O) — not an empty store
+  }
+  try { return { kind: 'ok', value: JSON.parse(text) as T } } catch (err) { return { kind: 'corrupt', err } }
+}
+// Atomic by tmp+rename, not because of power loss but because of READERS: a plain writeFileSync onto
+// the live path leaves a truncated file for as long as the write takes, and a daemon killed in that
+// window (or a sibling process reading it) sees half a JSON document. On 2026-07-30 that truncation
+// was the first domino in losing the session map. rename(2) is atomic within a filesystem, so a
+// reader sees either the old file or the new one, never a partial.
+//
+// The tmp name carries the pid: session-harness.ts and effort-scope.ts already hand-rolled exactly
+// this pattern (with the pid) because THIS helper wasn't atomic, and a shared fixed suffix would let
+// two processes writing different stores collide on one tmp path. New JSON-state writes belong here
+// rather than in a sixth hand-rolled copy. access.ts keeps its own writer on purpose: it has a
+// different on-disk contract (pretty-printed + trailing newline) and its own mtime cache to invalidate.
 export function writeJsonFile(path: string, obj: unknown): void {
-  try { writeFileSync(path, JSON.stringify(obj), { mode: 0o600 }) } catch {}
+  const tmp = `${path}.${process.pid}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 })
+    renameSync(tmp, path)
+  } catch {
+    try { unlinkSync(tmp) } catch {}   // never leave a stray tmp behind on a failed write
+  }
+}
+
+// ---- Claude Code credential sharing (the shared-login failure class) ----
+
+// A Claude .credentials.json is only worth copying when it carries a live claude.ai OAuth session
+// (accessToken + refreshToken). Claude Code blanks its own file (empty tokens, expiresAt 0) when a
+// refresh fails on a rotated token — the shared-login failure of 2026-08-01/02, when the chat lane's
+// refresh stranded the main config's copy and the fleet wedged for ~17h. Copying a blanked file
+// would propagate the wedge to every config dir it lands in.
+export function hasLiveOauthCredentials(credentialsPath: string): boolean {
+  try {
+    const cred = JSON.parse(readFileSync(credentialsPath, 'utf8')) as { claudeAiOauth?: { accessToken?: string; refreshToken?: string } }
+    return !!(cred.claudeAiOauth?.accessToken && cred.claudeAiOauth?.refreshToken)
+  } catch { return false }
+}
+
+export type CredentialsCopyDecision = 'no-source' | 'leave' | 'refuse-blanked' | 'copy'
+// The copy-once decision for sharing the main login into another config dir. 'leave' when the
+// destination already has credentials; 'refuse-blanked' when the source is present but carries no
+// live OAuth (see hasLiveOauthCredentials) — the wedge would otherwise be copied verbatim.
+export function credentialsCopyDecision(src: string, dst: string): CredentialsCopyDecision {
+  if (!existsSync(src)) return 'no-source'
+  if (existsSync(dst)) return 'leave'
+  return hasLiveOauthCredentials(src) ? 'copy' : 'refuse-blanked'
+}
+
+// The boot/periodic canary's payload: the alert to raise when a credentials file is blanked, or null
+// when it is missing or carries a live login. Returning null means "nothing to say" so the daemon can
+// fire the alert once per blank episode (dedup) rather than on every tick.
+export function blankedCredentialsAlert(credentialsPath: string): string | null {
+  if (!existsSync(credentialsPath) || hasLiveOauthCredentials(credentialsPath)) return null
+  return '🚨 Main account OAuth credentials are BLANKED (empty tokens) — Claude sessions will demand /login. Restore a live copy (the chat account still has one) or run /login; the fleet is wedged until then.'
+}
+
+// A source token's expiresAt must land inside this window, measured from now. Claude Code mints ~8h
+// access tokens, so 30 days is ~90x headroom over anything this fleet produces and cannot bite a real
+// one — while a hand-written far-future value cannot pass at all.
+//
+// This bound is the whole defence, and it exists because the selection key below is a number the
+// daemon does not control. On 2026-08-21 a throwaway account (`~/.claude-lotest`, registered like any
+// other) held a fabricated token with expiresAt in 2099. It beat every real ~7h token, so every sync
+// tick overwrote ~/.claude, ~/.claude-scout and ~/.claude-chat with it — and, because the tick runs
+// every 60s, it re-overwrote each fresh token the owner minted by hand. Every login he completed had a
+// <=60-second life; the log shows one such cycle in three seconds (04:45:03 "login finished" ->
+// 04:45:06 the same pane demanding login again). Proof: credentials-poison.test.ts.
+export const MAX_SOURCE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000
+
+// Why a candidate cannot be a sync SOURCE, or null when it can be. Split out from the reducer so the
+// caller can log the refusal: a source silently dropped is how the next occurrence becomes as
+// unreconstructable as this one was (twelve `credential sync updated` lines over nine days, not one of
+// them naming where the bytes came from).
+export type SourceRefusal = 'expired' | 'implausible' | 'unregistered'
+
+// Options for the two functions below. `now` and `canSource` are injected rather than read here so the
+// unit tests can drive both without a clock or an accounts.json.
+export type CredentialSyncOptions = {
+  now?: number
+  // May this config dir be a SOURCE? The daemon passes a predicate built from a FRESH read of
+  // accounts.json at sync time (credentialSyncDirs' registry, re-read) — so a dir that reached the
+  // caller's list some other way can still be a destination but can never be the thing every other
+  // dir is overwritten with. Absent = no registration check (the tests' default, and any caller that
+  // has no registry to consult).
+  canSource?: (configDir: string) => boolean
+  onRefuse?: (path: string, why: SourceRefusal) => void
+}
+
+// The freshest LIVE credentials file among several config dirs, or null when none is live. "Freshest"
+// is the highest access-token expiresAt — a refresh mints a fresh ~7h expiry, so the rotated token
+// always wins — tie-broken by refreshTokenExpiresAt. Blanked / missing / malformed files are excluded
+// (hasLiveOauthCredentials): a blanked file is never a source, freshest-token-wins is never stale-
+// over-fresh.
+//
+// A candidate must additionally be PLAUSIBLE — unexpired, inside MAX_SOURCE_LIFETIME_MS, and (when the
+// caller supplies canSource) a registered account dir. "Unexpired" is new alongside the bound and is
+// the same hole seen from the other end: nothing here ever checked that a source token was still
+// valid, so an expired file could be elected and copied over a live one purely for having the larger
+// number.
+export function freshestCredentials(paths: string[], opts: CredentialSyncOptions = {}): string | null {
+  const now = opts.now ?? Date.now()
+  let best: string | null = null
+  let bestAt = -1
+  let bestRefreshAt = -1
+  for (const p of paths) {
+    if (!hasLiveOauthCredentials(p)) continue
+    try {
+      const cred = JSON.parse(readFileSync(p, 'utf8')) as { claudeAiOauth?: { expiresAt?: number; refreshTokenExpiresAt?: number } }
+      const at = cred.claudeAiOauth?.expiresAt ?? 0
+      const rt = cred.claudeAiOauth?.refreshTokenExpiresAt ?? 0
+      // Refused BEFORE the comparison, so an implausible candidate cannot win and cannot tie-break.
+      if (at <= now) { opts.onRefuse?.(p, 'expired'); continue }
+      if (at > now + MAX_SOURCE_LIFETIME_MS) { opts.onRefuse?.(p, 'implausible'); continue }
+      if (opts.canSource && !opts.canSource(dirname(p))) { opts.onRefuse?.(p, 'unregistered'); continue }
+      if (at > bestAt || (at === bestAt && rt > bestRefreshAt)) { best = p; bestAt = at; bestRefreshAt = rt }
+    } catch { /* not live / unreadable — already excluded above */ }
+  }
+  return best
+}
+
+// Keep this many timestamped backups per config dir. Three is enough to walk back through a bad tick
+// and its two neighbours; more is just credential material on disk.
+const CREDENTIAL_BACKUPS_KEPT = 3
+const BACKUP_PREFIX = '.credentials.json.bak-'
+
+// Copy a destination's CURRENT bytes aside before they are overwritten, newest three kept.
+//
+// This is the half that does not depend on being right about the next failure mode: whatever elects a
+// bad source, the token it replaced is still on disk and recovery is a `cp` instead of a re-login the
+// next tick will undo. A backup that cannot be written must not stop the sync (the destination is
+// stale, and refusing to converge it is its own outage) — but it is reported, because a silent failure
+// here is the one that only matters on the day it is needed.
+function backupCredentials(file: string, now: number): string | null {
+  try {
+    const dir = dirname(file)
+    const bak = join(dir, `${BACKUP_PREFIX}${now}`)
+    writeFileSync(bak, readFileSync(file), { mode: 0o600 })
+    const olds = readdirSync(dir).filter(n => n.startsWith(BACKUP_PREFIX)).sort()
+    for (const n of olds.slice(0, Math.max(0, olds.length - CREDENTIAL_BACKUPS_KEPT))) {
+      try { unlinkSync(join(dir, n)) } catch { /* someone else pruned it */ }
+    }
+    return bak
+  } catch { return null }
+}
+
+// The default bridge instance's id. `resolveInstanceId` (daemon.ts) derives it from the state dir:
+// `…/channels/telegram` is "1", `…/channels/telegram-test` is "test".
+export const DEFAULT_INSTANCE_ID = '1'
+
+/**
+ * Which config dirs may THIS bridge instance converge — and the answer for a non-default instance is
+ * "its own registry, and nothing else".
+ *
+ * Until v0.5.198 this was `[main, scout, ...listAccounts()]` for every instance, main and scout
+ * hardcoded regardless of which bridge was asking. That is how the 2026-08-21 lockout actually
+ * reached production: the fabricated `lotest` token was registered in the CANARY's accounts.json
+ * (`…/channels/telegram-test`), and the canary daemon — a test instance, on a test bot, with its own
+ * everything — dutifully wrote it into `~/.claude` and `~/.claude-scout` every 60 seconds. The
+ * canary's own log carries the whole episode, including a third suppressed auth-url card on its
+ * `%273`. v0.5.195's plausibility bound stops that particular token; this stops the CLASS, which is
+ * a test instance holding write access to the production login at all (owner's ruling, 2026-08-21:
+ * "a non-default instance must NEVER write production config dirs").
+ *
+ * The production dirs are filtered out by VALUE, not merely left un-added: a non-default instance
+ * whose registry names `~/.claude` outright must not get there by the back door, and `accountDirs`
+ * arrives with main already prepended by `listAccounts()`.
+ */
+export function credentialSyncDirsFor(p: {
+  instanceId: string
+  mainConfigDir: string
+  scoutConfigDir: string
+  accountDirs: string[]   // listAccounts().map(a => a.configDir) — main first, then this instance's registry
+}): string[] {
+  if (p.instanceId === DEFAULT_INSTANCE_ID) {
+    return [...new Set([p.mainConfigDir, p.scoutConfigDir, ...p.accountDirs])]
+  }
+  const production = new Set([p.mainConfigDir, p.scoutConfigDir])
+  return [...new Set(p.accountDirs.filter(d => !production.has(d)))]
+}
+
+// Converge a set of config dirs' .credentials.json onto the freshest live token. SYMMETRIC: any dir
+// may be the refresher; the tick after a refresh propagates that token to every other dir, so rotation
+// in one config dir can no longer strand the others (the shared-login failure of 2026-08-01/02). The
+// source dir's own file is never rewritten. Returns the rewritten paths. A dir already holding the
+// freshest token is byte-compared and left untouched — no rewrite, no mtime churn (the caller's
+// control). Every rewrite is preceded by a timestamped backup of what it replaced (backupCredentials).
+//
+// Returns the source alongside the rewritten paths so the caller can NAME it: the log line used to
+// print destinations only, which is why the 2026-08-21 propagation left no trace of its own origin.
+export function syncCredentials(configDirs: string[], opts: CredentialSyncOptions = {}): { src: string | null; updated: string[]; backupFailed: string[] } {
+  const now = opts.now ?? Date.now()
+  const files = configDirs.map(d => join(d, '.credentials.json'))
+  const src = freshestCredentials(files, opts)
+  if (!src) return { src: null, updated: [], backupFailed: [] }
+  const updated: string[] = []
+  const backupFailed: string[] = []
+  let srcText: string | null = null
+  for (const f of files) {
+    if (f === src) continue
+    try {
+      const cur = readFileSync(f, 'utf8')
+      if (srcText === null) srcText = readFileSync(src, 'utf8')
+      if (cur === srcText) continue   // byte-identical — no rewrite, no mtime churn
+      // Both recorded only AFTER the write lands. Ordered the other way (v0.5.195) a dir whose
+      // permissions broke the backup would usually break the write too — the write throws into the
+      // catch below, `updated` never gets it, and `backupFailed` already has it — so the daemon
+      // reported "OVERWROTE … WITHOUT a backup" for a dir it had not touched. A false alarm about
+      // destroyed credentials is its own incident. (@bridgeaccts, reviewing 71467d5.)
+      const backedUp = backupCredentials(f, now)
+      writeFileSync(f, srcText, { mode: 0o600 })
+      if (!backedUp) backupFailed.push(f)
+      updated.push(f)
+    } catch { /* unreadable dest — leave it; next tick retries */ }
+  }
+  return { src, updated, backupFailed }
 }
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
@@ -30,6 +299,55 @@ export const WATCHDOG_PID_FILE = join(STATE_DIR, 'watchdog.pid')
 // Present while the daemon runs; removed on graceful shutdown — so if it survives to the
 // next startup, the previous instance died uncleanly (a crash) and we announce the restart.
 export const HEARTBEAT_FILE = join(STATE_DIR, 'daemon-heartbeat')
+
+// ---- cwd: a supervision process may never keep the one it INHERITED ----
+//
+// Under Bun, a process whose cwd has been DELETED cannot spawn ANYTHING: every `spawn` fails
+// `ENOENT … posix_spawn '<binary>'`, PATH-resolved or absolute (measured — `scripts/deleted-cwd-spawn.ts`).
+// That is what took the fleet down twice on 2026-07-30. A replay harness in another project ran
+// `claude -p` from `/tmp/predict-replay-*` scratch dirs; their SessionStart hooks ran ensure-daemon,
+// which started watchdogs THERE; the harness then deleted the dirs. Each poisoned watchdog spawned a
+// daemon that inherited the same dead cwd, and that daemon could not run `tmux` — so its pane scan
+// returned 0 panes every tick, the whole fleet read down, spawns failed and asks were refused. It was
+// self-perpetuating: every blind window made `tg` calls see the daemon as down and nudge yet another
+// watchdog into existence from yet another scratch dir.
+//
+// The cure is one line at the top of every long-lived process: stand somewhere nobody deletes. The
+// state dir is that place (it must exist for this process to do anything at all), with `/` as the
+// fallback that cannot be removed. Launch sites ALSO pass `cwd` explicitly, which is what rescues a
+// child from a launcher that is already standing in a deleted dir.
+//
+// Detection is `existsSync`, NOT try/catch: `process.cwd()` keeps returning the stale path after the
+// directory is gone (measured), so a process poisoned this way looks perfectly healthy to itself.
+export function stableCwd(): string {
+  return existsSync(STATE_DIR) ? STATE_DIR : '/'
+}
+export function anchorCwd(who: string): void {
+  const stable = stableCwd()
+  let before: string | null = null
+  try { before = process.cwd() } catch {}
+  if (before === stable) return
+  try { process.chdir(stable) } catch (e) {
+    process.stderr.write(`${who}: could not chdir to ${stable} (${e}) — still standing in ${before ?? 'an unreadable cwd'}\n`)
+    return
+  }
+  // Silent on the ordinary case (started somewhere fine, moved anyway). Loud when the inherited cwd
+  // was ALREADY gone: that process was one spawn away from tonight's outage, and the line is the
+  // only evidence the poisoning happened at all.
+  if (before === null || !existsSync(before)) {
+    process.stderr.write(`${who}: inherited a DELETED cwd (${before ?? 'unreadable'}) — anchored to ${stable}; spawns would have failed with ENOENT\n`)
+  }
+}
+
+// Appended to a spawn failure so ENOENT names its real cause. Tonight's log line said
+// `posix_spawn 'tmux'` with /usr/bin/tmux present and PATH intact, and pointed an hour of
+// investigation at PATH. Empty when the cwd is fine, so it costs nothing on unrelated failures.
+export function cwdFaultHint(): string {
+  let cwd: string | null = null
+  try { cwd = process.cwd() } catch { return ` — NOTE: this process has NO readable cwd, which makes every spawn fail with ENOENT regardless of PATH` }
+  if (existsSync(cwd)) return ''
+  return ` — NOTE: this process's cwd (${cwd}) HAS BEEN DELETED, which makes every spawn fail with ENOENT regardless of PATH; that, not PATH, is the fault`
+}
 
 // Load .env into process.env — real env wins. Runs at import time.
 try {
@@ -126,7 +444,11 @@ export type ShimToDaemon =
       request_id: string; tool_name: string; description: string; input_preview: string } }
 
 export type DaemonToShim =
-  | { t: 'hello'; version?: string }   // version = daemon's code fingerprint
+  // `version` is the daemon's code FINGERPRINT — a hash, so it answers "same code?" and nothing
+  // else. `build` is the plugin version (x.y.z) and is what makes the answer ORDERABLE; it is
+  // optional because a daemon older than this field predates the ordering entirely, and a shim must
+  // read its absence as "older", never as "unknown, assume I win".
+  | { t: 'hello'; version?: string; build?: string }
   | { t: 'detached' }                    // a newer shim subscribed; stop expecting events
   | { t: 'inbound'; params: InboundParams }
   | { t: 'permission'; params: { request_id: string; behavior: 'allow' | 'deny' } }

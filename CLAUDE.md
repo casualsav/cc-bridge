@@ -339,9 +339,7 @@ refuses the deliveries that would push it out of the tail. Same class as the 202
 working row, whose fix hardened the ellipsis test INSIDE the parser and left this caller reading the
 glyph. The gate is `elapsed`, not a non-null parse — a reply ending in an ellipsis parses fine, and
 `(30s timeout)` is not an elapsed FIELD. `STUCK_CHROME`'s copy is the named exclusion (it STRIPS rows
-before hashing a signature, so over-matching can only coarsen one). **Still open, named not closed:**
-`plugins/claude-{slack,discord}/prompt.ts` carry the same bare test in an older fork of this file with
-no parser to gate on. Proof: `working-timer-shape.test.ts` (the incident line byte-exact from
+before hashing a signature, so over-matching can only coarsen one). Proof: `working-timer-shape.test.ts` (the incident line byte-exact from
 @dailyadapter's transcript, with the pre-fix predicate asserted TRUE on it as the known-answer control)
 and `bun scripts/working-shape-probe.ts --watch N`, which runs both predicates over every live pane —
 132 pane-samples, zero disagreement, which is the false-negative half no unit test can answer. **The
@@ -559,6 +557,14 @@ and verifies the new version. Flags: `--no-restart`, `--commit "msg"`. Commits e
   `scripts/deploy.ts`'s `GRAMMY_PIN`.
 - Hand-restart is a kill — `kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`; the watchdog
   respawns it.
+
+**`plugins/claude-{slack,discord}/` are GENERATED COPIES — never hand-edit them.** The shared
+runtime lives at repo root; `bun run deploy --plugin <slack|discord> --materialize` copies
+`scripts/plugin-core.ts`'s `CORE` list (plus each platform's own files) into the plugin dir and
+exits, no ship. Nothing regenerated them for 160 versions / 27 days, so the Slack and Discord
+daemons — channels the owner runs live — lacked the v0.5.196 auth-code hold and the v0.5.206
+`WORKING_TIMER_RE` fix (2026-08-21). Proof: `plugin-materialize.test.ts` (byte-identity per CORE
+file, plus both fixes' symbols present in each plugin's `prompt.ts`).
 
 ### What `bun run deploy` actually ships
 

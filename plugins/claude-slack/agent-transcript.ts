@@ -10,6 +10,7 @@
 import { basename } from 'node:path'
 import { statSync } from 'node:fs'
 import * as cc from './transcript.ts'
+import type { SuppressReason } from './transcript.ts'
 import * as cx from './codex-transcript.ts'
 import type { AgentKind } from './agent.ts'
 
@@ -29,19 +30,51 @@ function codexRoots(): string[] {
 
 // ── file-arg readers: dispatch on the file's own format ──
 export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFinalReply(file) : cc.latestFinalReply(file))
-export const finalRepliesAfter = (file: string, afterUuid: string) => (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid) : cc.finalRepliesAfter(file, afterUuid))
+// `busAnchored` decides whether a relayed reply pings the owner. Codex rollouts carry no `<tg …>`
+// envelope to read it from, so they answer FALSE — loud, today's behaviour. A stated default, not an
+// inference: the two failure directions are not symmetric, and a missed ping is a message he never
+// learns about while an extra one is noise he can see.
+// `anchorText` answers the same question one level finer — which message started this turn — and a
+// Codex rollout cannot answer it either: its `turn_started` line carries an id, not the text that was
+// typed. So it answers EMPTY, which matches nothing. The consequence is bounded and named: the owner's
+// direct `@name` message to a CODEX session is delivered and answered normally, but its reply reaches
+// only that session's own surface, never the card back to his DM (owner-reply.ts).
+// `includeSuppressed` passes straight through to the Claude reader; a Codex rollout never carries a
+// suppressed reply, because the class exists only where Claude Code's no-visible-output re-prompt does
+// — a different harness with no such mechanism, stated here rather than left to be inferred from an
+// always-empty field.
+export const finalRepliesAfter = (
+  file: string, afterUuid: string, opts: { includeSuppressed?: boolean } = {},
+): { uuid: string; text: string; busAnchored: boolean; anchorText: string; suppressed?: SuppressReason }[] =>
+  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false, anchorText: '' })) : cc.finalRepliesAfter(file, afterUuid, opts))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
+// Why turnInProgress says what it says (the typing instrumentation's diagnosis). A Codex rollout has
+// no assistant stop_reason to read, so it answers nulls — honestly "cannot classify" rather than a
+// fabricated verdict, and the warning prints the re-arming source either way.
+export const lastAssistantStopReason = (file: string): { stopReason: string | null; ageMs: number | null } =>
+  (isCodex(file) ? { stopReason: null, ageMs: null } : cc.lastAssistantStopReason(file))
+export const liveSubagents = (file: string) => (isCodex(file) ? 0 : cc.liveSubagents(file))   // Codex rollouts have no subagent files
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))
 export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.currentTurnActivity(file) : cc.currentTurnActivity(file))
 export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTurnTokens(file) : cc.currentTurnTokens(file))
+// CC-only: a Codex rollout records tool calls in its own shape, and reading "no work" there just
+// means the unreported-work check never fires for a Codex pane — the conservative side of a check
+// whose failure mode is nudging a session that has nothing to report.
+export const concludedTurnWork = (file: string) => (isCodex(file) ? { count: 0, mutating: false, lastAt: 0 } : cc.concludedTurnWork(file))
 export const latestModelId = (file: string) => (isCodex(file) ? null : cc.latestModelId(file))   // Codex rollouts don't record a per-turn model
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
+// CC-only, and a stated exclusion rather than a gap: a Codex turn carries no "Worked for …" summary
+// in the mini app, which is the one surface that reads this. Nothing else degrades without it.
+export const currentTurnSpan = (file: string) => (isCodex(file) ? null : cc.currentTurnSpan(file))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
 export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? null : cc.slashResultAfter(file, sinceMs))   // CC-only: Codex logs no local command stdout
 // Codex rollouts lack the user/assistant pairing recentConversation needs — surface just the latest reply.
 export const recentConversation = (file: string, max = 12) => isCodex(file)
   ? (r => (r ? [{ role: 'assistant' as const, text: r.text, ts: 0 }] : []))(cx.latestFinalReply(file))
   : cc.recentConversation(file, max)
+// A Codex rollout has no per-entry uuid to address and its single feed row is never clipped, so
+// there is nothing to expand — the fetch simply has no answer there.
+export const conversationItemFullText = (file: string, uuid: string) => isCodex(file) ? null : cc.conversationItemFullText(file, uuid)
 export const agentSessionId = (file: string) => isCodex(file)
   ? cx.sessionIdOf(basename(file))
   : basename(file, '.jsonl')
@@ -84,6 +117,12 @@ export function findSessionCwd(sessionId: string, roots?: string[]): { cwd: stri
   return cc.findSessionCwd(sessionId, roots) ?? cx.findSessionCwd(sessionId, codexRoots())
 }
 
+// The transcript file behind a session id. CC-only: the callers are the reopen path's model
+// re-assertion and its replay-cost line, both of which already branch on a Claude pane.
+export function findSessionFile(sessionId: string, roots?: string[]): string | null {
+  return cc.findSessionFile(sessionId, roots)
+}
+
 export function agentForSession(sessionId: string, roots?: string[]): 'claude' | 'codex' {
   return cx.findSessionCwd(sessionId, codexRoots()) ? 'codex' : 'claude'
 }
@@ -94,3 +133,7 @@ export function searchTranscripts(query: string, roots?: string[], limit = 5, ma
   merged.sort((x, y) => y.mtime - x.mtime)
   return merged.slice(0, limit)
 }
+
+// CC-only: a Codex rollout records no per-entry model, so there is nothing for the drift guard to
+// compare and it simply never fires for a Codex pane.
+export const modelSwitchEvidence = (file: string) => (isCodex(file) ? { answering: null, deliberate: false } : cc.modelSwitchEvidence(file))
