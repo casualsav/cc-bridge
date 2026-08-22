@@ -73,10 +73,10 @@ test('SOURCE: every builder caps for the carrier it sends on — five sites, eac
   expect(d).toContain('mdToTelegramHtml(busCardShown(p.text))')
   // …the hand-rolled spawn founding mirror, which is a second copy of that card…
   expect(d).toContain('const shown = busCardShown(firstMsg)')
-  // …and the 📨 card, whose rich branch now carries the post too.
+  // …and the attention card, whose rich branch now carries the post too.
   expect(d).toContain('${capBusBody(body, RICH_BODY_CAP)}')
   // The classic carrier (~4,096) re-caps everywhere it is reached, or a body sized for rich is
-  // refused and swallowed: both chevron fallbacks, and the 📨 card's own classic branch.
+  // refused and swallowed: both chevron fallbacks, and the attention card's own classic branch.
   expect(d.split('mdToTelegramHtml(capBusBody(shown, ASK_QUOTE_CAP))').length - 1).toBe(2)
   expect(d).toContain('mdToTelegramHtml(capBusBody(body, POST_CAP))')
   // Five capped sites and no sixth: a new builder that forgets to cap is what this count catches.
@@ -89,12 +89,12 @@ test('SOURCE: both surfaces that reach for a human send through ONE card', () =>
   // differ again, in the direction that cuts. A look-rule settled for one copy of a pair is the
   // class that put literal `**bold**` on his phone twice (CLAUDE.md, render parity).
   expect(d).toContain("sendAttentionCard(chat, fromName, body, fromSid, 'post')")
-  expect(d).toContain("sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card')")
+  expect(d).toContain("sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card', '💬')")
   const card = d.slice(d.indexOf('async function sendAttentionCard('), d.indexOf('// The chat lane\'s copy of a worker\'s post'))
   expect(card).toContain('sendRichMessage(')                       // the post's new carrier
   expect(card).toContain('!hasFencedCode || hasMarkdownTable(body)')  // …behind the same content gate
   expect(card).toContain('rememberMsgRoute')                       // …and still routable on both branches
-  // Notifying on BOTH branches: 📨 means a session is reaching for a human, and the per-part silence
+  // Notifying on BOTH branches: emoji means a session is reaching for a human, and the per-part silence
   // that v0.5.188 added has nothing left to silence.
   expect(card).not.toContain('disableNotification: part')
   expect(card).not.toContain('silent: part')

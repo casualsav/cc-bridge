@@ -45,7 +45,7 @@ test('prose that merely contains pipes or dashes is NOT a table', () => {
 const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
 
 test('the owner-answer card consults the content before choosing classic HTML', () => {
-  // …the ONE card behind both 📨 wrappers (v0.5.199): the owner-answer card and the post are the
+  // …the ONE card behind both emoji wrappers (v0.5.199): the owner-answer card and the post are the
   // same card by his 2026-08-10 ruling, and since the post took the rich carrier they are also the
   // same code — so the content gate is asserted where it now lives.
   const fn = daemon.slice(daemon.indexOf('async function sendAttentionCard('),
@@ -60,7 +60,7 @@ test('the owner-answer card consults the content before choosing classic HTML', 
   // …and the classic path is still there underneath it. Its ROLE changed on 2026-08-10: it used to
   // take every answer without a table (which reached him as raw markdown, the defect), and now takes
   // only code-bearing ones — where classic's <pre> beats rich's. Both branches render.
-  expect(fn).toContain('📨 <b>@')
+  expect(fn).toContain('${emoji} <b>@')
 })
 
 test('a table outranks the code-fence bypass in the relay path', () => {

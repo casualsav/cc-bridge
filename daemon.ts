@@ -4409,7 +4409,7 @@ const ASK_QUOTE_CAP = 3500
 // chevron and he simply missed it. So: expanded by default, no disclosure to open, the same 📨 and
 // the sending session's name as the header, and a NOTIFYING send (sound/banner per his client). Every
 // other bus card stays collapsed and silent, deliberately — a post is a session reaching for a human,
-// which none of the others are.
+// which none of the others are. Owner answer cards use 💬 instead (2026-08-21).
 const POST_CAP = 3800
 // ROUTABLE, like every other card with a session behind it. A post is the most session-authored
 // thing on this surface — a worker speaking to the humans in its own words, often a question — and
@@ -4473,17 +4473,18 @@ async function sendOwnerFile(
 // 2026-08-10). This card carried "📨 From @name" while the horn post carried "📣 @name", which made
 // two members of one class look like two classes — they were already identical in every other
 // property (expanded, no disclosure, notifying, routable, headed with the session's name), so the
-// header was the last thing disagreeing. It is now the SAME header, byte for byte: `📨 @name`. He
-// dropped the "From" himself, and it was carrying nothing — the glyph already says a session is
-// talking and the name already says which; he then picked the envelope over the horn for the pair
-// (2026-08-10), so 📣 is gone from this class entirely.
+// header was the last thing disagreeing. It is now the SAME header, byte for byte: `📨 @name` for
+// posts, `💬 @name` for owner answer cards (2026-08-21). He dropped the "From" himself, and it was
+// carrying nothing — the glyph already says a session is talking and the name already says which;
+// he then picked the envelope over the horn for the pair (2026-08-10), so 📣 is gone from this
+// class entirely.
 //
 // The boundary is what keeps it informative: the collapsed, silent, agent-to-agent chevron cards
 // must NEVER take it, because a glyph that appears on traffic he does not have to read stops meaning
 // "read this". Bridge-authored decisions keep their own icons (🔐 permission, 🧠 held spawn) — those
 // are the bridge asking, not a session speaking.
 async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
-  return sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card')
+  return sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card', '💬')
 }
 // ONE card behind both wrappers. They had been byte-identical copies since 2026-08-10, when the last
 // property that disagreed (the header) was settled — and a look-rule settled for one copy of a pair
@@ -4497,7 +4498,7 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
 // and cannot render a table at all — so the same answer read cleanly when a worker replied in chat
 // (the relay path sends rich) and read as pipe soup when he addressed the worker directly. The
 // content decides, not the surface. Everything else is unchanged: expanded, notifying, routable.
-async function sendAttentionCard(chat: string, fromName: string, body: string, subjectSid: string | null | undefined, what: string): Promise<void> {
+async function sendAttentionCard(chat: string, fromName: string, body: string, subjectSid: string | null | undefined, what: string, emoji: string = '📨'): Promise<void> {
   // The rich carrier used to be gated on a TABLE, so every answer without one — the overwhelming
   // majority — fell to the `escapeHtml` line below and reached him as raw markdown. The gate now
   // mirrors sendAgentText's exactly, which is where the owner's ruling on this trade already lives:
@@ -4507,7 +4508,7 @@ async function sendAttentionCard(chat: string, fromName: string, body: string, s
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(body)
   if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(body))) {
     try {
-      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **@${fromName}**\n\n${capBusBody(body, RICH_BODY_CAP)}`), {})
+      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`${emoji} **@${fromName}**\n\n${capBusBody(body, RICH_BODY_CAP)}`), {})
       rememberMsgRoute(chat, m?.message_id, subjectSid)
       return
     } catch (e) {
@@ -4525,7 +4526,7 @@ async function sendAttentionCard(chat: string, fromName: string, body: string, s
   // …and this is the one branch where the body is still CUT, because the carrier under it genuinely
   // cannot take more (`POST_CAP`, unchanged since before the parts). Reached only when he has turned
   // rendering off, when the body carries fenced code, or when a rich send was refused.
-  const html = `📨 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(capBusBody(body, POST_CAP))}`
+  const html = `${emoji} <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(capBusBody(body, POST_CAP))}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: ${what} from @${fromName} failed: ${e}\n`); return null
   })

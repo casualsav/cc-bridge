@@ -54,20 +54,22 @@ test('the post handler passes the AUTHOR, not nothing — the row needs a subjec
   expect(post).toContain('rememberMsgRoute(chat, ref?.messageId, fromSid)')
 })
 
-// ---- 📨 MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN --------------------------------------
+// ---- 📨/💬 MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN ------------------------------------
 // His ruling, 2026-08-10. The glyph is only worth anything while it stays scarce, so the negative
 // half is the load-bearing one: put it on the collapsed, silent, agent-to-agent chevron traffic and
 // it stops meaning "read this" — which is the failure that cannot be seen from inside the code.
+// Posts use 📨; owner answer cards use 💬 (the owner's DM, 2026-08-21).
 
-test('both surfaces that reach for a human carry the SAME header — 📨 @name, no other word', () => {
+test('both surfaces that reach for a human carry the SAME header — emoji @name, no other word', () => {
   // One card, two wrappers (v0.5.199) — which is the strongest form this assertion can take: the
   // two headers cannot drift apart while there is only one of them. The wrappers are named here so
   // a third surface reaching for a human is added to the same card rather than beside it.
   expect(daemon).toContain("sendAttentionCard(chat, fromName, body, fromSid, 'post')")
-  expect(daemon).toContain("sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card')")
+  expect(daemon).toContain("sendAttentionCard(chat, fromName, body, subjectSid, 'owner answer card', '💬')")
   const answer = bodyOf('async function sendAttentionCard(', 2900)
-  expect(answer).toContain('📨 <b>@${escapeHtml(fromName)}</b>')   // the classic branch…
-  expect(answer).toContain('📨 **@${fromName}**')                  // …and the rich branch, so it can't depend on the renderer
+  // The function uses a configurable emoji parameter; posts default to 📨, owner answer cards pass 💬.
+  expect(answer).toContain('${emoji} <b>@${escapeHtml(fromName)}</b>')   // the classic branch…
+  expect(answer).toContain('${emoji} **@${fromName}**')                  // …and the rich branch, so it can't depend on the renderer
   // "From" is gone from both branches: the glyph says a session is talking, the name says which.
   expect(answer).not.toContain('From @')
 })

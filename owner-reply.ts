@@ -17,7 +17,7 @@
 // his anchor (transcript.ts `isTurnAnchor`), so a route must survive its first match: it is retired
 // only when the session moves on — a concluded turn anchored by something else, i.e. one he did not
 // start (a matched route only; an UNMATCHED one keeps waiting, because his message may still be queued
-// behind that stranger's turn) — or when it ages out. Both card, `📨 @name` each; per-uuid dedup is
+// behind that stranger's turn) — or when it ages out. Both card, `💬 @name` each; per-uuid dedup is
 // the caller's claimRelayDelivery. A route nothing ever matches (the session was killed mid-turn, the
 // pane was cleared) ages out rather than sitting armed forever and firing on a stranger.
 //
