@@ -632,6 +632,32 @@ export function detectFirstRunScreen(paneText: string): FirstRunScreen | null {
   return null
 }
 
+// ---- Custom API key confirmation (auto-accepted for gateway harnesses) ----
+// When ANTHROPIC_API_KEY is set and the user also has a claude.ai login, Claude Code asks:
+//   Detected a custom API key in your environment
+//   ANTHROPIC_API_KEY: sk-ant-...ds34
+//   Do you want to use this API key?
+//     1. Yes
+//   ❯ 2. No (recommended)
+//   Enter to confirm · Esc to cancel
+// The default is "No" — the daemon needs to navigate UP to "Yes" and press Enter.
+export function isCustomApiKeyPrompt(paneText: string): boolean {
+  const t = stripAnsi(paneText)
+  return /do you want to use this api key/i.test(t) && /enter to confirm/i.test(t)
+}
+
+// ---- Fullscreen renderer prompt (auto-dismissed) ----
+// After updates Claude Code may ask:
+//   Try the new fullscreen renderer?
+//     ❯ 1. Yes, try it
+//       2. Not now
+//   Enter to confirm · Esc to cancel
+// The default is "Yes" — but for daemon sessions we want "Not now" (option 2), so navigate DOWN.
+export function isFullscreenRendererPrompt(paneText: string): boolean {
+  const t = stripAnsi(paneText)
+  return /try the new fullscreen renderer/i.test(t) && /enter to confirm/i.test(t)
+}
+
 // ---- Usage-limit "what do you want to do?" menu (auto-dismissed, never relayed) ----
 // When Claude hits a usage limit mid-turn it can pop a blocking menu:
 //   What do you want to do?
@@ -1357,6 +1383,7 @@ export function waitingPromptSignature(paneText: string): string | null {
 export function isRecognizedPrompt(paneText: string): boolean {
   return !!detectPermissionPrompt(paneText) || !!detectUserPrompt(paneText) || !!detectResumeSessionPrompt(paneText)
     || !!detectLoginPrompt(paneText) || isUsageLimitChoice(paneText) || isPluginInstallUserScope(paneText)
+    || isCustomApiKeyPrompt(paneText) || isFullscreenRendererPrompt(paneText)
     // The code-entry screen. Its absence here is what carded the owner "🧩 … a screen I don't
     // recognize" every 75s while he was locked out (2026-08-21) — daemon.ts's recognizedScreen had
     // learned this screen and this list had not. auth-screen-sites.test.ts holds the two together.
@@ -1529,6 +1556,7 @@ export function slashPaletteEntries(paneText: string): Array<{ name: string; ali
 export function paneAcceptsText(cap: string): boolean {
   return !(
     detectUserPrompt(cap) || detectPermissionPrompt(cap) || isUsageLimitChoice(cap)
+    || isCustomApiKeyPrompt(cap) || isFullscreenRendererPrompt(cap)
     || isModelSwitchConfirm(cap) || detectModelPicker(cap) || detectLoginPrompt(cap)
     || isResumeSessionPrompt(cap) || detectFirstRunScreen(cap)
     // The code-entry screen, and it MUST be named here rather than left to detectStuckScreen below.

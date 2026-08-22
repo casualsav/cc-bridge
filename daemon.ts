@@ -46,7 +46,7 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, detectAuthCodeScreen, onAuthScreen, extractAuthUrl, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isCustomApiKeyPrompt, isFullscreenRendererPrompt, isResumeSessionPrompt, detectResumeSessionPrompt, detectAuthCodeScreen, onAuthScreen, extractAuthUrl, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, paneReadyForFirstDelivery, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType, detectBlockedScreen, blockedRecovery } from './prompt.ts'
 import { planResumeOptions, planResumeCardText, planResumeOutcome, planResumeCardMint, resumePickerSig, paneGlance, type ResumeOption } from './resume-picker-card.ts'
 import { planRefreshSeam, refreshSummaryHeld } from './refresh-seam.ts'
 import { gatherGcEvidence, planScratchGc, applyScratchGc, scratchRoot, fmtBytes as fmtGcBytes, fmtDur as fmtGcDur, type GcPlan, type ScratchEntry } from './scratch-gc.ts'
@@ -831,6 +831,35 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   process.stderr.write('daemon: auto-confirming plugin install (user scope)\n')
   await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   notifyChats('🧩 Installed the plugin for you (user scope).', { plain: true })
+}
+
+// Auto-accept the custom API key prompt ("Do you want to use this API key?"). The default is "No"
+// (option 2), so we navigate UP to "Yes" (option 1) and press Enter. Deduped like the other dismissals.
+let customApiKeyAcceptedAt = 0
+async function acceptCustomApiKey(paneId: string): Promise<void> {
+  if (Date.now() - customApiKeyAcceptedAt < 4000) return
+  customApiKeyAcceptedAt = Date.now()
+  await withPaneInjection(paneId, async () => {
+    const cap = await capturePane(paneId).catch(() => '')
+    if (!isCustomApiKeyPrompt(cap)) return
+    process.stderr.write('daemon: auto-accepting custom API key prompt (Yes)\n')
+    await sendKeys(paneId, ['Up', 'Enter']); await waitForSettle(paneId, 200, 3000)
+  })
+}
+
+// Auto-dismiss the fullscreen renderer prompt ("Try the new fullscreen renderer?"). Default is
+// "Yes, try it" — we navigate DOWN to "Not now" and press Enter. Daemon sessions don't need the
+// fullscreen renderer.
+let fullscreenRendererDismissedAt = 0
+async function dismissFullscreenRenderer(paneId: string): Promise<void> {
+  if (Date.now() - fullscreenRendererDismissedAt < 4000) return
+  fullscreenRendererDismissedAt = Date.now()
+  await withPaneInjection(paneId, async () => {
+    const cap = await capturePane(paneId).catch(() => '')
+    if (!isFullscreenRendererPrompt(cap)) return
+    process.stderr.write('daemon: auto-dismissing fullscreen renderer prompt (Not now)\n')
+    await sendKeys(paneId, ['Down', 'Enter']); await waitForSettle(paneId, 200, 3000)
+  })
 }
 
 // The post-update resume-cost picker, relayed to THE OWNER as a card he chooses from — his ruling,
@@ -3156,6 +3185,8 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
   if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
+  if (isCustomApiKeyPrompt(text)) { void acceptCustomApiKey(pane); return }
+  if (isFullscreenRendererPrompt(text)) { void dismissFullscreenRenderer(pane); return }
   { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(pane, resume); return } }
 
   // Sign-in link printed as plain output (independent of menu detection).
@@ -7396,6 +7427,8 @@ function onPaneEvent(text: string): void {
   // default) with Enter, so adding a plugin from chat or the terminal doesn't wedge on a confirmation
   // the user already decided. Deduped so a repaint of the same menu doesn't fire Enter twice.
   if (focus.activePaneId && isPluginInstallUserScope(text)) { void confirmPluginInstall(focus.activePaneId); return }
+  if (focus.activePaneId && isCustomApiKeyPrompt(text)) { void acceptCustomApiKey(focus.activePaneId); return }
+  if (focus.activePaneId && isFullscreenRendererPrompt(text)) { void dismissFullscreenRenderer(focus.activePaneId); return }
 
   // Post-update "Resume session" picker — relay the choice (summary / full / don't-ask) as buttons so
   // the user decides how the session comes back, instead of wedging before the REPL and bouncing every
