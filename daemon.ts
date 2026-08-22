@@ -14021,7 +14021,10 @@ function roleDefaultShort(role: SessionRole): string {
 // root says what the roles run on; the gateway count went with it to pay for the width.
 function accountsRowSummary(): string {
   const a = loadAccess()
-  return `${listAccounts().length} · 🔀 ${a.limitFailover === true ? 'on' : 'off'}` +
+  // SUBSCRIPTIONS, not config dirs (ruling 2026-08-22): the panels list one row per identity since
+  // v0.5.212, and a root row saying 3 over panels showing 2 reads as a row gone missing.
+  const subscriptions = chainGroups(failoverChain(), accountGroupKey).filter(g => g.hops[0]!.kind === 'claude').length
+  return `${subscriptions} · 🔀 ${a.limitFailover === true ? 'on' : 'off'}` +
     ` · 💬 ${roleDefaultShort('chat')} · 🧑‍💻 ${roleDefaultShort('code')}`
 }
 // 🗣 output style: the pref, or `default` for "nothing configured" — which is a real state and not
