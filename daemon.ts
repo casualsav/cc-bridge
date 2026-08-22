@@ -15599,7 +15599,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // For non-anthropic providers, the [1m] wide-context suffix is never applied by spawnModelFlag
     // (that path only handles Claude aliases). Carry it on the harness model itself so the provider
     // session boots with the same 1M window native Claude sessions get.
-    if (harness.provider !== 'anthropic' && harness.provider !== 'gateway' && harness.model && supportsWideContext(harness.model) && !harness.model.endsWith(WIDE_CONTEXT_SUFFIX)) {
+    if (harness.provider !== 'anthropic' && harness.model && supportsWideContext(harness.model) && !harness.model.endsWith(WIDE_CONTEXT_SUFFIX)) {
       harness = { ...harness, model: wideContextModel(harness.model) }
     }
     // A proxy/gateway model is process-start transport configuration. Never let the resumed
