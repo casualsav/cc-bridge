@@ -465,7 +465,7 @@ export function launchDefaultMode(role: SessionRole, prefs: RolePrefs, modes: re
 // than loudly in the suite. Values arrive ESCAPED — the caller owns the surface and therefore owns
 // the escaping; this function only decides the shape.
 export function spawnCardHeader(name: string, dials: readonly string[]): string {
-  const shown = dials.filter(Boolean).map(d => d.charAt(0).toUpperCase() + d.slice(1))
+  const shown = dials.filter(Boolean)
   return `Spawned <b>@${name}</b>${shown.length ? ` on ${shown.join('/')}` : ''}`
 }
 

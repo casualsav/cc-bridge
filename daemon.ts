@@ -242,7 +242,7 @@ import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome, retainAfterDigest, describeSendFailure, type LedgerEntry as InboundLedgerEntry } from './inbound-ledger.ts'
 import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
-import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
+import { spawnModelFlag, supportsWideContext, wideContextModel, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import { parseLaunch, parseSpawnAddress, parseLaunchArgs, parseLaunchCommand, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
@@ -10548,13 +10548,16 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
   // for one event. A delivery that then FAILS still says so below, so nothing is lost.
   // The spawn confirmation, and the ONE place the model choice is visible to the person who pays for
-  // it: `Spawned @name on Sonnet/High`, with the first message behind the chevron. The reason rides
+  // it: `Spawned @name on sonnet`, with the first message behind the chevron. The reason rides
   // INSIDE that chevron, one line above the prompt — it is honesty about a judgment (a `--why`, or a
   // dial an agent chose over his default), which he should be able to reach, not read every time. A model
   // that resolved to nothing drops its clause; this line never invents one. No chevron means no
   // expanded view, so a spawn with no first message carries no reason on its card at all — the
   // caller's `ok:` line and the ledger below are where it survives.
-  const spawnHeader = spawnCardHeader(escapeHtml(topicName), [shownModel, effort].filter(Boolean).map(d => escapeHtml(d!)))
+  // Only show effort on the card when it differs from the configured default — if the caller got
+  // the default (explicitly or by omission), naming it adds noise without information.
+  const cardEffort = effort && effort !== configuredSpawnEffort() ? effort : null
+  const spawnHeader = spawnCardHeader(escapeHtml(topicName), [shownModel, cardEffort].filter(Boolean).map(d => escapeHtml(d!)))
   if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg, sid)
   else void notifyBusText(fromSid, spawnHeader, sid)
   // …EXCEPT when the words are the OWNER'S. `@launch <new name> <message>` is `@name <message>` at a
@@ -15585,7 +15588,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
       + `TELEGRAM_STATE_DIR='${STATE_DIR.replace(/'/g, `'\\''`)}' `
     const explicitClaudeResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
-    const harness: HarnessProfile = agent === 'claude'
+    let harness: HarnessProfile = agent === 'claude'
       ? normalizeHarnessProfile(
           harnessOverride ??
           (explicitClaudeResume ? findSessionHarness(explicitClaudeResume) : undefined) ??
@@ -15593,6 +15596,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         )
       : { provider: 'anthropic' }
     if (agent === 'claude' && !(await harnessProviderReady(harness))) return null
+    // For non-anthropic providers, the [1m] wide-context suffix is never applied by spawnModelFlag
+    // (that path only handles Claude aliases). Carry it on the harness model itself so the provider
+    // session boots with the same 1M window native Claude sessions get.
+    if (harness.provider !== 'anthropic' && harness.provider !== 'gateway' && harness.model && supportsWideContext(harness.model) && !harness.model.endsWith(WIDE_CONTEXT_SUFFIX)) {
+      harness = { ...harness, model: wideContextModel(harness.model) }
+    }
     // A proxy/gateway model is process-start transport configuration. Never let the resumed
     // transcript's native Claude alias become a --model flag that overrides that target identity.
     if (agent === 'claude' && inherit) {
@@ -24124,6 +24133,13 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
       tfile = file
     }
   } catch {}
+  // modelDisplayName only recognises Claude/GPT tokens — alternative providers (gateway, codex, etc.)
+  // return null from both the statusline and the transcript. Fall back to the harness profile's own
+  // model name so the card shows what is actually serving the session.
+  if (!model) {
+    const harness = findSessionHarness(row.sid) ?? await paneHarnessProfile(pane).catch(() => undefined)
+    if (harness && harness.provider !== 'anthropic') model = harness.model.replace(/\[1m\]$/, '')
+  }
   // Outside the try on purpose: a session with no readable transcript still has a pane, and a pane
   // that reads working must render working. Only the transcript-fed signals go quiet without a file.
   // The CLI's own working line ("Hyperspacing… · 1m 55s"), off the capture this card already took —

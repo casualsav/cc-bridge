@@ -417,17 +417,17 @@ test('the floor is reached only when nothing is configured at all', () => {
 
 // ---- the spawn confirmation ----
 //
-// The owner named this shape to the character: `Spawned @name on Opus/High`, and nothing else beside
-// the chevron — no 🆕, no reason clause, the dials in display case joined by a slash. Nothing
+// The owner named this shape to the character: `Spawned @name on opus/high`, and nothing else beside
+// the chevron — no 🆕, no reason clause, the dials in lowercase joined by a slash. Nothing
 // automated ever reads it — it is a chat message he looks at — so this test is the only thing between
 // a refactor and a silently reworded card.
-test('the spawn card is the name and the dials, in display case, and nothing else', () => {
-  expect(spawnCardHeader('cc-bridge', ['opus', 'high'])).toBe('Spawned <b>@cc-bridge</b> on Opus/High')
-  expect(spawnCardHeader('worker', ['sonnet', 'max'])).toBe('Spawned <b>@worker</b> on Sonnet/Max')
+test('the spawn card is the name and the dials, lowercase, and nothing else', () => {
+  expect(spawnCardHeader('cc-bridge', ['opus', 'high'])).toBe('Spawned <b>@cc-bridge</b> on opus/high')
+  expect(spawnCardHeader('worker', ['sonnet', 'max'])).toBe('Spawned <b>@worker</b> on sonnet/max')
 })
 
 test('the spawn card drops what it does not have, and never invents one', () => {
-  expect(spawnCardHeader('worker', ['opus'])).toBe('Spawned <b>@worker</b> on Opus')
+  expect(spawnCardHeader('worker', ['opus'])).toBe('Spawned <b>@worker</b> on opus')
   expect(spawnCardHeader('worker', [])).toBe('Spawned <b>@worker</b>')
 })
 
