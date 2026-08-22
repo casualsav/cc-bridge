@@ -17,6 +17,7 @@ export type Decision = {
   chat: string
   title: string
   options: string[]
+  done?: Record<string, string>
   msgId: number | null
   openedAt: number
   closedAt?: number
@@ -35,8 +36,44 @@ function normalizeOptions(options?: string[]): string[] {
   return src.slice(0, 4).map(o => clip(o, 24))
 }
 
+// The past-tense form a closed card shows, for labels the owner types over and over. "Go" has no
+// natural past form of its own, so it stays "Go" rather than inventing one; anything not listed
+// falls back to the label as given, in `parseOptions` and in `open`'s own default-filling alike.
+export const PAST_FORMS: Record<string, string> = {
+  approve: 'Approved', hold: 'Held', deny: 'Denied', reject: 'Rejected',
+  yes: 'Yes', no: 'No', ship: 'Shipped', proceed: 'Proceeded', go: 'Go',
+}
+
+const HOLD_CLASS = new Set(['hold', 'held', 'wait', 'not yet'])
+
+// `"Approve|Hold"` or `"Approve=Approved|Deny=Denied"` — a label before `=` and its past form
+// after, whitespace trimmed on both sides; same ≤4 options / ≤24-char labels `normalizeOptions`
+// already enforces, so a card built either way clips identically.
+export function parseOptions(spec: string): { options: string[]; done: Record<string, string> } {
+  const parts = spec.split('|').map(o => o.trim()).filter(Boolean).slice(0, 4)
+  const options: string[] = []
+  const done: Record<string, string> = {}
+  for (const raw of parts) {
+    const eq = raw.indexOf('=')
+    const label = clip((eq >= 0 ? raw.slice(0, eq) : raw).trim(), 24)
+    const past = eq >= 0 ? clip(raw.slice(eq + 1).trim(), 24) : (PAST_FORMS[label.toLowerCase()] ?? label)
+    options.push(label)
+    done[label] = past
+  }
+  return { options, done }
+}
+
+// The suffix a closed card gets: past tense, and ⏸ rather than ✅ for a Hold-class outcome — "held"
+// is not an approval and must not read as one. `d.done` carries the past form the card was opened
+// with; a `--close` choice that wasn't one of the buttons falls back to the choice text itself.
+export function closedSuffix(d: Decision, choice: string): string {
+  const past = d.done?.[choice] ?? choice
+  const isHold = HOLD_CLASS.has(choice.toLowerCase()) || HOLD_CLASS.has(past.toLowerCase())
+  return ` — ${isHold ? '⏸' : '✅'} ${past}`
+}
+
 export type Decisions = {
-  open(input: { laneSid: string; chat: string; title: string; options?: string[]; now: number }): Decision
+  open(input: { laneSid: string; chat: string; title: string; options?: string[]; done?: Record<string, string>; now: number }): Decision
   attachMessage(id: number, msgId: number): void
   close(id: number, opts: { choice?: string; by: NonNullable<Decision['closedBy']>; now: number }): void
   listOpen(laneSid: string): Decision[]
@@ -51,10 +88,13 @@ export function createDecisions(initial: Decision[], save: (rows: Decision[]) =>
   let rows: Decision[] = [...initial]
 
   return {
-    open({ laneSid, chat, title, options, now }) {
+    open({ laneSid, chat, title, options, done, now }) {
       const id = Math.max(0, ...rows.map(r => r.id)) + 1
+      const opts = normalizeOptions(options)
+      const doneMap: Record<string, string> = {}
+      for (const o of opts) doneMap[o] = done?.[o] ?? PAST_FORMS[o.toLowerCase()] ?? o
       const row: Decision = {
-        id, laneSid, chat, title: clip(title, 80), options: normalizeOptions(options),
+        id, laneSid, chat, title: clip(title, 80), options: opts, done: doneMap,
         msgId: null, openedAt: now,
       }
       rows.push(row)

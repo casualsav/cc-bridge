@@ -106,9 +106,33 @@ test('every ending edits the one card, and all three endings go through the same
   const edit = section(daemon, 'async function editDecisionCard(', '\n// His answer, into the lane')
   expect(edit).toContain('channel.editText(')
   expect(edit).not.toContain('buttons')   // an edit that omits reply_markup is what drops the keyboard
-  expect(daemon).toContain("editDecisionCard(d, ` — ✅ ${choice}`)")
-  expect(daemon).toContain("editDecisionCard(d, choice ? ` — ${choice}` : ' — closed')")
+  expect(daemon).toContain('editDecisionCard(d, closedSuffix(d, choice))')
+  expect(daemon).toContain("editDecisionCard(d, choice ? closedSuffix(d, choice) : ' — closed')")
   expect(daemon).toContain("editDecisionCard(d, ' — expired')")
+})
+
+// ---- The tap's ordering and the latency it can now be measured against -------------------------
+
+test('the tap answers BEFORE the card edit, and edits BEFORE the delivery — nothing sits between', () => {
+  const branch = section(daemon, "if (data.startsWith('dec:')) {", "if (data.startsWith('smh:'))")
+  const answered = branch.indexOf('answerCallbackQuery({ text: choice }')
+  const edited = branch.indexOf('editDecisionCard(d, closedSuffix(d, choice))')
+  const delivered = branch.indexOf('deliverDecision(d, choice)')
+  expect(answered).toBeGreaterThan(-1)
+  expect(edited).toBeGreaterThan(answered)
+  expect(delivered).toBeGreaterThan(edited)
+})
+
+test('the branch logs a receipt at the top and the answer/edit latency once the card is closed', () => {
+  const branch = section(daemon, "if (data.startsWith('dec:')) {", "if (data.startsWith('smh:'))")
+  expect(branch).toMatch(/tap received/)
+  expect(branch).toMatch(/tap — answered \+\$\{.*\}ms, card edited \+\$\{.*\}ms/)
+  // The receipt log is the FIRST thing in the branch — before cbAuth, before anything else — so a
+  // measurement always has a t0 even when the tap turns out to be unauthorized or stale.
+  const receipt = branch.indexOf('tap received')
+  const auth = branch.indexOf('cbAuth(ctx)')
+  expect(receipt).toBeGreaterThan(-1)
+  expect(receipt).toBeLessThan(auth)
 })
 
 test('the expiry sweep runs on a timer and closes through the registry', () => {

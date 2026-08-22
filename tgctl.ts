@@ -167,10 +167,12 @@ const HELP: Record<string, string> = {
            '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.\n' +
            '  --correct "claim → truth" records ONE claim you found false: it stays under the brief, survives\n' +
            '  every refresh, and goes into the next scout — cheaper than a re-scout and it does not lose the rest.',
-  decide:  'tg decide "<title>" [--options "Approve|Hold"] | tg decide --close <id> [choice] | tg decide --list\n' +
+  decide:  'tg decide "<title>" [--options "Approve=Approved|Deny=Denied"] | tg decide --close <id> [choice] | tg decide --list\n' +
            '  put ONE decision in front of the owner: a card in his DM whose title is the question and whose\n' +
            '  buttons ARE the options (Approve | Hold unless you name your own, up to four). Nothing else is\n' +
-           '  on the card — the tap is the whole answer.\n' +
+           '  on the card — the tap is the whole answer. A closed card shows the PAST TENSE — `label=past form`\n' +
+           '  (e.g. `--options "Approve=Approved|Deny=Denied"`); known labels (Approve, Hold, Deny, Reject, Ship,\n' +
+           '  Proceed, Yes, No, Go) get one for free, `"Approve|Hold"` still works with no `=` at all.\n' +
            '  His tap comes back as a <tg decision=N choice=…> block; a native reply to the card arrives with\n' +
            '  `decides=N` in its envelope, and a bare "Approved" while exactly one is open carries the hint.\n' +
            '  Only a DM chat lane can open one — a session with no chat of its own has nowhere to put the card.\n' +
