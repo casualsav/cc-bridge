@@ -2998,7 +2998,17 @@ function renderAccounts() {
   body.querySelectorAll('[data-acc-move]').forEach(b => b.onclick = () => accountAction({ action:'move', id:b.closest('[data-account]').dataset.account, dir:b.dataset.accMove }));
   // The role's account. Same `{action:'default'}` POST the retired per-row buttons sent — and so the
   // same `selectRoleAccount` core Telegram's `rp:set` runs, live chat switch included.
-  defs.querySelector('[data-acc-runs-on]')?.addEventListener('change', e => accountAction({ action:'default', role, id:e.target.value }));
+  // A CHAT change restarts the lane he is talking to, and a select is easier to hit by accident than
+  // the button it replaced — so it confirms first (the owner, 2026-08-22), and a cancel puts the select
+  // back where it was, because a control showing a value the daemon never received is a lie. The
+  // CODING role confirms nothing: its default only reaches new spawns.
+  defs.querySelector('[data-acc-runs-on]')?.addEventListener('change', e => {
+    const picked = (e.target.selectedOptions[0]?.textContent || e.target.value).replace(/^[✓●○] /, '');
+    if (role === 'chat' && !confirm('Switch your chat lane to ' + picked + ' now?\n\nThe running lane restarts on that account, keeping this conversation.')) {
+      e.target.value = defAcc; return;
+    }
+    accountAction({ action:'default', role, id:e.target.value });
+  });
   body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
   body.querySelectorAll('[data-acc-remove]').forEach(b => b.onclick = () => { if (confirm('Remove this provider account? Credentials stay out of the browser and its saved key is no longer used.')) accountAction({ action:'remove', id:b.closest('[data-account]').dataset.account }); });
   // The two-step Claude-account removal: ask the daemon what would go, show THAT, then confirm. The

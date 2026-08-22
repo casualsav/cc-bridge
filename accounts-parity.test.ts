@@ -85,6 +85,22 @@ test('(c) the per-row role buttons are gone, and the role tab carries the Runs-o
   expect(page).toContain('const opts = (v.roleOptions || []).slice()')
 })
 
+test('(c) a CHAT change confirms before the live restart, and a cancel puts the select back', () => {
+  // Owner, 2026-08-22 ("Yes to the confirm"): the chat role's default restarts the lane he is talking
+  // to, and a select is easier to hit by accident than the button it replaced. Coding confirms
+  // nothing — its default reaches new spawns only. The revert is load-bearing: a select left showing
+  // a value the daemon never received is a lie the next glance believes.
+  const at = page.indexOf("defs.querySelector('[data-acc-runs-on]')")
+  expect(at).toBeGreaterThan(0)
+  const handler = page.slice(at, page.indexOf('\n  });', at))   // the listener's own close, not the POST's
+  expect(handler).toContain("role === 'chat' && !confirm(")
+  expect(handler).toContain('e.target.value = defAcc; return;')
+  expect(handler).toContain("accountAction({ action:'default', role, id:e.target.value })")
+  // Control for the shape: the confirm is gated on the ROLE, so a coding change reaches the POST
+  // with no dialog in the way — assert the gate is not a bare confirm.
+  expect(handler).not.toMatch(/\n\s*if \(!confirm\(/)
+})
+
 test('(c) the app row states the SET, and its buttons act on the members', () => {
   const at = page.indexOf('function renderAccounts()')
   expect(at).toBeGreaterThan(0)
