@@ -129,7 +129,7 @@ export function gatewayProbeRequest(
     // The `[1m]` suffix is OUR window selector, not a character of the upstream model id: Claude Code
     // strips it before sending its own requests, and the probe must too, or the upstream 400s on
     // `deepseek-v4-flash[1m]` and every spawn of that gateway is refused at preflight.
-    body: { model: profile.model.replace(/\[1m\]$/, ''), max_tokens: 1, messages: [{ role: 'user', content: 'Reply OK' }] },
+    body: { model: profile.model.replace(/\[1m\]$/, ''), max_tokens: 16, messages: [{ role: 'user', content: 'Reply OK' }] },
   }
 }
 

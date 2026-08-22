@@ -110,7 +110,7 @@ test('gateway probes use the Anthropic Messages contract and configured auth', (
       authorization: 'Bearer secret-token',
     },
     body: {
-      model: 'MiniMax-M2.5', max_tokens: 1,
+      model: 'MiniMax-M2.5', max_tokens: 16,
       messages: [{ role: 'user', content: 'Reply OK' }],
     },
   })
