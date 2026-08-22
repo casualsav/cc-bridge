@@ -3,6 +3,7 @@ import type { GatewayDefinition, GatewayProvider } from './harness-gateway.ts'
 import { parseHarnessSpec, type HarnessProfile } from './harness-provider.ts'
 import { ROLE_BUILTIN_PROVIDERS } from './role-provider.ts'
 import { chainGroups, hopKey } from './failover-chain.ts'
+import { planAccountGroup, type AccountGroupPlan } from './account-group.ts'
 export { activeFailoverChain } from './failover-chain.ts'
 
 export type ProviderId = 'claude' | 'openai' | 'gemini' | 'deepseek' | 'custom' | 'proxy'
@@ -31,6 +32,22 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
 
 export type GatewayIdentity = { provider: Exclude<ProviderId, 'claude'>; auth: Exclude<ProviderAuth, 'native'>; label: string }
 
+// What a Claude row is CALLED, for every surface that draws one. ONE writer, because the Telegram
+// panel and the Mini App render the same row and a row named two ways is the drift the 2026-08-21
+// mirror ruling exists to prevent (`accountRowLabel` in daemon.ts delegates here).
+//
+// A row is a SUBSCRIPTION, so when it stands for more than one config dir the identity leads and the
+// dirs follow in parentheses: he reads the list to count the accounts he has, and the dirs are what
+// the row's buttons will act on, so neither may be left off. A single-dir row keeps the NAME first
+// (`main — suchag@gmail.com · Max 20x`) — its dir is the row, and a trailing `(main)` would say that
+// twice. An unreadable identity (or one that is just the dir's own name) leaves the names alone,
+// never a dangling separator.
+export function accountGroupLabel(names: string[], identity: string | null | undefined): string {
+  const first = names[0] ?? ''
+  if (names.length > 1) return identity ? `${identity} (${names.join(', ')})` : names.join(', ')
+  return identity && identity !== first ? `${first} — ${identity}` : first
+}
+
 export function inferGatewayIdentity(name: string, def: GatewayDefinition): GatewayIdentity {
   const low = `${name} ${def.baseUrl}`.toLowerCase()
   const provider: GatewayProvider = def.provider
@@ -44,6 +61,8 @@ export function inferGatewayIdentity(name: string, def: GatewayDefinition): Gate
 }
 
 
+export type ProviderAccountMember = { name: string; ready: boolean }
+
 export type ProviderAccountView = {
   id: string
   provider: ProviderId
@@ -56,9 +75,14 @@ export type ProviderAccountView = {
   order: number
   model: string | null
   models: string[]
-  // The config dir(s) this row stands for. Always exactly one since rows went per-account
-  // (v0.5.201) — kept as a list because the shape is part of the view every consumer reads.
-  members: string[]
+  // The config dir(s) this row stands for, each with its OWN sign-in state. A Claude row is a
+  // SUBSCRIPTION again (owner's ruling, 2026-08-21), so it can carry several — and the per-member
+  // state is what closes the G5 defect that un-grouped these rows in v0.5.201: every button acts on
+  // the members the plan names, never on the first one.
+  members: ProviderAccountMember[]
+  // The SET's state, from `planAccountGroup` — the one thing a collapsed row must never round to
+  // "in". `mixed` is a row some of whose dirs are signed out, and `members` names which.
+  state: AccountGroupPlan['state']
   // A row a ROLE can point at that is NOT a failover hop — the proxy built-ins. They are transport
   // for a session the bridge launches, never a destination the chain can fail over TO, so every
   // consumer that ranks, moves or counts the chain must skip them and only the role dials may read
@@ -68,6 +92,12 @@ export type ProviderAccountView = {
 
 export type ProviderAccountsView = {
   accounts: ProviderAccountView[]
+  // WHAT A ROLE MAY POINT AT, which is not what the failover list SHOWS. A role binds to a config
+  // dir, so this is one row per DIR (plus the gateways) while `accounts` collapses the dirs of one
+  // subscription into a single failover row. Both come off this one projection so the Telegram
+  // drill-in and the app's "Runs on" select cannot list different things; `defaults` are ids from
+  // HERE, never from `accounts`.
+  roleOptions: ProviderAccountView[]
   activeCount: number
   defaults: { chat: string; code: string }
   catalog: readonly ProviderCatalogEntry[]
@@ -105,6 +135,14 @@ type ProjectionInput = {
    * more and the key this used to carry had no reader left.
    */
   labelOf?: (accountName: string) => string | null
+  /**
+   * Which Claude config dirs are ONE row. Absent ⇒ one row per dir, which is what the pure tests and
+   * any consumer with no identity reader get. The daemon passes `accountGroupKey` — the identity-keyed
+   * function the Telegram panel already groups by — so both surfaces collapse the same dirs into the
+   * same rows. Two grouping functions is exactly how the panel and the app came to disagree about how
+   * many accounts he has.
+   */
+  groupOf?: (accountName: string) => string
 }
 
 export function projectProviderAccounts(input: ProjectionInput): ProviderAccountsView {
@@ -113,59 +151,76 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
     : Math.max(0, Math.min(input.chain.length, Math.trunc(input.activeCount)))
   const claude = new Map(input.claudeAccounts.map(a => [a.name, a]))
   const labelOf = input.labelOf
-  // Keyed the same way for every consumer, so the panel, the Mini App and `tg readout providers`
-  // cannot disagree about what counts as one row.
-  // ONE ROW PER ACCOUNT since v0.5.201 (owner's ruling, 2026-08-21) — keyed on the NAME, never the
-  // subscription identity, so two config dirs sharing one login are two rows with their own state
-  // and their own actions. `labelOf` is still passed and still used, for the LABEL below: it is
-  // what keeps two separate logins apart once the name no longer implies the subscription.
-  const groupKey = (name: string): string => `claude:${name}`
+  // ONE ROW PER SUBSCRIPTION when the caller can tell them apart (owner's ruling, 2026-08-21: "if
+  // both of them are on one account, it should only have the one account listed"). The daemon hands
+  // in `accountGroupKey`, the same function the Telegram panel groups by, so the two surfaces cannot
+  // count his accounts differently. With no `groupOf` every dir is its own row, which is the shape a
+  // consumer with no identity reader gets — missing evidence may split rows, never merge them.
+  const groupKey = (name: string): string => input.groupOf?.(name) ?? `claude:${name}`
   const chainIndexOf = new Map(input.chain.map((hop, i) => [hop, i] as const))
-  const chainRows = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
-    const hop = group.hops[0]!
-    const chainIndex = chainIndexOf.get(hop) ?? 0
-    if (hop.kind === 'claude') {
-      const members = group.hops.map(h => claude.get(h.account || '')).filter((x): x is { name: string; ready: boolean } => !!x)
-      if (!members.length) return []
-      // THE ACCOUNT NAME LEADS. `members` is length 1 now, and `main` and `chat` share a
-      // subscription — so a subscription-only label would print two identical rows, the failure the
-      // old grouping existed to prevent. The identity stays as the suffix: it is what distinguishes
-      // two SEPARATE logins once the name no longer implies one.
-      const identity = labelOf?.(members[0]!.name)
-      const label = identity ? `${members[0]!.name} — ${identity}` : `Claude · ${members[0]!.name}`
-      return [{
-        id: hopKey(hop), provider: 'claude', providerLabel: 'Claude native', label, auth: 'native', authLabel: 'Native login',
-        // One dir per row now, so this IS that dir's own state — which is what makes the row's
-        // colour honest, and what lets Log out / Sign in target it unambiguously.
-        ready: members.some(m => m.ready), active: chainIndex < activeBoundary, order: 0, model: null,
-        models: ['opus', 'fable', 'sonnet', 'haiku'], members: members.map(m => m.name),
-      }]
-    }
-    if (hop.kind !== 'gateway') return []
+
+  // The two row builders. A ROW is a set of Claude dirs or one gateway; the failover list passes a
+  // whole group and the role list passes one dir at a time, so both lists come off one definition.
+  const claudeRow = (hop: FailoverHop, members: ProviderAccountMember[], chainIndex: number): ProviderAccountView[] => {
+    if (!members.length) return []
+    const plan = planAccountGroup(members.map(m => ({ name: m.name, loggedIn: m.ready })))
+    return [{
+      id: hopKey(hop), provider: 'claude', providerLabel: 'Claude native',
+      label: accountGroupLabel(members.map(m => m.name), labelOf?.(members[0]!.name)),
+      auth: 'native', authLabel: 'Native login',
+      // ALL of them, never `some`: a row whose dirs disagree is `mixed`, and rounding that to green
+      // is the G5 defect (v0.5.201) — the state and the buttons both read this.
+      ready: plan.state === 'in', state: plan.state,
+      active: chainIndex < activeBoundary, order: 0, model: null,
+      models: ['opus', 'fable', 'sonnet', 'haiku'], members,
+    }]
+  }
+  const gatewayRow = (hop: FailoverHop, chainIndex: number): ProviderAccountView[] => {
     const name = hop.name || ''
     const def = input.gateways[name]
     if (!def) return []
     const identity = inferGatewayIdentity(name, def)
+    const ready = input.gatewayReady[name] === true
     return [{
       id: hopKey(hop), provider: identity.provider, providerLabel: PROVIDER_CATALOG.find(p => p.id === identity.provider)?.label ?? identity.provider,
       label: identity.label, auth: identity.auth,
       authLabel: identity.auth === 'oauth' ? 'OAuth' : identity.auth === 'api-key' ? 'API key' : 'No key',
-      ready: input.gatewayReady[name] === true,
+      ready, state: planAccountGroup([{ name, loggedIn: ready }]).state,
       active: chainIndex < activeBoundary, order: 0, model: def.model.replace(/\[1m\]$/, ''),
       models: [...new Set((input.models?.[name] ?? [def.model]).map(x => x.replace(/\[1m\]$/, '')))],
-      members: [name],
+      members: [{ name, ready }],
     }]
+  }
+
+  const chainRows = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
+    const hop = group.hops[0]!
+    const chainIndex = chainIndexOf.get(hop) ?? 0
+    if (hop.kind === 'claude') {
+      return claudeRow(hop, group.hops.map(h => claude.get(h.account || '')).filter((x): x is ProviderAccountMember => !!x), chainIndex)
+    }
+    return hop.kind === 'gateway' ? gatewayRow(hop, chainIndex) : []
   })
   const accounts = [...chainRows, ...proxyRows(input.proxyReady)].map((account, order) => ({ ...account, order }))
   const activeCount = accounts.filter(account => account.active).length
-  const fallback = accounts[0]?.id ?? 'claude:main'
-  // A role default still points at a CONFIG DIR (`claude:chat`); the row it belongs to is now the
-  // account. Resolve it to that row's id or the Chat/Coding buttons lose their selected state — the
-  // stored value is untouched, only what the surfaces highlight.
-  const rowOf = new Map(input.chain.map(hop => [hopKey(hop), hop.kind === 'claude' ? groupKey(hop.account || '') : hopKey(hop)] as const))
-  const byGroup = new Map(chainGroups(input.chain, groupKey).map(g => [g.key, hopKey(g.hops[0]!)] as const))
-  const toRow = (id: string | null | undefined): string => (id && byGroup.get(rowOf.get(id) ?? '')) || id || fallback
-  return { accounts, activeCount, defaults: { chat: toRow(input.chatDefault), code: toRow(input.codeDefault) }, catalog: PROVIDER_CATALOG, auto: input.auto === true }
+  // UNGROUPED, because a role binds to a config DIR: `claude:chat` is a thing a role can be, and it
+  // is not a row on the failover list above. No proxy built-ins here either — a role picks from what
+  // he ADDED (his ruling, 2026-08-21), and the projection is only offered the ones a caller passes.
+  const roleOptions = input.chain.flatMap((hop, chainIndex): ProviderAccountView[] => {
+    if (hop.kind === 'claude') {
+      const member = claude.get(hop.account || '')
+      return member ? claudeRow(hop, [member], chainIndex) : []
+    }
+    return hop.kind === 'gateway' ? gatewayRow(hop, chainIndex) : []
+  }).map((option, order) => ({ ...option, order }))
+  // The stored value IS a dir id and stays one: remapping it to the row that CONTAINS it (as this
+  // did while rows were the only list) makes `claude:chat` render as `main`, which is the panel and
+  // the app answering "what does chat run on" with a different account than the spawn will use.
+  const fallback = roleOptions[0]?.id ?? accounts[0]?.id ?? 'claude:main'
+  return {
+    accounts, roleOptions, activeCount,
+    defaults: { chat: input.chatDefault || fallback, code: input.codeDefault || fallback },
+    catalog: PROVIDER_CATALOG, auto: input.auto === true,
+  }
 }
 
 // What a built-in proxy provider IS, in the words the owner would use for it — the picker showed
@@ -187,7 +242,8 @@ function proxyRows(ready: Record<string, boolean> | undefined): ProviderAccountV
       id: `proxy:${name}`, provider: 'proxy', providerLabel: PROXY_LABEL[name] ?? name,
       label: model ? `${name} · ${model}` : name,
       auth: 'oauth', authLabel: 'CLI login', ready: ready[name] === true,
-      active: false, order: 0, model: null, models: [], members: [name], roleOnly: true,
+      state: planAccountGroup([{ name, loggedIn: ready[name] === true }]).state,
+      active: false, order: 0, model: null, models: [], members: [{ name, ready: ready[name] === true }], roleOnly: true,
     }
   })
 }

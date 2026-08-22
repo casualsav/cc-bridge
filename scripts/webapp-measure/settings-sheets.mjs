@@ -97,6 +97,37 @@ const settingsFixture = (write, rows = ROWS) => ({
 
 const GH = { installed: true, accounts: [{ user: "casualsav", host: "github.com", active: true }, { user: "alt", host: "github.com", active: false }], login: { active: false } };
 
+// ---- the /api/provider-accounts payload, as the projection now builds it -----------------------
+// A Claude row is a SUBSCRIPTION (owner's mirror ruling, 2026-08-21), so it carries the config dirs
+// behind it with each dir's OWN state (`members`) and the set's state (`state`). The row's dot, its
+// meta line and every one of its buttons are drawn from those two and nothing else — a fixture that
+// omits them renders a grey row with no actions, which is why they are spelled out here rather than
+// defaulted. `dirs` is [name, signedIn] pairs.
+const CL = (name, dirs = [[name, true]], over = {}) => ({
+  id: "claude:" + name, provider: "claude", providerLabel: "Claude", authLabel: "subscription",
+  label: name, models: ["opus"], model: "opus",
+  members: dirs.map(([n, ready]) => ({ name: n, ready })),
+  ready: dirs.every(([, r]) => r),
+  state: dirs.every(([, r]) => r) ? "in" : dirs.some(([, r]) => r) ? "mixed" : "out",
+  ...over,
+});
+const GW = (name, label, over = {}) => ({
+  id: "gateway:" + name, provider: "deepseek", providerLabel: label, authLabel: "API key", label,
+  ready: true, state: "in", members: [{ name, ready: true }],
+  models: ["deepseek-chat"], model: "deepseek-chat", ...over,
+});
+// `roleOptions` is the per-CONFIG-DIR list a role picks from — the daemon's own expansion of the
+// rows above, so a fixture cannot offer the role a subscription id it could never store.
+const roleOptionsOf = accounts => accounts.filter(a => !a.roleOnly).flatMap(a =>
+  a.id.startsWith("claude:")
+    ? a.members.map(m => ({ id: "claude:" + m.name, label: m.name, ready: m.ready, members: [m] }))
+    : [{ id: a.id, label: a.label, ready: a.ready, model: a.model, members: a.members }]);
+const accView = (accounts, over = {}) => ({
+  accounts, roleOptions: roleOptionsOf(accounts),
+  activeCount: accounts.filter(a => !a.roleOnly).length,
+  defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false, ...over,
+});
+
 const b = await chromium.launch();
 const open = async (write, gh = GH, rows = ROWS) => {
   const p = await b.newPage({ viewport: { width: 390, height: 812 }, deviceScaleFactor: 2 });
@@ -283,24 +314,24 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // same POST — only the container and the repaint differ. Served only when Codex is set up.
 {
   const p = await open(true);
-  const accounts = codex => ({
-    accounts: [{ id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" }],
-    activeCount: 1, defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false, ...(codex ? { codex } : {}),
-  });
+  const accounts = codex => accView([CL("main")], codex ? { codex } : {});
   await p.evaluate(a => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? { write: true, rows: [], settings: {} } : {}; },
     accounts({ model: "gpt-5.6-sol", effort: "high", efforts: ["default", "low", "medium", "high", "xhigh"] }));
   await p.evaluate(() => openAccounts()).catch(() => {});
   await p.waitForTimeout(300);
-  const names = await p.$$eval("#accbody .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
+  // DIRECT children only: the role block (`#acctdefaults`) is a div inside this same body and now
+  // leads with a "Runs on" row of its own, so an unscoped `.setrow` reads two components as one and
+  // — worse — `selectOption` below would drive the role picker instead of the Codex effort.
+  const names = await p.$$eval("#accbody > .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
   ok(JSON.stringify(names) === JSON.stringify(["✳️ Codex model", "✳️ Codex effort"]),
     `the accounts sheet carries both Codex dials (got ${JSON.stringify(names)})`);
-  const f = await p.$("#accbody input.ro.edit");
+  const f = await p.$("#accbody > .setrow input.ro.edit");
   ok(await f?.inputValue() === "gpt-5.6-sol", "the Codex model field carries the served value");
   if (f) { await f.fill("gpt-5.6-mini"); await f.evaluate(n => n.blur()); }
   await p.waitForTimeout(150);
   const cm = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "codexModel");
   ok(!!cm && cm.body.value === "gpt-5.6-mini", `the Codex field posts codexModel (got ${JSON.stringify(cm && cm.body)})`);
-  await p.selectOption("#accbody .setrow select", "low", { timeout: 2000 }).catch(() => {});
+  await p.selectOption("#accbody > .setrow select", "low", { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(150);
   const ce = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "codexEffort");
   ok(!!ce && ce.body.value === "low", `the Codex effort select posts codexEffort (got ${JSON.stringify(ce && ce.body)})`);
@@ -309,7 +340,7 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   await p.evaluate(a => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? { write: true, rows: [], settings: {} } : {}; }, accounts(null));
   await p.evaluate(() => openAccounts()).catch(() => {});
   await p.waitForTimeout(250);
-  ok((await p.$$("#accbody .setrow")).length === 0, "no Codex on the box: the accounts sheet shows no Codex dials");
+  ok((await p.$$("#accbody > .setrow")).length === 0, "no Codex on the box: the accounts sheet shows no Codex dials");
   await p.close();
 }
 
@@ -319,12 +350,9 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // a row stood for two config dirs.
 {
   const p = await open(true);
-  await p.evaluate(() => {
-    window.api = async q => q.includes("/api/provider-accounts") ? {
-      accounts: [{ id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" },
-                 { id: "claude:work", label: "work", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" }],
-      activeCount: 2, defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false,
-    } : q.includes("/api/settings") ? { write: true, rows: [], settings: {} } : {};
+  await p.evaluate(a => {
+    window.api = async q => q.includes("/api/provider-accounts") ? a
+      : q.includes("/api/settings") ? { write: true, rows: [], settings: {} } : {};
     window.writeOp = async (path, body) => {
       window.__posts.push({ path, body });
       return body.action === "remove-claude-plan"
@@ -333,7 +361,7 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
     };
     window.confirm = m => { window.__confirm = m; return window.__answer; };
     window.prompt = () => window.__prompt;
-  });
+  }, accView([CL("main"), CL("work")]));
   await p.evaluate(() => { window.__answer = false; window.__prompt = null; return openAccounts(); }).catch(() => {});
   await p.waitForTimeout(300);
 
@@ -375,13 +403,9 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 // second control offering Anthropic aliases the account cannot serve.
 {
   const p = await open(true);
-  const accountsFor = codeDefault => ({
-    accounts: [
-      { id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus", "sonnet"], model: "opus" },
-      { id: "gateway:deepseek", label: "DeepSeek", providerLabel: "DeepSeek", authLabel: "API key", ready: true, models: ["deepseek-chat", "deepseek-reasoner"], model: "deepseek-chat" },
-    ],
-    activeCount: 2, defaults: { chat: "claude:main", code: codeDefault }, catalog: [], auto: false,
-  });
+  const accountsFor = codeDefault => accView(
+    [CL("main", [["main", true]], { models: ["opus", "sonnet"] }), GW("deepseek", "DeepSeek", { models: ["deepseek-chat", "deepseek-reasoner"] })],
+    { defaults: { chat: "claude:main", code: codeDefault } });
   // Re-stub, then re-open: the sheet reads BOTH endpoints on every repaint, so a fixture change is
   // only in effect once it has been read again.
   const load = async (codeDefault, write = true) => {
@@ -391,6 +415,10 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
     await p.waitForTimeout(300);
   };
   const labels = () => p.$$eval("#acctdefaults .setrow .lbl > div:first-child", ns => ns.map(n => n.textContent.trim()));
+  // The role's ACCOUNT is the block's first row since v0.5.213 — "which account" and "what it runs
+  // on" are one question, so the picker sits at the head of the dials it governs rather than on each
+  // failover row, which stands for a subscription and could not name a config dir.
+  const runsOn = () => p.$$eval("#acctdefaults [data-acc-runs-on] option", ns => ns.map(n => n.textContent.trim()));
   // Per row: its control, or — for a read-only row — the value it displays. A row's KIND is the
   // claim here, so "no select" and "the gateway's model is named" are answered by one read.
   const kinds = () => p.$$eval("#acctdefaults .setrow", rs => rs.map(r =>
@@ -399,15 +427,27 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   // (b) THE CODING TAB, defaulting to a gateway: five dials, and the model one is read-only.
   await load("gateway:deepseek");
   const code = await labels(), codeKinds = await kinds();
-  ok(JSON.stringify(code) === JSON.stringify(["Coding session model", "Coding session effort", "Coding session mode", "Auto — agent spawns pick", "Fable for agents"]),
-    `the coding tab shows the coding role's five dials, in order (got ${JSON.stringify(code)})`);
-  ok(JSON.stringify(codeKinds) === JSON.stringify(["deepseek-chat", "select", "select", "toggle", "select"]),
+  ok(JSON.stringify(code) === JSON.stringify(["Runs on", "Coding session model", "Coding session effort", "Coding session mode", "Auto — agent spawns pick", "Fable for agents"]),
+    `the coding tab leads with Runs on, then the coding role's five dials (got ${JSON.stringify(code)})`);
+  ok(JSON.stringify(codeKinds) === JSON.stringify(["select", "deepseek-chat", "select", "select", "toggle", "select"]),
     `a gateway default: the model row NAMES that account's model and carries no select (got ${JSON.stringify(codeKinds)})`);
   const head = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
-  ok(head.includes("Coding agent defaults") && head.includes("DeepSeek"),
-    `the block's header names the role and the provider it runs on (got ${JSON.stringify(head)})`);
-  // Same keys, same POST as any other settings control — only the container differs.
-  const eff = (await p.$$("#acctdefaults .setrow select"))[0];
+  ok(head.includes("Coding agent defaults") && !head.includes("Runs on"),
+    `the header names the role, and does NOT restate what the Runs-on row below it controls (got ${JSON.stringify(head)})`);
+  // PER CONFIG DIR plus the gateways — the id space a role default is stored in. The failover list
+  // above collapses `main`/`chat` into one row, so reading it here would offer a role an id it
+  // cannot hold. ✓ marks the current pick, ● / ○ is Telegram's own readiness glyph.
+  const opts = await runsOn();
+  ok(JSON.stringify(opts) === JSON.stringify(["● main", "✓ DeepSeek"]),
+    `Runs on lists every role option, current one marked (got ${JSON.stringify(opts)})`);
+  await p.selectOption("#acctdefaults [data-acc-runs-on]", "claude:main", { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(150);
+  const dp = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.action === "default");
+  ok(!!dp && dp.body.id === "claude:main" && dp.body.role === "code",
+    `Runs on posts default/claude:main for the selected role (got ${JSON.stringify(dp && dp.body)})`);
+  // Same keys, same POST as any other settings control — only the container differs. Index 1, since
+  // the Runs-on select is index 0 and is not a settings key at all.
+  const eff = (await p.$$("#acctdefaults .setrow select"))[1];
   if (eff) await eff.selectOption("low").catch(() => {});
   await p.waitForTimeout(150);
   const se = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "spawnEffort");
@@ -416,27 +456,28 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   // (c) THE CONTROL for the check above: move the coding default back to a claude: account and the
   // select must come back. Without it, "no select" passes on a block that renders nothing at all.
   await load("claude:main");
-  ok((await kinds())[0] === "select", `a claude: default brings the model SELECT back (got ${JSON.stringify(await kinds())})`);
+  ok((await kinds())[1] === "select", `a claude: default brings the model SELECT back (got ${JSON.stringify(await kinds())})`);
 
   // (a) THE CHAT TAB: its own three dials, model included — its default is a claude: account.
   await p.click('[data-acc-role="chat"]', { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(300);
   const chat = await labels();
-  ok(JSON.stringify(chat) === JSON.stringify(["Chat agent model", "Chat agent effort", "Chat agent mode"]),
-    `the chat tab shows the chat role's three dials, in order (got ${JSON.stringify(chat)})`);
-  ok((await kinds())[0] === "select", "the chat model row carries a select");
+  ok(JSON.stringify(chat) === JSON.stringify(["Runs on", "Chat agent model", "Chat agent effort", "Chat agent mode"]),
+    `the chat tab shows Runs on and the chat role's three dials, in order (got ${JSON.stringify(chat)})`);
+  ok((await kinds())[1] === "select", "the chat model row carries a select");
   const chead = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
-  ok(chead.includes("Chat agent defaults") && chead.includes("main"), `the header follows the tab (got ${JSON.stringify(chead)})`);
+  ok(chead.includes("Chat agent defaults"), `the header follows the tab (got ${JSON.stringify(chead)})`);
+  // …and so does the picker: the chat role's own default is marked, not the coding role's.
+  ok(JSON.stringify(await runsOn()) === JSON.stringify(["✓ main", "● DeepSeek"]),
+    `Runs on follows the tab (got ${JSON.stringify(await runsOn())})`);
   await p.close();
 }
 {
   // Read-only reaches the new container too — the write gate is the /api/settings read the sheet
   // now takes itself, so it has to be re-proved here rather than inherited from the screen.
   const p = await open(false);
-  await p.evaluate(s => { window.api = async q => q.includes("/api/provider-accounts") ? {
-    accounts: [{ id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" }],
-    activeCount: 1, defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false,
-  } : q.includes("/api/settings") ? s : {}; }, settingsFixture(false));
+  await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
+    [accView([CL("main")]), settingsFixture(false)]);
   await p.evaluate(() => openAccounts()).catch(() => {});
   await p.waitForTimeout(300);
   const operable = await p.$$eval("#acctdefaults .setrow", rs => rs.filter(r => {
@@ -457,17 +498,12 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
 {
   const p = await open(true);
   const PROXIES = [
-    { id: "proxy:codex", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: true, label: "OpenAI subscription" },
-    { id: "proxy:grok", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: false, label: "xAI subscription" },
+    { id: "proxy:codex", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: true, state: "in", members: [{ name: "codex", ready: true }], label: "OpenAI subscription" },
+    { id: "proxy:grok", provider: "proxy", roleOnly: true, active: false, model: null, models: [], ready: false, state: "out", members: [{ name: "grok", ready: false }], label: "xAI subscription" },
   ];
-  const withProxies = codeDefault => ({
-    accounts: [
-      { id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" },
-      { id: "gateway:deepseek", label: "DeepSeek", providerLabel: "DeepSeek", authLabel: "API key", ready: true, models: ["deepseek-chat"], model: "deepseek-chat" },
-      ...PROXIES,
-    ],
-    activeCount: 2, defaults: { chat: "claude:main", code: codeDefault }, catalog: [], auto: false,
-  });
+  const withProxies = codeDefault => accView(
+    [CL("main"), GW("deepseek", "DeepSeek"), ...PROXIES],
+    { defaults: { chat: "claude:main", code: codeDefault } });
   const load = async codeDefault => {
     await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
       [withProxies(codeDefault), settingsFixture(true)]);
@@ -487,36 +523,34 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   ok(dividers.length === 1 && dividers[0] === "Inactive · none",
     `every account participates, so the cut-off divider does NOT appear (got ${JSON.stringify(dividers)})`);
 
-  // The section of their own, and its rows: role buttons when ready, and nothing that ranks,
-  // re-models or removes them.
+  // The section of their own, and its rows: STATE ONLY since v0.5.213, and nothing that ranks,
+  // re-models or removes them. The role pair left these rows with every other row's — choosing what
+  // a role runs on is one control under the role's own tab, not a writer per row.
   const headers = await p.$$eval("#accbody .accttop .copy", ns => ns.map(n => n.textContent.trim()));
   ok(headers.some(h => h.startsWith("Built-in providers") && h.includes("Role targets only — not part of failover")),
     `the built-in section is headed and says what it is (got ${JSON.stringify(headers)})`);
   const row = async (id, sel) => (await p.$$(`[data-account="${id}"] ${sel}`)).length;
-  ok(await row("proxy:codex", "[data-acc-default]") === 2, "a READY built-in offers both role buttons");
-  ok(await row("proxy:grok", "[data-acc-default]") === 0, "a signed-out built-in offers no role button");
+  ok((await p.$$("[data-acc-default]")).length === 0, "no row on the sheet carries a per-row role button any more");
   const junk = (await row("proxy:codex", "[data-acc-move]")) + (await row("proxy:codex", "[data-acc-model]"))
-    + (await row("proxy:codex", "[data-acc-key]")) + (await row("proxy:codex", "[data-acc-remove]"));
-  ok(junk === 0, `a built-in row carries no rank, model, key or forget control (got ${junk})`);
-  // Scoped to `.identity` — the row's "Default for:" caption wears .acctmeta too, like every other
-  // row's does.
+    + (await row("proxy:codex", "[data-acc-key]")) + (await row("proxy:codex", "[data-acc-remove]"))
+    + (await row("proxy:codex", "[data-acc-signin]")) + (await row("proxy:codex", "[data-acc-logout]"));
+  ok(junk === 0, `a built-in row carries no rank, model, key, forget or login control (got ${junk})`);
+  // Scoped to `.identity`, which is where a row's own state line lives.
   const metas = await p.$$eval('[data-account^="proxy:"] .identity .acctmeta', ns => ns.map(n => n.textContent.trim()));
   ok(JSON.stringify(metas) === JSON.stringify(["Signed in", "Needs sign-in"]), `each built-in states its own sign-in state (got ${JSON.stringify(metas)})`);
-  // And the role buttons are live — the same handler every other row's are bound by.
-  await p.click('[data-account="proxy:codex"] [data-acc-default="code"]', { timeout: 2000 }).catch(() => {});
-  await p.waitForTimeout(150);
-  const d = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.action === "default");
-  ok(!!d && d.body.id === "proxy:codex" && d.body.role === "code", `tapping Coding posts default/proxy:codex (got ${JSON.stringify(d && d.body)})`);
 
-  // CONTROL: a built-in AS the role's default. accountLabel searches every served row, so the block
-  // must name it — "Not set" here would mean the role tile and this header disagree about what the
-  // role runs on, which is the one thing this sheet exists to say.
+  // CONTROL: a built-in AS the role's default. It is not in `roleOptions` (a role picks from what he
+  // ADDED), so the Runs-on select must still NAME it — a picker that silently selected somebody
+  // else's row would report the wrong account as the one the role runs on, which is the one thing
+  // this sheet exists to say.
   await load("proxy:codex");
-  const head = await p.$eval("#acctdefaults .accttop", n => n.textContent).catch(() => "");
-  ok(head.includes("Runs on OpenAI subscription") && !head.includes("Not set"),
-    `a built-in default is NAMED in the block's header (got ${JSON.stringify(head)})`);
-  const sub = await p.$eval("#acctdefaults .setrow .sub", n => n.textContent.trim()).catch(() => "");
-  ok(sub === "set by the provider", `a built-in has no model control anywhere, and the row says so (got ${JSON.stringify(sub)})`);
+  // Guarded, like every other read in this file: on a page with no Runs-on select at all the
+  // unguarded form throws and hides every check after it — which is exactly what a control run is.
+  const kept = await p.$$eval("#acctdefaults [data-acc-runs-on] option", ns => ns[0] ? [ns[0].textContent.trim(), ns[0].selected] : []).catch(() => []);
+  ok(JSON.stringify(kept) === JSON.stringify(["✓ OpenAI subscription", true]),
+    `a default this box no longer offers is still named and still selected (got ${JSON.stringify(kept)})`);
+  const sub = await p.$$eval("#acctdefaults .setrow .sub", ns => ns.map(n => n.textContent.trim()));
+  ok(sub[1] === "set by the provider", `a built-in has no model control anywhere, and the row says so (got ${JSON.stringify(sub)})`);
 
   // …AND THE SERVER SENDS NONE OF THEM SINCE v0.5.212 (the owner: the pickers should list only the
   // accounts/providers he ADDED), so the fixture above is now a "if one ever arrives" guard and THIS
@@ -530,6 +564,65 @@ const screenRows = p => p.$$eval("#tab-settings .setrow .lbl > div:first-child",
   ok(!bare.some(h => h.includes("Built-in providers")), `no role-only rows ⇒ no built-in section at all, header included (got ${JSON.stringify(bare)})`);
   ok((await p.$$('[data-account^="proxy:"]')).length === 0, "no role-only rows ⇒ no built-in row");
   ok(bare.some(h => h === "Coding failover2 of 2 accounts participate"), `the failover half is untouched by their absence (got ${JSON.stringify(bare)})`);
+  await p.close();
+}
+
+// ---- 11: an account row is a SUBSCRIPTION, and it answers for every dir behind it ---------------
+// The owner's mirror ruling, 2026-08-21 ("yes mirror the slash command settings"): two config dirs on
+// one login are ONE row here, exactly as on the 👤 panel. The failure this must catch is the G5 defect
+// (v0.5.201), which is why the fixture is MIXED: a row whose dirs disagree used to read green with a
+// single Log out aimed at the dir already signed out. It has to say which dir is out, offer that dir
+// its own named Sign in, and still offer the one Log out for the login the row does have.
+// CONTROL: the same row all-in — one Log out, no Sign in, a solid dot — because "names the dir that
+// is out" would pass on a row that always printed a name.
+//
+// Two checks here are NOT falsifiable in a browser and are stated as bookkeeping: the collapse is
+// done server-side, so the pre-change page renders the same one row off this fixture. What the
+// projection does with two dirs is provider-accounts.test.ts's; what the PAGE does with the row it
+// is handed is everything below them, and all of that fails against 0.5.216.
+{
+  const p = await open(true);
+  const load = async dirs => {
+    await p.evaluate(([a, s]) => { window.api = async q => q.includes("/api/provider-accounts") ? a : q.includes("/api/settings") ? s : {}; },
+      [accView([CL("main", dirs, { label: "owner@example.com · Max 20x (main, chat)" }), GW("deepseek", "DeepSeek")]), settingsFixture(true)]);
+    await p.evaluate(() => openAccounts()).catch(() => {});
+    await p.waitForTimeout(300);
+  };
+  const btns = () => p.$$eval('[data-account="claude:main"] .acctactions button', ns => ns.map(n => n.textContent.trim()));
+
+  await load([["main", true], ["chat", false]]);
+  const rows = await p.$$eval('#accbody [data-account^="claude:"]', ns => ns.map(n => n.dataset.account));
+  ok(JSON.stringify(rows) === JSON.stringify(["claude:main"]),
+    `two dirs on one subscription are ONE row (got ${JSON.stringify(rows)})`);
+  const name = await p.$eval('[data-account="claude:main"] .acctname', n => n.textContent.trim()).catch(() => "");
+  ok(name === "owner@example.com · Max 20x (main, chat)", `the row names the subscription AND its dirs (got ${JSON.stringify(name)})`);
+  const meta = await p.$eval('[data-account="claude:main"] .identity .acctmeta', n => n.textContent.trim()).catch(() => "");
+  ok(meta === "Claude · chat signed out", `a MIXED row names the dir that is out, never "Signed in" (got ${JSON.stringify(meta)})`);
+  // The dot is the panel's two colours split, not a third — a flat green or a flat grey would each
+  // be a claim about dirs this row cannot make.
+  const dot = await p.$eval('[data-account="claude:main"] .acctstatus', n => [n.className.trim(), getComputedStyle(n).backgroundImage !== "none"]).catch(() => []);
+  ok(JSON.stringify(dot) === JSON.stringify(["acctstatus mixed", true]), `a MIXED row paints the half dot (got ${JSON.stringify(dot)})`);
+  const mixedBtns = await btns();
+  ok(JSON.stringify(mixedBtns) === JSON.stringify(["Sign in chat", "Forget chat", "Log out"]),
+    `mixed: a NAMED Sign in for the dir that is out, Forget for the non-main dir, one Log out (got ${JSON.stringify(mixedBtns)})`);
+  await p.click('[data-account="claude:main"] [data-acc-signin]', { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(150);
+  const si = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.action === "signin-claude");
+  ok(!!si && si.body.name === "chat", `Sign in posts the DIR it names, not the row (got ${JSON.stringify(si && si.body)})`);
+
+  // CONTROL: every dir in.
+  await load([["main", true], ["chat", true]]);
+  const inBtns = await btns();
+  ok(JSON.stringify(inBtns) === JSON.stringify(["Forget chat", "Log out"]),
+    `all in: one Log out and no Sign in at all (got ${JSON.stringify(inBtns)})`);
+  const inMeta = await p.$eval('[data-account="claude:main"] .identity .acctmeta', n => n.textContent.trim()).catch(() => "");
+  ok(inMeta === "Claude · Signed in", `all in: the plain state line (got ${JSON.stringify(inMeta)})`);
+  const inDot = await p.$eval('[data-account="claude:main"] .acctstatus', n => n.className.trim()).catch(() => "");
+  ok(inDot === "acctstatus ready", `all in: the solid dot (got ${JSON.stringify(inDot)})`);
+  // …and the role picker still sees BOTH dirs, which is the whole reason grouping the rows is safe.
+  const opts = await p.$$eval("#acctdefaults [data-acc-runs-on] option", ns => ns.map(n => n.textContent.trim()));
+  ok(JSON.stringify(opts) === JSON.stringify(["✓ main", "● chat", "● DeepSeek"]),
+    `Runs on still lists every CONFIG DIR behind the collapsed row (got ${JSON.stringify(opts)})`);
   await p.close();
 }
 

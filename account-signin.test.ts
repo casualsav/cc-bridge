@@ -104,9 +104,15 @@ test('CALL SITE: `Sign in` appears on SIGNED-OUT rows only, on both surfaces', (
   expect(rowStart).toBeGreaterThan(0)
   const rowJs = page.slice(rowStart, page.indexOf("+ '</div>'", rowStart))
   expect(rowJs).toContain("data-acc-signin")
-  // Guarded on !a.ready via the ternary's else branch — and Log out stays on the ready branch, so a
-  // row can never offer both.
-  expect(rowJs).toContain('a.ready')
+  // Disjoint BY CONSTRUCTION on this surface too since v0.5.213: the app's row is a SUBSCRIPTION, so
+  // the two buttons come off `planAccountGroup`'s two lists (`acctPlan` mirrors them from `members`)
+  // rather than the branches of one `a.ready` ternary — which could not draw a mixed row at all.
+  expect(rowJs).toContain('plan.signin.map(')
+  expect(rowJs).toContain('plan.logout.length ?')
+  // A sign-in is one login pane per DIR, so the BUTTON carries its own dir and names it whenever the
+  // row stands for more than one — two identically labelled buttons relay two indistinguishable links.
+  expect(rowJs).toContain("'<button data-acc-signin=\"' + esc(n) + '\">'")
+  expect(rowJs).toContain("plan.many ? 'Sign in ' + esc(n) : 'Sign in'")
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))
   // Sign in keeps its words; 🚪 lost them in v0.5.204 (owner: the row's buttons were too big). What

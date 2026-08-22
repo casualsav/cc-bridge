@@ -125,11 +125,20 @@ test('CALL SITE: the mini app has a two-step action and shows the DAEMON\'s text
   expect(at).toBeGreaterThan(0)
   const body = daemon.slice(at, daemon.indexOf("if (kind === 'key')", at))
   expect(body).toContain('await planAccountLogout(acct)')
-  expect(body).toContain('text: logoutConfirmText(plan)')
   expect(body).toContain('await claudeLogout(acct)')
   expect(body).toContain('logDecision({')            // a failed logout leaves a line
-  // A logged-out account cannot be logged out again — the plan would name nothing.
-  expect(body).toContain('if (!accountLoggedIn(acct))')
+  // THE ROW IS A SUBSCRIPTION on this surface too since v0.5.213: `name` is the row's representative
+  // dir and the members are re-derived here from a FRESH chain read on both calls, so a sheet minutes
+  // old can never be what a destructive act is taken from.
+  expect(body).toContain('hopGroupFor(failoverChain(), `claude:${rep}`)')
+  expect(body).toContain('planAccountGroup(')
+  // One confirm block per dir, from the SHARED formatter, because the single tap that follows signs
+  // out all of them — the same text the Telegram twin builds the same way.
+  expect(body).toContain('row.logout.map(n => planAccountLogout(accountByName(n)!))')
+  expect(body).toContain('plans.map(plan => logoutConfirmText(plan)).join')
+  expect(body).toContain('for (const name of row.logout) {')
+  // A row with nothing signed in cannot be logged out — the plan would name nothing.
+  expect(body).toContain('if (!row.logout.length)')
 })
 
 test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
@@ -144,9 +153,13 @@ test('CALL SITE: `main` GETS THE BUTTON on both surfaces', () => {
   const rowStart = page.indexOf("'<div class=\"acctactions\">", fnStart)
   expect(rowStart).toBeGreaterThan(0)
   const rowJs = page.slice(rowStart, page.indexOf("+ '</div>'", rowStart))
-  expect(rowJs).toContain("a.id !== 'claude:main' ? '<button data-acc-rmclaude")   // Forget: main excluded
-  expect(rowJs).toContain("a.ready ? '<button data-acc-logout")                    // Log out: main included
-  expect(rowJs).not.toContain("a.id !== 'claude:main' ? '<button data-acc-logout")
+  // Both lists come off `acctPlan`, which mirrors `planAccountGroup` from the row's `members`:
+  // `forget` is every dir but `main`, `logout` is every dir that HAS a login — so main keeps Log out
+  // and can never be offered Forget, on this surface for the same reason as on Telegram.
+  expect(rowJs).toContain("plan.forget.map(n => '<button data-acc-rmclaude")       // Forget: main excluded
+  expect(rowJs).toContain("plan.logout.length ? '<button data-acc-logout")         // Log out: main included
+  expect(planAccountGroup([{ name: 'main', loggedIn: true }]).logout).toEqual(['main'])
+  expect(rowJs).not.toContain("!== 'claude:main' ? '<button data-acc-logout")
   const kbAt = daemon.indexOf('function accountsPanelKeyboard(')
   const kb = daemon.slice(kbAt, daemon.indexOf('\n}\n', kbAt))   // the function's own body, never a magic length
   // GLYPH-ONLY on the row since v0.5.204 (owner: "just leave the Emojis so that the buttons aren't
@@ -182,7 +195,11 @@ test('CALL SITE: the Telegram row action is the same two steps and the same word
 
 test('CALL SITE: the app repaints instead of raising a success bar', () => {
   const at = page.indexOf("body.querySelectorAll('[data-acc-logout]')")
-  const body = page.slice(at, at + 900)
+  expect(at).toBeGreaterThan(0)
+  // Anchored on the NEXT handler, never `at + 900`: the same magic-length trap two tests above
+  // already document — a comment added inside this block cut the slice short and failed on correct
+  // code.
+  const body = page.slice(at, page.indexOf("body.querySelectorAll('[data-acc-signin]')", at))
   expect(body).toContain("action: 'logout-claude-plan'")
   expect(body).toContain('confirm(p.text)')            // the daemon's text, never the app's own
   expect(body).toContain("action: 'logout-claude'")

@@ -12,14 +12,17 @@ function account(overrides: Partial<ProviderAccountView>): ProviderAccountView {
   return {
     id: 'claude:main', provider: 'claude', providerLabel: 'Claude native', label: 'main',
     auth: 'native', authLabel: 'Native login', ready: true, active: true, order: 0,
-    model: null, models: [], members: ['main'],
+    model: null, models: [], members: [{ name: 'main', ready: true }], state: 'in',
     ...overrides,
   }
 }
 
+// A role picks from `roleOptions` — one row per CONFIG DIR — not from the failover rows, which
+// collapse the dirs of one subscription (v0.5.213). These fixtures are per-dir already, so the two
+// lists are the same here; the projection is where they diverge (provider-accounts.test.ts).
 function view(accounts: ProviderAccountView[]): ProviderAccountsView {
   return {
-    accounts, activeCount: accounts.filter(a => a.active).length,
+    accounts, roleOptions: accounts, activeCount: accounts.filter(a => a.active).length,
     defaults: { chat: 'claude:main', code: 'claude:main' },
     catalog: [], auto: false,
   }

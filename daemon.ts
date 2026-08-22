@@ -85,7 +85,7 @@ import {
   roleAccountIdForHarness, roleAccountKind, type RoleAccountRow,
 } from './role-account.ts'
 import { GATEWAY_PRESETS } from './gateway-presets.ts'
-import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccounts, routeForAccountId, type ProviderAccountsView, type ProviderRoute } from './provider-accounts.ts'
+import { PROVIDER_CATALOG, accountGroupLabel, applyProviderDefaultSelection, projectProviderAccounts, routeForAccountId, type ProviderAccountsView, type ProviderRoute } from './provider-accounts.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -14480,24 +14480,12 @@ const accountGroupKey = (name: string): string => {
 function hopGroupFor(chain: FailoverHop[], key: string, identityOf: (name: string) => string = accountGroupKey): FailoverHop[] {
   return chainGroups(chain, identityOf).find(g => g.hops.some(h => hopKey(h) === key))?.hops ?? []
 }
-// The MINI APP's accounts sheet renders one row per CONFIG DIR — `projectProviderAccounts` keys on
-// the account name and stays that way, because a role binds to a dir and the app is where that is
-// chosen. Telegram's panel renders one row per SUBSCRIPTION. So the app's ranks, its participate
-// count and its Forget plan group by DIR: handing them `accountGroupKey` would have the ± control
-// refuse its own row count, and ↑ move two rows at once, the moment two dirs share a login.
-const webappRowKey = (name: string): string => `claude:${name}`
-// What a Claude row is CALLED. A row is a SUBSCRIPTION, so when it stands for more than one config
-// dir the identity leads and the dirs follow in parentheses: he reads the list to count the accounts
-// he has, and the dirs are what the row's buttons will act on, so neither may be left off. A
-// single-dir row keeps the NAME first (`main — suchag@gmail.com · Max 20x`) — its dir is the row, and
-// a trailing `(main)` would say that twice. An unreadable identity (or one that is just the dir's own
-// name) leaves the names alone, never a dangling separator.
+// What a Claude row is CALLED — the RULE lives in provider-accounts.ts and this is the daemon's
+// binding of it to its own identity reader, so the Telegram panel and the Mini App (which renders
+// the projection's own `label`) cannot name one row two ways.
 function accountRowLabel(hops: FailoverHop[]): string {
   const names = hops.map(h => h.account || '').filter(Boolean)
-  const first = names[0] || ''
-  const identity = accountIdentityLabel(first)
-  if (names.length > 1) return identity ? `${identity} (${names.join(', ')})` : names.join(', ')
-  return identity && identity !== first ? `${first} — ${identity}` : first
+  return accountGroupLabel(names, accountIdentityLabel(names[0] || ''))
 }
 
 // ➕ 🌐 sub-panel: pick a popular provider (base URL + model pre-filled → straight to the key) or
@@ -23356,6 +23344,11 @@ async function buildProviderAccountsView(role: SessionRole, models?: Record<stri
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
     ...(models ? { models } : {}), auto: prefs.limitFailover === true,
     labelOf: accountIdentityLabel,
+    // ONE grouping function for both surfaces (owner's mirror ruling, 2026-08-21). Telegram's panel
+    // has always collapsed the config dirs of one subscription with this; handing the projection the
+    // app's old per-dir key instead is what let the two screens count his accounts differently. The
+    // per-dir list a ROLE needs did not disappear with it — it is the view's `roleOptions`.
+    groupOf: accountGroupKey,
   })
   // ✳️ Codex model/effort ride with THIS panel because that is where /settings keeps them — the
   // failover half of 👤 Accounts — and the 1:1 parity ruling took them off the app's settings root.
@@ -23530,12 +23523,16 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   const chainRole: SessionRole = action.role === 'chat' ? 'chat' : 'code'
   const roleChain = chainRole === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
   const chain = resolveChain(roleChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
-  const groups = chainGroups(chain, webappRowKey)
+  // The app's rows ARE the panel's rows since v0.5.213, so its ranks, its participate count and its
+  // Forget plan group by SUBSCRIPTION too. Keying these by dir while the app renders subscriptions
+  // is the silent-wrong-answer pair: ± refuses the app's own row count (it sends rows, the daemon
+  // counts groups) and ↑ moves two rows at once.
+  const groups = chainGroups(chain, accountGroupKey)
   if (kind === 'move') {
     const id = String(action.id ?? '')
     const dir = action.dir === 'up' ? 'up' : action.dir === 'down' ? 'down' : null
     if (!dir || !chain.some(h => hopKey(h) === id)) return { error: 'bad account or direction' }
-    const moved = moveHopGroup(chain, id, dir, webappRowKey)
+    const moved = moveHopGroup(chain, id, dir, accountGroupKey)
     if (chainRole === 'chat') prefs.chatFailoverChain = moved; else prefs.codeFailoverChain = moved
     saveAccess(prefs); return { ok: true }
   }
@@ -23607,7 +23604,10 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   // name one set while the removal takes another.
   if (kind === 'remove-claude-plan' || kind === 'remove-claude') {
     const rep = String(action.name ?? '')
-    const group = hopGroupFor(failoverChain(), `claude:${rep}`, webappRowKey)
+    // ONE CONFIG DIR per act, and the button is what says which: the app's row is a subscription now
+    // and draws a 🗑 per dir behind it, so a plan scoped to the whole group would unregister dirs the
+    // tapped button never named. (Telegram's 🗑 is the group act and lives in its own handler.)
+    const group = hopGroupFor(failoverChain(), `claude:${rep}`).filter(h => h.account === rep)
     const members = group.map(h => h.account!).filter(Boolean)
     if (!members.length) return { error: 'unknown account' }
     // main and any account a chat lane is running on are never removable — the same protection the
@@ -23632,28 +23632,54 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   // box. `main` gets it — it is excluded from Remove because unregistering it would break account
   // resolution, and that reasoning does not carry: logging main out breaks nothing structural, its
   // row stays, and withholding the button here would recreate the exact gap being closed.
+  //
+  // THE ROW IS A SUBSCRIPTION on this surface too since v0.5.213, so `name` is the row's
+  // REPRESENTATIVE dir and the members are re-derived HERE from a fresh chain read on BOTH calls —
+  // the browser may be showing a sheet minutes old, and a destructive act may never be taken from
+  // what it happened to say then. The confirm is one block per dir, concatenated, because the single
+  // tap that follows signs out all of them: the Telegram twin above builds the same text the same
+  // way, and that is the whole of "the app shows the daemon's words, never its own".
   if (kind === 'logout-claude-plan' || kind === 'logout-claude') {
-    const name = String(action.name ?? '')
-    const acct = accountByName(name)
-    if (!acct) return { error: 'unknown account' }
-    if (!accountLoggedIn(acct)) return { error: `${name} is not logged in` }
-    const plan = await planAccountLogout(acct)
-    if (kind === 'logout-claude-plan') return { ok: true, plan, text: logoutConfirmText(plan) }
-    const r = await claudeLogout(acct)
-    if (r.kind === 'failed') {
-      logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
-      return { error: r.error }
+    const rep = String(action.name ?? '')
+    const members = hopGroupFor(failoverChain(), `claude:${rep}`).map(h => h.account!).filter(Boolean)
+    const accts = (members.length ? members : [rep]).map(accountByName).filter((x): x is Account => !!x)
+    if (!accts.length) return { error: 'unknown account' }
+    const row = planAccountGroup(accts.map(x => ({ name: x.name, loggedIn: accountLoggedIn(x) })))
+    if (!row.logout.length) return { error: `${row.signin.join(', ') || rep} is not logged in` }
+    if (kind === 'logout-claude-plan') {
+      const plans = await Promise.all(row.logout.map(n => planAccountLogout(accountByName(n)!)))
+      return { ok: true, plan: plans[0]!, plans, text: plans.map(plan => logoutConfirmText(plan)).join('\n\n') }
     }
-    // `partial` returns ok, deliberately: the app's next act is a repaint, and the row it repaints
-    // has already gone grey. Returning `error` here would leave a red bar over a signed-out row and
-    // send him looking for a logout that already happened.
-    if (r.kind === 'partial') {
-      // Its own named line, not logDecision — see the Telegram twin above.
-      process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
-      return { ok: true, text: logoutPartialText(name, r.error), partial: true }
+    // Every dir gets its own outcome line: one of them failing says nothing about the others, and a
+    // reply carrying only the first would be the G5 defect wearing the result's clothes. `error` is
+    // kept for the case where NOTHING was signed out — the red bar has something true to say then.
+    const said: string[] = []
+    let ended = 0, partial = false
+    for (const name of row.logout) {
+      const acct = accountByName(name)!
+      const plan = await planAccountLogout(acct)
+      const r = await claudeLogout(acct)
+      if (r.kind === 'failed') {
+        logDecision({ family: 'ctl', what: `logout @${name}`, target: name, pane: null, decision: 'REFUSED', predicate: `claude auth logout failed, credentials intact: ${r.error}` })
+        said.push(`Couldn't log out of ${name} — ${r.error}`)
+        continue
+      }
+      ended++
+      // `partial` is NOT a failure: the file is already gone, so the row the app repaints has already
+      // gone grey. Returning `error` over it would leave a red bar above a signed-out row and send
+      // him looking for a logout that already happened.
+      if (r.kind === 'partial') {
+        partial = true
+        // Its own named line, not logDecision — see the Telegram twin above.
+        process.stderr.write(`daemon: logout PARTIAL ${name} (${acct.configDir}) — credentials deleted, CLI exited non-zero, revoke unverified: ${r.error}\n`)
+        said.push(logoutPartialText(name, r.error))
+        continue
+      }
+      process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
+      said.push(logoutResultText(name, r.said))
     }
-    process.stderr.write(`daemon: logged out account ${name} (${acct.configDir}) — ${mcpLogCount(plan.mcp)} mcp login(s) and ${plan.sessions.length} live session(s) affected; CLI said: ${r.said}\n`)
-    return { ok: true, text: logoutResultText(name, r.said) }
+    if (!ended) return { error: said.join('\n\n') }
+    return { ok: true, text: said.join('\n\n'), ...(partial ? { partial: true } : {}) }
   }
   // 🔑 Sign in — the mini app's half of the same single-step action. One step, unlike the logout
   // above and for the opposite reason: nothing is destroyed, and the login screen is the recovery

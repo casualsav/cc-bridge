@@ -135,16 +135,19 @@ test('CALL SITE: 🚪 ITERATES the plan\'s logout list, re-derived at tap time',
   expect(handler).toContain('logoutConfirmText(plan)')
 })
 
-test('CALL SITE: the app ranks by CONFIG DIR — its rows are dirs, so its ± and ↑↓ must be too', () => {
-  // The two surfaces group differently ON PURPOSE from v0.5.212: Telegram's row is a subscription,
-  // the app's is a config dir (that is where a ROLE binds one). Sharing `accountGroupKey` here has
-  // the ± control refuse the app's own row count — it sends rows and the daemon counts groups — and
-  // ↑ move two rows at once, the first time two dirs share a login. Both are silent wrong answers.
+test('CALL SITE: the app ranks by SUBSCRIPTION — its rows are the panel\'s rows (v0.5.213)', () => {
+  // The two surfaces grouped differently for one release (v0.5.212) because the app's row was a
+  // config dir. The owner's mirror ruling — "yes mirror the slash command settings" — makes both
+  // rows a subscription, so the arithmetic has to follow: the ± control counts the rows the app
+  // renders and the daemon counts groups, so a per-dir key here refuses the app's own count, and ↑
+  // would move two rows at once. The per-dir list a ROLE needs did not go with it; it is the view's
+  // `roleOptions`, which is why the regrouping costs the role picker nothing.
   const app = body('async function webappProviderAccountAction(', '\n}\n')
-  expect(app).toContain('chainGroups(chain, webappRowKey)')
-  expect(app).toContain('moveHopGroup(chain, id, dir, webappRowKey)')
-  expect(app).toContain('hopGroupFor(failoverChain(), `claude:${rep}`, webappRowKey)')
-  expect(app).not.toContain('accountGroupKey')
+  expect(app).toContain('chainGroups(chain, accountGroupKey)')
+  expect(app).toContain('moveHopGroup(chain, id, dir, accountGroupKey)')
+  // The dir-keyed helper is GONE, not merely unused: a second grouping function sitting beside the
+  // real one is the next reader's obvious fix for a row that "looks wrong".
+  expect(daemon).not.toContain('webappRowKey')
 })
 
 test('CALL SITE: the role/app account view offers only what he ADDED — no built-in provider rows', () => {

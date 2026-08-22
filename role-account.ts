@@ -43,8 +43,11 @@ export function roleAccountKind(id: string): RoleAccountKind | null {
 // view carries. Since v0.5.212 that is the accounts and providers the owner ADDED and nothing else
 // (his ruling, 2026-08-21) — the proxy built-ins are no longer projected, so the ○ rows left are his
 // own signed-out accounts and unkeyed gateways, which rule 2 above is what makes safe to show.
+// A role binds to a CONFIG DIR, so the list is `roleOptions` — one row per dir — and not `accounts`,
+// which collapses the dirs of one subscription into a single failover row (v0.5.213). Reading
+// `accounts` here would offer `main` and no way at all to say `chat`.
 export function roleAccountOptions(view: ProviderAccountsView): RoleAccountRow[] {
-  const rows: RoleAccountRow[] = view.accounts.map(account => ({
+  const rows: RoleAccountRow[] = view.roleOptions.map(account => ({
     id: account.id,
     kind: roleAccountKind(account.id) ?? 'claude',
     label: roleRowLabel(account),
@@ -77,7 +80,9 @@ function roleRowLabel(account: ProviderAccountView): string {
 // at, so a role bound to `chat` from the mini app made the panel say "Claude (native)" — two
 // surfaces, two answers, one question (v0.5.211).
 export function roleAccountLabel(view: ProviderAccountsView, id: string): string {
-  const row = view.accounts.find(account => account.id === id)
+  // roleOptions first (a role's own id space), then the failover rows — a proxy built-in is a role
+  // TARGET that never appears in the chain, so it can only be named from there.
+  const row = view.roleOptions.find(account => account.id === id) ?? view.accounts.find(account => account.id === id)
   if (row) return roleRowLabel(row)
   // An id for something this box no longer has (a forgotten account, a removed gateway) still names
   // itself in plain words — the role is genuinely pointing there, and printing the raw id would read

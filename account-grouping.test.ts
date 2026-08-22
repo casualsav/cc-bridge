@@ -146,7 +146,10 @@ describe('projectProviderAccounts', () => {
       claudeAccounts: [{ name: 'main', ready: true }, { name: 'chat', ready: true }],
       gateways: {}, gatewayReady: {}, chain: CHAIN.slice(0, 2),
     })
-    expect(bare.accounts.map(a => a.label)).toEqual(['Claude · main', 'Claude · chat'])
+    // ONE label rule for both surfaces since v0.5.213 (`accountGroupLabel`), so the bare form is the
+    // Telegram panel's: the name alone. The old `Claude · main` was this projection's own second
+    // answer, and the row's meta line says "Claude · Signed in" right under it anyway.
+    expect(bare.accounts.map(a => a.label)).toEqual(['main', 'chat'])
     for (const a of bare.accounts) expect(a.label).not.toContain('—')
   })
 })

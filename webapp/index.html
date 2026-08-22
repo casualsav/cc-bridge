@@ -533,6 +533,12 @@
   .acctname { font-weight:var(--w-semi); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .acctstatus { width:8px; height:8px; border-radius:50%; background:#6f7782; flex:none; }
   .acctstatus.ready { background:#35b56a; }
+  /* A row standing for several config dirs, some signed in and some out, is HALF the disc it would
+     be if they agreed — the two colours already on this dot, split, and never a third. A `mixed` row
+     that painted one flat colour is the G5 defect (v0.5.201) drawn: green says "every dir here can
+     serve a turn" and grey says "none can", and neither is true of this one. The meta line beside it
+     names which dirs are out. */
+  .acctstatus.mixed { background:linear-gradient(90deg, #35b56a 50%, #6f7782 50%); }
   .acctmoves { display:flex; gap:4px; }
   .acctmoves button, .acctactions button, .acctadd { border:0; border-radius:var(--r-sm); background:var(--bg); color:var(--text); padding:6px 9px; }
   .acctactions { display:flex; flex-wrap:wrap; gap:6px; margin-top:var(--sp-2); }
@@ -2815,8 +2821,29 @@ async function openAccounts() {
     providerFormChanged(); openSheet("accounts");
   } catch {}
 }
-function accountById(id) { return (PROVIDER_ACCOUNTS?.accounts || []).find(a => a.id === id); }
+// A ROLE's id space is `roleOptions` — one entry per config dir — while `accounts` is the failover
+// list, which collapses the dirs of one subscription into a single row. `claude:chat` is a legal role
+// default and is NOT an account row, so a lookup that read only `accounts` would render the chat
+// role's account as "Not set" (and the built-in providers, which are role targets and never hops,
+// live only in `accounts`). Both lists, one lookup.
+function accountById(id) {
+  const v = PROVIDER_ACCOUNTS; if (!v) return undefined;
+  return (v.roleOptions || []).find(a => a.id === id) || (v.accounts || []).find(a => a.id === id);
+}
 function accountLabel(id) { const a = accountById(id); return a ? a.label : "Not set"; }
+// A row's buttons, in `planAccountGroup`'s own terms (account-group.ts): 🚪 ends every login the row
+// has, 🔑 offers one per dir that is out, 🗑 unregisters every dir but `main`. Derived from
+// `members`, which carries each dir's OWN state, so no button can act on a dir the row already
+// signed out — that "acts on the first member" is the defect grouping was withdrawn over.
+function acctPlan(a) {
+  const members = a.members || [];
+  return {
+    logout: members.filter(m => m.ready).map(m => m.name),
+    signin: members.filter(m => !m.ready).map(m => m.name),
+    forget: members.map(m => m.name).filter(n => n !== 'main'),
+    many: members.length > 1,
+  };
+}
 function renderAccounts() {
   const v = PROVIDER_ACCOUNTS; if (!v) return;
   const body = $("accbody"), all = v.accounts || [];
@@ -2834,57 +2861,65 @@ function renderAccounts() {
     // divider is failover rank. Naming the cut-off keeps them from reading as one thing.
     if (i === v.activeCount) html += '<div class="acctdivider">Below the failover cut-off — kept, never auto-selected</div>';
     const models = (a.models || []).length ? a.models : [a.model].filter(Boolean);
-    // The dot means ONE thing — a credentials file exists for this config dir — so the words say
-    // that and nothing more. "Needs attention" named no cause and offered no next step, which made
-    // an ordinary signed-out account look broken; a Claude row is signed in or signed out, and a
-    // gateway is keyed or not. The subscription already rides in the label, so repeating
+    // The dot and the words mean ONE thing — can the dirs behind this row serve a turn — so the line
+    // says that and nothing more. "Needs attention" named no cause and offered no next step, which
+    // made an ordinary signed-out account look broken. A Claude row is a SUBSCRIPTION, so it states
+    // the SET's state and NAMES the dirs that are out, the exact line the Telegram panel prints;
+    // rounding a mixed row to "Signed in" is the G5 defect (v0.5.201) and is why `state` is a third
+    // value rather than a boolean. The subscription already rides in the label, so repeating
     // "Claude native · Native login" here was two more names for the same thing.
+    //
+    // `members` is a CONFIG DIR list, which only a Claude row has: a gateway's readiness is a key,
+    // and its buttons are Key/Forget. Everything the plan drives below is therefore claude-only —
+    // an ungated plan puts "Sign in deepseek" on a provider row that has no login to reach.
+    const isClaude = a.id.startsWith('claude:');
+    const plan = isClaude ? acctPlan(a) : { logout: [], signin: [], forget: [], many: false };
     const meta = a.id.startsWith('claude:')
-      ? 'Claude · ' + (a.ready ? 'Signed in' : 'Signed out')
+      ? 'Claude · ' + (a.state === 'in' ? 'Signed in' : a.state === 'out' ? 'Signed out' : esc(plan.signin.join(', ')) + ' signed out')
       : esc(a.providerLabel) + ' · ' + esc(a.authLabel) + ' · ' + (a.ready ? 'Ready' : 'Needs a key');
-    html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + meta + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
+    html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.state === 'in' ? 'ready' : a.state === 'mixed' ? 'mixed' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + meta + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
     if (models.length) html += '<select class="seg" data-acc-model="1" style="width:100%;margin-top:8px">' + models.map(m => '<option value="' + esc(m) + '" ' + (m === a.model ? 'selected' : '') + '>' + esc(m.replace(/\[1m\]$/, '')) + '</option>').join('') + '</select>';
-    // THE ROW'S ACTIONS FOLLOW ITS STATE. There is no per-row Launch any more: the launcher concept
-    // is retired whole (the owner, 2026-08-21 — "I don't need a 🚀 button for each account"), not
-    // relocated, so new sessions come from the `+` FAB and `tg spawn` where they always belonged.
-    // A SIGNED-OUT row gets exactly one action, `Sign in`, which is the way back in — without it,
-    // removing Launch would leave the app with no path out of a logout at all.
+    // THE ROW'S ACTIONS FOLLOW ITS STATE, and each acts on the SET the plan names, never on the first
+    // member. There is no per-row Launch: the launcher concept is retired whole (the owner,
+    // 2026-08-21 — "I don't need a 🚀 button for each account"), so new sessions come from the `+` FAB
+    // and `tg spawn` where they always belonged, and `Sign in` is the way back out of a logout.
     // 🔑 Key is write-only: it takes a new key and never renders the old one.
+    //
+    // And there is no per-row "Default for: Chat / Coding" any more: a row stands for a subscription
+    // and a role binds to a config DIR, so those buttons could not name what they would write. The
+    // role's account moved to the "Runs on" select under its own tab, which is where the Telegram
+    // panel keeps it too (the 💬/🧑‍💻 doors under the Defaults block).
     html += '<div class="acctactions">'
-      // Signed out ⇒ no role dials: making an account the chat/coding default while it cannot serve
-      // a turn is a setting that reads as broken. Sign in first, then choose.
-      + (a.ready
-          ? '<span class="acctmeta" style="align-self:center;margin-right:2px">Default for:</span>'
-            + '<button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button>'
-            + '<button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>'
-          : (a.id.startsWith('claude:') ? '<button data-acc-signin="1">Sign in</button>' : ''))
       + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Forget</button>' : '')
+      // A sign-in is one headless pane PER DIR, so a row with more than one dir out gets one NAMED
+      // button each — two identically labelled buttons relay two login links he cannot tell apart.
+      + plan.signin.map(n => '<button data-acc-signin="' + esc(n) + '">' + (plan.many ? 'Sign in ' + esc(n) : 'Sign in') + '</button>').join('')
       // `Forget` unregisters the config dir and says the files stay; `Log out` ENDS the login and
       // cannot be undone. They were both called Remove-ish and ranked backwards — the smaller act
       // sounded bigger. Different acts, different words, and the irreversible one keeps his.
-      + (a.id.startsWith('claude:') && a.id !== 'claude:main' ? '<button data-acc-rmclaude="1">Forget</button>' : '')
-      + (a.id.startsWith('claude:') && a.ready ? '<button data-acc-logout="1">Log out</button>' : '')
+      + plan.forget.map(n => '<button data-acc-rmclaude="' + esc(n) + '">' + (plan.many ? 'Forget ' + esc(n) : 'Forget') + '</button>').join('')
+      // ONE Log out for the row — it ends every login behind it in one confirmed act, and the
+      // daemon's confirm text names each dir. `main` gets it: its exclusion from Forget is structural
+      // (unregistering breaks account resolution) and does not carry to ending a login.
+      + (plan.logout.length ? '<button data-acc-logout="1">Log out</button>' : '')
       + '</div>'
       // The OTHER way in, which he already had and could not see: `/login` in a session's own chat
       // has always been allowed (slash-policy leaves it out of BLOCKED deliberately) and v0.5.197
-      // fixed its surfaceless case. One line, signed-out rows only.
-      + (a.id.startsWith('claude:') && !a.ready ? '<div class="acctmeta" style="margin-top:6px">…or run /login in a session already on this account.</div>' : '')
+      // fixed its surfaceless case. One line, whenever any dir on the row is out.
+      + (plan.signin.length ? '<div class="acctmeta" style="margin-top:6px">…or run /login in a session already on this account.</div>' : '')
       + '</div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
   // The built-in providers, in their own section because they answer a different question: which
   // account a ROLE runs on, never which one the chain falls through to. So no ranks, no model
-  // select (they carry none) and no Key/Forget — nothing here is registered or removable. The one
-  // control is the role pair, and it obeys the same signed-out rule every other row does.
+  // select (they carry none) and no Key/Forget — nothing here is registered or removable. They are
+  // STATE ONLY since v0.5.213: choosing what a role runs on is the "Runs on" select under the role's
+  // own tab, one control for every candidate, and a per-row pair here would be a second writer of
+  // the same setting sitting a screen away from the block that names it.
   if (builtins.length) {
     html += '<div class="accttop"><div class="copy"><div>Built-in providers</div><div class="acctmeta">Role targets only — not part of failover</div></div></div>';
     for (const a of builtins) {
       html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + (a.ready ? 'Signed in' : 'Needs sign-in') + '</div></div></div>'
-        + (a.ready
-            ? '<div class="acctactions"><span class="acctmeta" style="align-self:center;margin-right:2px">Default for:</span>'
-              + '<button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button>'
-              + '<button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button></div>'
-            : '')
         + '</div>';
     }
   }
@@ -2899,6 +2934,27 @@ function renderAccounts() {
     ? ['chatModel', 'chatEffort', 'chatMode']
     : ['spawnModel', 'spawnEffort', 'spawnMode', 'spawnAuto', 'fableForAgents'];
   const defs = document.createElement('div'); defs.id = 'acctdefaults';
+  // WHICH ACCOUNT THE ROLE RUNS ON, at the head of its own dials — this is the app's 💬 Chat /
+  // 🧑‍💻 Coding picker, and it mirrors the Telegram panel's two role doors sitting directly under the
+  // Defaults block they edit. The options are `roleOptions`, one per CONFIG DIR plus the gateways,
+  // because that is the id space a role default is stored in (`claude:chat`); the failover rows above
+  // are subscriptions and could not name one. Same POST the retired per-row buttons sent.
+  {
+    const opts = (v.roleOptions || []).slice();
+    // A default this box no longer offers — a forgotten dir, a removed gateway, a built-in from
+    // before v0.5.212 — still names itself rather than silently selecting somebody else's row.
+    if (defAcc && !opts.some(o => o.id === defAcc)) opts.unshift({ id: defAcc, label: accountLabel(defAcc), ready: true });
+    const r = document.createElement('div'); r.className = 'setrow';
+    r.innerHTML = '<div class="lbl"><div>Runs on</div><div class="sub">' + (role === 'chat' ? 'the chat agent' : 'coding sessions') + '</div></div>'
+      + '<select class="seg" data-acc-runs-on="1" ' + (SETTINGS_WRITE ? '' : 'disabled') + '>'
+      + opts.map(o => '<option value="' + esc(o.id) + '"' + (o.id === defAcc ? ' selected' : '') + '>'
+          // ● / ○ is the picker's own glyph on Telegram (roleRowGlyph): can this serve a turn right
+          // now, or not. ✓ marks the current pick, which the closed select shows on its own — the
+          // mark is for the open list, where every row otherwise reads the same.
+          + (o.id === defAcc ? '✓ ' : o.ready ? '● ' : '○ ') + esc(o.label) + '</option>').join('')
+      + '</select>';
+    defs.appendChild(r);
+  }
   for (const key of dialKeys) {
     const s = (ACCOUNT_SETTINGS || {})[key]; if (!s) continue;
     // A GATEWAY account's model control is the provider row's own select, and it is the only one:
@@ -2919,11 +2975,13 @@ function renderAccounts() {
     defs.appendChild(settingRow(key, SETTING_NAMES[key] || key, s, SETTINGS_WRITE && s.editable, again));
   }
   // Nothing served ⇒ nothing drawn, header included: a title over an empty block is a promise the
-  // payload did not make.
+  // payload did not make. (The Runs-on row above is always served, so the block always has one.)
   if (defs.childElementCount) {
     const head = document.createElement('div'); head.className = 'accttop';
-    head.innerHTML = '<div class="copy"><div>' + (role === 'chat' ? 'Chat agent' : 'Coding agent') + ' defaults</div>'
-      + '<div class="acctmeta">Runs on ' + esc(accountLabel(defAcc)) + '</div></div>';
+    // No "Runs on X" line here any more — the row directly beneath it says it, and is the control
+    // that changes it. Two statements of one fact, one of them stale-able, is what this sheet exists
+    // to stop.
+    head.innerHTML = '<div class="copy"><div>' + (role === 'chat' ? 'Chat agent' : 'Coding agent') + ' defaults</div></div>';
     defs.insertBefore(head, defs.firstChild);
     body.querySelector('.acctroles').insertAdjacentElement('afterend', defs);
   }
@@ -2938,14 +2996,18 @@ function renderAccounts() {
   }
   body.querySelectorAll('[data-acc-role]').forEach(b => b.onclick = async () => { ACCOUNT_ROLE = b.dataset.accRole; await reloadAccounts(); });
   body.querySelectorAll('[data-acc-move]').forEach(b => b.onclick = () => accountAction({ action:'move', id:b.closest('[data-account]').dataset.account, dir:b.dataset.accMove }));
-  body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
+  // The role's account. Same `{action:'default'}` POST the retired per-row buttons sent — and so the
+  // same `selectRoleAccount` core Telegram's `rp:set` runs, live chat switch included.
+  defs.querySelector('[data-acc-runs-on]')?.addEventListener('change', e => accountAction({ action:'default', role, id:e.target.value }));
   body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
   body.querySelectorAll('[data-acc-remove]').forEach(b => b.onclick = () => { if (confirm('Remove this provider account? Credentials stay out of the browser and its saved key is no longer used.')) accountAction({ action:'remove', id:b.closest('[data-account]').dataset.account }); });
   // The two-step Claude-account removal: ask the daemon what would go, show THAT, then confirm. The
   // app never computes the doomed list — a confirm naming one set while the removal takes another is
   // exactly the failure a two-step flow exists to prevent.
   body.querySelectorAll('[data-acc-rmclaude]').forEach(b => b.onclick = async () => {
-    const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
+    // The BUTTON names its config dir, not the row: a row can stand for several, and 🗑 unregisters
+    // one at a time (`main` is never among them).
+    const name = b.dataset.accRmclaude;
     const p = await writeOp('/api/provider-accounts/action', { action: 'remove-claude-plan', name });
     if (!p) return;
     const dirs = p.plan.doomed.map(d => d.name + ' — ' + d.configDir).join('\n');
@@ -2957,6 +3019,9 @@ function renderAccounts() {
   // log-out ends — whose login, the MCP tokens in the same file, the live sessions on it — and the
   // app shows THAT text rather than composing its own.
   body.querySelectorAll('[data-acc-logout]').forEach(b => b.onclick = async () => {
+    // The row's REPRESENTATIVE dir. The daemon re-derives the rest of the subscription from a fresh
+    // chain read on both calls, so the sheet's age can never decide what gets signed out, and the
+    // confirm it hands back is one block per dir.
     const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
     const p = await writeOp('/api/provider-accounts/action', { action: 'logout-claude-plan', name });
     if (!p || !confirm(p.text)) return;
@@ -2976,7 +3041,9 @@ function renderAccounts() {
   // different surface entirely. That is exactly `showOk`'s one live precedent (the dial's
   // "… requested…"): it reports a REQUEST, and the outcome reports itself later.
   body.querySelectorAll('[data-acc-signin]').forEach(b => b.onclick = async () => {
-    const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
+    // One login pane per DIR, so the button carries the dir it opens — a row's representative would
+    // sign the wrong one in the moment two config dirs share a subscription.
+    const name = b.dataset.accSignin;
     const d = await writeOp('/api/provider-accounts/action', { action: 'signin-claude', name });
     if (d) showOk(d.text);
   });
