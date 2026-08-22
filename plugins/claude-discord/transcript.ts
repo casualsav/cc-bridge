@@ -82,7 +82,7 @@ function isMainAssistantText(e: Entry): boolean {
 // live mirror card and opened a second one for the same turn (the split-card bug) — so every
 // turn-anchor scan gates on this instead.
 function isRealUserText(e: Entry): boolean {
-  return e.type === 'user' && !e.isSidechain && !e.isMeta && textOf(e.message?.content).trim() !== ''
+  return e.type === 'user' && !e.isSidechain && !e.isMeta && !e.isCompactSummary && textOf(e.message?.content).trim() !== ''
 }
 
 // A CONTINUATION WAKE: the harness re-invoking the model when a background task it started finishes.
